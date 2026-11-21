@@ -76,7 +76,7 @@ threads into a fix round (the factory's own comments are ignored).
 | changes requested | Waiting for a fixer (auto-fix runs it unless the round limit is reached) |
 | fixing | Fixer triages review findings, failing CI, merge conflicts, unresolved PR threads and your feedback (VALID / PARTIAL / INVALID / NEEDS-HUMAN), fixes what is real with tests. Its per-item replies are posted on the PR; human threads are never auto-resolved. When a PR has nothing to act on, no agent is started |
 | approved | Reviewer would merge it. PR marked ready. Dependents start |
-| merged | Seen by Sync PRs (automatic every 5 min). Unblocks dependents |
+| merged | Seen by Sync PRs (automatic every 5 min) or marked by you. Unblocks dependents. Its local worktree is removed, and its local branch too once no unmerged ticket is stacked on it |
 | needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row |
 
 Dependent tickets are **stacked**: a ticket whose dependency isn't merged yet
@@ -93,8 +93,8 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
 - **`~/.software-factory/initiatives/<slug>/`**: the files agents read and write
   (`brief.md`, `plan/round-N/plan.md|plan.json|plan-review.md`,
   `tickets/<nn>-<key>/ticket.md`, `round-N/build.md|checks.md|review.md|fix.md`).
-- **`~/.software-factory/worktrees/`**: one git worktree per ticket. Your own
-  checkout is never modified.
+- **`~/.software-factory/worktrees/`**: one git worktree per ticket, removed
+  once the ticket is merged. Your own checkout is never modified.
 - **`agents/*.md`**: the role instructions for planner, plan reviewer, executor,
   reviewer, fixer and advisor. Edit them to change how the factory thinks.
 

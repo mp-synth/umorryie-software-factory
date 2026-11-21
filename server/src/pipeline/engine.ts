@@ -24,6 +24,7 @@ import {
   writePlanMd,
   writeTicket,
 } from './files.ts';
+import { mergedTicketCleanups } from './cleanup.ts';
 import { ticketLabel } from './labels.ts';
 import { pullRequestText } from './pull-request.ts';
 import { firstLine, section, validatePlan } from './plan.ts';
@@ -1256,10 +1257,28 @@ export async function resetTicket(ticketId: string): Promise<void> {
   await refreshInitiativeStatus(init.id);
 }
 
+async function cleanUpMergedTickets(initiativeId: string): Promise<void> {
+  const init = await mustInitiative(initiativeId);
+  const project = await mustProject(init.projectId);
+  for (const { ticket, branchToDelete } of mergedTicketCleanups(await repo.listTickets(init.id))) {
+    await cancelActive({ initiativeId: init.id, ticketId: ticket.id });
+    await gitx.removeWorktree(project.repoPath, ticket.worktreePath, branchToDelete);
+    if (!ticket.worktreePath) continue;
+    await repo.updateTicket(ticket.id, { worktreePath: null });
+    await systemMessage(
+      { initiativeId: init.id, ticketId: ticket.id },
+      branchToDelete
+        ? `Removed the local worktree and branch of ${ticketLabel(ticket)}.`
+        : `Removed the local worktree of ${ticketLabel(ticket)}. Its branch stays until the tickets built on it are merged.`,
+    );
+  }
+}
+
 export async function setTicketStatus(ticketId: string, status: 'approved' | 'merged' | 'todo'): Promise<void> {
   const t = await mustTicket(ticketId);
   await repo.updateTicket(t.id, { status, blockedReason: null, ...(status === 'approved' ? { lastVerdict: 'APPROVE' } : {}) });
   await repo.addMessage({ initiativeId: t.initiativeId, ticketId: t.id, author: 'human', kind: 'event', body: `Marked ${ticketLabel(t)} as ${status}.` });
+  if (status === 'merged') await cleanUpMergedTickets(t.initiativeId);
   await refreshInitiativeStatus(t.initiativeId);
   await startReadyTickets(t.initiativeId);
 }
@@ -1340,6 +1359,7 @@ export async function syncPrs(initiativeId: string): Promise<number> {
       }
     }
   }
+  await cleanUpMergedTickets(initiativeId);
   await refreshInitiativeStatus(initiativeId);
   await startReadyTickets(initiativeId);
   return changed;
@@ -1363,4 +1383,7 @@ export async function recoverOnStartup(): Promise<void> {
     await repo.addRunEvent(r.id, 'system', { text: 'Interrupted: the factory server stopped while this was running.' });
   }
   if (stale.length) console.log(`[recover] marked ${stale.length} run(s) interrupted`);
+  const withMergedWorktrees = await sql<{ id: string }[]>`
+    select distinct initiative_id as id from tickets where status = 'merged' and worktree_path is not null`;
+  for (const r of withMergedWorktrees) await cleanUpMergedTickets(r.id).catch((e) => console.warn('[recover]', e.message));
 }
