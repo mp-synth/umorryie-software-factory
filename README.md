@@ -47,6 +47,9 @@ What a run looks like (the demo in `~/.software-factory/demo/todo-app`): a
 review → approval → 4 builds (two in parallel, stacked) → checks → 4 reviews,
 including one fresh executor resolving a merge conflict between two sibling
 tickets and one fix round from owner feedback, for about $2.50 of agent time.
+On a GitHub repo the same flow opens stacked draft PRs, posts each review on
+its PR, marks PRs ready on APPROVE, and **Fix all PRs** turns unresolved review
+threads into a fix round (the factory's own comments are ignored).
 
 ## What you can do in the UI
 
@@ -71,7 +74,7 @@ tickets and one fix round from owner feedback, for about $2.50 of agent time.
 | built | Checked and waiting for review (when auto-review is off) |
 | in review | A fresh reviewer reads `git diff <base>...HEAD`, verifies each finding, answers APPROVE or CHANGES |
 | changes requested | Waiting for a fixer (auto-fix runs it unless the round limit is reached) |
-| fixing | Fixer triages review findings, failing CI, merge conflicts, unresolved PR threads and your feedback (VALID / PARTIAL / INVALID / NEEDS-HUMAN), fixes what is real with tests |
+| fixing | Fixer triages review findings, failing CI, merge conflicts, unresolved PR threads and your feedback (VALID / PARTIAL / INVALID / NEEDS-HUMAN), fixes what is real with tests. Its per-item replies are posted on the PR; human threads are never auto-resolved. When a PR has nothing to act on, no agent is started |
 | approved | Reviewer would merge it. PR marked ready. Dependents start |
 | merged | Seen by Sync PRs (automatic every 5 min). Unblocks dependents |
 | needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row |

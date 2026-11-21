@@ -383,6 +383,7 @@ async function revertAfterStop(run: Run, reason: string | null): Promise<void> {
   const status = reason ? 'blocked' : resting[run.kind] ?? 'todo';
   await repo.updateTicket(t.id, { status, blockedReason: reason });
   if (reason) await systemMessage(run, `${ticketLabel(t)}: ${reason}`);
+  await refreshInitiativeStatus(run.initiativeId);
 }
 
 interface StepResult {
@@ -1124,6 +1125,7 @@ async function runFix(run: Run): Promise<void> {
     await finish(run, 'succeeded', { verdict: 'FIX: NOTHING-TO-DO', outputMd: 'FIX: NOTHING-TO-DO\n\nNo failing checks, review findings, PR comments or feedback to act on.' });
     await repo.updateTicket(ticket.id, { status: ticket.lastVerdict === 'APPROVE' ? 'approved' : 'built' });
     await systemMessage(run, `${ticketLabel(ticket)}: nothing to fix.`);
+    await refreshInitiativeStatus(init.id);
     return;
   }
   const build = (await lastRuns(ticket.id)).find((r) => r.kind === 'execute' && r.outputMd);
@@ -1159,6 +1161,15 @@ async function runFix(run: Run): Promise<void> {
   await repo.consumeFeedback(collected.feedback.map((f) => f.id), run.id);
   await finish(run, 'succeeded');
   await agentMessage(run, `**Fix round ${run.round} on ${ticketLabel(ticket)}: ${verdict.replace(/^FIX:\s*/i, '')}**\n\n${section(step.output!, 'Summary') ?? ''}`);
+  // People who commented on the PR should see the answer there, not only in the factory.
+  const replies = section(step.output!, 'Replies');
+  if (ticket.prNumber && replies && collected.reports.some((f) => f.endsWith('pr-comments.md'))) {
+    await gh.comment(
+      ticket.worktreePath!,
+      ticket.prNumber,
+      `**Factory fixer · round ${run.round} · ${verdict.replace(/^FIX:\s*/i, '')}**\n\n${replies}${/APPLIED/i.test(verdict) ? '\n\n_Fix commits are pushed after the checks pass._' : ''}`,
+    ).catch((err) => log(run, `Could not post replies on the PR: ${(err as Error).message}`));
+  }
 
   if (/BLOCKED/i.test(verdict)) {
     const why = section(step.output!, 'Blocked') ?? 'The fixer reported BLOCKED.';
