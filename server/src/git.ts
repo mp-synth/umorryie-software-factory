@@ -163,6 +163,29 @@ export async function ensureWorktree(repo: string, worktree: string, branch: str
   return true;
 }
 
+const MAX_WORKTREE_INCLUDES = 500;
+
+export async function copyWorktreeIncludes(repo: string, worktree: string): Promise<string[]> {
+  const includeFile = path.join(repo, '.worktreeinclude');
+  if (!fs.existsSync(includeFile)) return [];
+  const r = await git(repo, ['ls-files', '--others', '--ignored', `--exclude-from=${includeFile}`]);
+  if (r.code !== 0) throw new Error(`.worktreeinclude: ${(r.stderr || r.stdout).trim()}`);
+  const files = r.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (files.length > MAX_WORKTREE_INCLUDES) {
+    throw new Error(`.worktreeinclude matches ${files.length} files; name the files you need, not whole dependency folders`);
+  }
+  for (const f of files) {
+    const target = path.join(worktree, f);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(repo, f), target);
+  }
+  return files;
+}
+
+export async function resetHard(worktree: string, ref: string): Promise<void> {
+  await gitOut(worktree, ['reset', '--hard', '--quiet', ref]);
+}
+
 export async function removeWorktree(repo: string, worktree: string | null, branch: string | null): Promise<void> {
   if (worktree && fs.existsSync(worktree)) {
     await git(repo, ['worktree', 'remove', '--force', worktree]);

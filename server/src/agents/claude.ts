@@ -18,6 +18,7 @@ export interface AgentSpec {
   timeoutMs: number;
   maxBudgetUsd?: number | null;
   loadUserSettings: boolean;
+  env?: Record<string, string>;
 }
 
 export interface AgentResult {
@@ -29,10 +30,13 @@ export interface AgentResult {
   inputTokens: number | null;
   outputTokens: number | null;
   numTurns: number | null;
+  subtype: string | null;
   timedOut: boolean;
   canceled: boolean;
   stderrTail: string;
 }
+
+const KILL_LINGERING_PROCESSES_AFTER_RESULT_MS = 30_000;
 
 export interface AgentEvent {
   type: RunEventType;
@@ -77,10 +81,12 @@ export async function claudeVersion(): Promise<string | null> {
 
 const CLAUDE_AUTH_VARIABLES = new Set(['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CONFIG_DIR']);
 
+const SESSION_SCOPED_AUTH_VARIABLES = new Set(['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN']);
+
 function belongsToParentClaudeSession(name: string, serverRunsInsideClaudeSession: boolean): boolean {
   if (CLAUDE_AUTH_VARIABLES.has(name)) return false;
-  if (name.startsWith('CLAUDE') || name.startsWith('MCP_')) return true;
-  return serverRunsInsideClaudeSession && name === 'ANTHROPIC_BASE_URL';
+  if (SESSION_SCOPED_AUTH_VARIABLES.has(name)) return serverRunsInsideClaudeSession;
+  return name.startsWith('CLAUDE') || name.startsWith('MCP_');
 }
 
 export function freshAgentEnv(): NodeJS.ProcessEnv {
@@ -137,7 +143,7 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
       cancel: () => {},
       done: Promise.resolve({
         exitCode: 127, sessionId: null, resultText: null, isError: true, costUsd: null, inputTokens: null,
-        outputTokens: null, numTurns: null, timedOut: false, canceled: false,
+        outputTokens: null, numTurns: null, subtype: null, timedOut: false, canceled: false,
         stderrTail: 'claude CLI not found. Install Claude Code or set CLAUDE_BIN in .env.',
       }),
     };
@@ -145,7 +151,7 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
 
   const child = spawn(bin, buildArgs(spec), {
     cwd: spec.cwd,
-    env: freshAgentEnv(),
+    env: { ...freshAgentEnv(), ...spec.env },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   });
@@ -155,11 +161,17 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
   let stderrTail = '';
   let timedOut = false;
   let canceled = false;
+  let exited = false;
+  let lingeringProcessesTimer: NodeJS.Timeout | null = null;
 
   const timer = setTimeout(() => {
     timedOut = true;
     killTree(child.pid);
   }, spec.timeoutMs);
+
+  child.on('exit', () => {
+    exited = true;
+  });
 
   const lines = readline.createInterface({ input: child.stdout });
   lines.on('line', (line) => {
@@ -199,6 +211,7 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
         break;
       case 'result':
         result = msg;
+        lingeringProcessesTimer ??= setTimeout(() => killTree(child.pid), KILL_LINGERING_PROCESSES_AFTER_RESULT_MS);
         onEvent({
           type: 'result',
           data: {
@@ -216,16 +229,18 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
     }
   });
 
-  child.stderr.on('data', (d: Buffer) => {
-    const s = d.toString();
-    stderrTail = (stderrTail + s).slice(-8000);
-    for (const l of s.split('\n')) if (l.trim()) onEvent({ type: 'stderr', data: { text: truncate(l, 2000) } });
+  const stderrLines = readline.createInterface({ input: child.stderr });
+  stderrLines.on('line', (line) => {
+    stderrTail = `${stderrTail}${line}\n`.slice(-8000);
+    if (line.trim()) onEvent({ type: 'stderr', data: { text: truncate(line, 2000) } });
   });
 
   const done = new Promise<AgentResult>((resolve) => {
     const finish = (code: number | null) => {
       clearTimeout(timer);
+      if (lingeringProcessesTimer) clearTimeout(lingeringProcessesTimer);
       lines.close();
+      stderrLines.close();
       const r = result as Record<string, any> | null;
       const usage = (r?.usage ?? {}) as Record<string, number>;
       resolve({
@@ -239,6 +254,7 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
           : null,
         outputTokens: r ? usage.output_tokens ?? 0 : null,
         numTurns: typeof r?.num_turns === 'number' ? r.num_turns : null,
+        subtype: typeof r?.subtype === 'string' ? r.subtype : null,
         timedOut,
         canceled,
         stderrTail,
@@ -255,6 +271,7 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
     pid: child.pid,
     done,
     cancel: () => {
+      if (exited) return;
       canceled = true;
       killTree(child.pid);
     },

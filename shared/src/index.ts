@@ -30,7 +30,7 @@ export const TICKET_STATUSES = [
 ] as const;
 export type TicketStatus = (typeof TICKET_STATUSES)[number];
 
-export const RUN_KINDS = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'ask'] as const;
+export const RUN_KINDS = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'verify', 'ask'] as const;
 export type RunKind = (typeof RUN_KINDS)[number];
 
 export const RUN_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'canceled', 'interrupted'] as const;
@@ -68,6 +68,7 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
     review: 'opus',
     fix: 'opus',
     mechanicalFix: 'sonnet',
+    verify: 'opus',
     ask: 'sonnet',
   },
 };

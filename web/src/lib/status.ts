@@ -7,6 +7,7 @@ import {
   MessageCircleQuestion,
   ScanSearch,
   ShieldCheck,
+  UserCheck,
   Wrench,
   type LucideIcon,
 } from 'lucide-react';
@@ -68,6 +69,7 @@ export const runKind: Record<RunKind, { label: string; agent: string; icon: Luci
   gate: { label: 'Checks', agent: 'Checks gate', icon: ShieldCheck, color: 'text-teal-300' },
   review: { label: 'Review', agent: 'Reviewer', icon: ScanSearch, color: 'text-sky-300' },
   fix: { label: 'Fix', agent: 'Fixer', icon: Wrench, color: 'text-amber-300' },
+  verify: { label: 'Verify fix', agent: 'Fix verifier', icon: UserCheck, color: 'text-lime-300' },
   ask: { label: 'Ask', agent: 'Advisor', icon: MessageCircleQuestion, color: 'text-fuchsia-300' },
 };
 
@@ -78,7 +80,7 @@ export function verdictTone(v: string | null | undefined): Tone {
   if (!v) return 'muted';
   if (/APPROVE|PASS|READY|APPLIED|SKIPPED/i.test(v)) return /SKIPPED/i.test(v) ? 'neutral' : 'success';
   if (/CHANGES|REVISE|NO-CHANGES|NOTHING/i.test(v)) return 'attention';
-  if (/BLOCKED|FAIL/i.test(v)) return 'danger';
+  if (/BLOCK|FAIL/i.test(v)) return 'danger';
   return 'neutral';
 }
 

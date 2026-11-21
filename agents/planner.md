@@ -58,7 +58,10 @@ Work out, concretely and grounded in the code:
   ticket's branch is stacked on its parent's branch, so keep the parent's
   interfaces stable and name them in guidance.
 - **Self-contained.** A fresh agent with only the ticket, plan.md and the repo
-  must be able to build it. Name the files, helpers and patterns to use.
+  must be able to build it. Name the files, helpers and patterns to use, and
+  the repo's rules and skills that apply (e.g. "use the `audit_logs` skill",
+  "follow `.claude/rules/billing-boundaries.md`"), so the executor doesn't
+  have to rediscover them.
 - **Checkable acceptance.** Each item is a command to run or a behaviour
   someone with only the repo can observe.
 - **Scope.** Build what the brief asks for. Tempting extras go to out_of_scope.
