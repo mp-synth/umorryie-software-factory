@@ -1,11 +1,11 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Archive, ArchiveRestore, ChevronLeft, FileText, FolderGit2, GitBranch, MoreHorizontal, Pencil, RotateCcw, Trash2 } from 'lucide-react';
+import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, MoreHorizontal, Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import type { InitiativeDetail } from '@factory/shared';
 import { api, ApiError } from '@/lib/api';
-import { ago, money, shortPath } from '@/lib/utils';
+import { ago, copy, money, shortPath } from '@/lib/utils';
 import { AutopilotCard } from '@/components/AutopilotCard';
 import { Conversation } from '@/components/Conversation';
 import { Markdown } from '@/components/Markdown';
@@ -61,6 +61,11 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
     onSuccess: () => toast.success('Reset to draft'),
     onError: (e: Error) => toast.error(e.message),
   });
+  const copyReport = useMutation({
+    mutationFn: () => api.report(i.id).then(copy),
+    onSuccess: () => toast.success('Report copied'),
+    onError: (e: Error) => toast.error(e.message),
+  });
   const remove = useMutation({
     mutationFn: () => api.deleteInitiative(i.id),
     onSuccess: () => {
@@ -96,45 +101,50 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
               </button>
             </div>
           </div>
-          <Menu
-            trigger={
-              <Button variant="outline" size="sm" icon={<MoreHorizontal className="h-4 w-4" />}>
-                More
-              </Button>
-            }
-          >
-            <MenuItem icon={<Pencil />} onSelect={() => setEditing(true)}>
-              Edit title & brief
-            </MenuItem>
-            {i.status === 'archived' ? (
-              <MenuItem icon={<ArchiveRestore />} onSelect={() => update.mutate({ status: 'draft' })}>
-                Restore
-              </MenuItem>
-            ) : (
-              <MenuItem icon={<Archive />} onSelect={() => update.mutate({ status: 'archived' })}>
-                Archive
-              </MenuItem>
-            )}
-            <MenuSeparator />
-            <MenuItem
-              icon={<RotateCcw />}
-              danger
-              onSelect={() => {
-                if (confirm('Reset to draft? This stops all agents and deletes the plan, tickets, local worktrees and factory branches. Pushed branches and PRs stay.')) reset.mutate();
-              }}
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" icon={<ClipboardCopy className="h-4 w-4" />} loading={copyReport.isPending} onClick={() => copyReport.mutate()}>
+              Copy report
+            </Button>
+            <Menu
+              trigger={
+                <Button variant="outline" size="sm" icon={<MoreHorizontal className="h-4 w-4" />}>
+                  More
+                </Button>
+              }
             >
-              Reset to draft
-            </MenuItem>
-            <MenuItem
-              icon={<Trash2 />}
-              danger
-              onSelect={() => {
-                if (confirm('Delete this initiative and its history? Local worktrees and factory branches are removed too. This cannot be undone.')) remove.mutate();
-              }}
-            >
-              Delete
-            </MenuItem>
-          </Menu>
+              <MenuItem icon={<Pencil />} onSelect={() => setEditing(true)}>
+                Edit title & brief
+              </MenuItem>
+              {i.status === 'archived' ? (
+                <MenuItem icon={<ArchiveRestore />} onSelect={() => update.mutate({ status: 'draft' })}>
+                  Restore
+                </MenuItem>
+              ) : (
+                <MenuItem icon={<Archive />} onSelect={() => update.mutate({ status: 'archived' })}>
+                  Archive
+                </MenuItem>
+              )}
+              <MenuSeparator />
+              <MenuItem
+                icon={<RotateCcw />}
+                danger
+                onSelect={() => {
+                  if (confirm('Reset to draft? This stops all agents and deletes the plan, tickets, local worktrees and factory branches. Pushed branches and PRs stay.')) reset.mutate();
+                }}
+              >
+                Reset to draft
+              </MenuItem>
+              <MenuItem
+                icon={<Trash2 />}
+                danger
+                onSelect={() => {
+                  if (confirm('Delete this initiative and its history? Local worktrees and factory branches are removed too. This cannot be undone.')) remove.mutate();
+                }}
+              >
+                Delete
+              </MenuItem>
+            </Menu>
+          </div>
         </div>
         {showBrief && (
           <div className="card mt-3 animate-fade-in px-4 py-3">
