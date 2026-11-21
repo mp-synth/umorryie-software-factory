@@ -3,14 +3,15 @@
 A local control room for building features with Claude Code agents. You describe
 an outcome; a planner turns it into a reviewed plan and small tickets; you approve;
 fresh agents build each ticket in its own git worktree, a fresh reviewer judges
-every branch, and a fresh fixer handles findings, failing checks and PR comments —
+every branch, and a fresh fixer handles findings, failing checks and PR comments,
+with a fresh verifier approving every fix before it is pushed or answered on the PR —
 all tracked in a local Postgres and visible live in a dashboard.
 
 ```
  brief ─▶ planner ─▶ plan reviewer ─▶ YOU approve ─▶ ┌ executor ─▶ checks ─▶ reviewer ─┐ ─▶ draft PR ready
           (opus)      (opus)           or re-plan    │   (opus)    (gate)    (opus)    │
-                                                     └──── fixer ◀── CHANGES / red ────┘
-                                                          (opus · sonnet for CI/lint)
+                                                     └ fixer ─▶ checks ─▶ verifier ◀───┘ CHANGES / red / PR comments
+                                                       (opus · sonnet for CI/lint)  (opus) ─▶ push + replies
 ```
 
 Every box is a **separate `claude -p` process with an empty context**. Agents
@@ -74,7 +75,7 @@ threads into a fix round (the factory's own comments are ignored).
 | built | Checked and waiting for review (when auto-review is off) |
 | in review | A fresh reviewer reads `git diff <base>...HEAD`, verifies each finding, answers APPROVE or CHANGES |
 | changes requested | Waiting for a fixer (auto-fix runs it unless the round limit is reached) |
-| fixing | Fixer triages review findings, failing CI, merge conflicts, unresolved PR threads and your feedback (VALID / PARTIAL / INVALID / NEEDS-HUMAN), fixes what is real with tests. Its per-item replies are posted on the PR; human threads are never auto-resolved. When a PR has nothing to act on, no agent is started |
+| fixing | A fixer gives every item a verdict before touching code (VALID / PARTIAL / INVALID / UNCONFIRMED / NEEDS-HUMAN): a bug is fixed only after it is traced and gets a test that fails without the fix; a claim is rejected only by pointing at the code. Rounds with only failing checks, CI or conflicts get a cheaper mechanical fixer that first checks whether the base branch fails the same way and lists flaky runs for one re-run. Fixes are committed locally; after the checks pass, a fresh **verifier** reads the commits and drafted replies. Approved: the factory pushes, replies in each review thread, answers top-level comments in one summary, and resolves only bot threads. Blocked: the branch is reset and a fresh fixer retries once with the findings; a second block pushes nothing and waits for you. When a PR has nothing to act on, no agent is started |
 | approved | Reviewer would merge it. PR marked ready. Dependents start |
 | merged | Seen by Sync PRs (automatic every 5 min) or marked by you. Unblocks dependents. Its local worktree is removed, and its local branch too once no unmerged ticket is stacked on it |
 | needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row |
@@ -96,17 +97,26 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
 - **`~/.software-factory/worktrees/`**: one git worktree per ticket, removed
   once the ticket is merged. Your own checkout is never modified.
 - **`agents/*.md`**: the role instructions for planner, plan reviewer, executor,
-  reviewer, fixer and advisor. Edit them to change how the factory thinks.
+  reviewer, fixer, mechanical fixer, fix verifier and advisor, plus the shared
+  `repo-rules.md` (every agent) and `code-style.md` (agents that write or
+  judge code). Edit them to change how the factory thinks.
 
 ## Guardrails
 
 - Agents never push, merge, rebase shared history or talk to GitHub. The server
   pushes only `factory/*` branches, never force-pushes, and never merges: you merge.
 - Agents start clean: no MCP servers and (by default) no user-level hooks or
-  plugins, so nothing pollutes their context. The repo's own CLAUDE.md and
-  `.claude/` settings still apply.
+  plugins, so nothing pollutes their context. The repo's own CLAUDE.md,
+  `.claude/rules`, skills and `.claude/` settings still apply (see below).
 - Text from GitHub reaches agents only as quoted data in a file, and the
-  factory's own PR comments are marked so they never loop back.
+  factory's own PR comments are marked so they never loop back. A review
+  thread whose last word is yours or the factory's waits for its reviewer and
+  isn't fed to a fixer again; failing CI waits until every check has finished;
+  status bots (GitHub Actions, Meticulous) and human-gated checks (Code review
+  gate, Meticulous) are ignored.
+- Nothing a fixer did reaches the PR before the checks pass and a verifier
+  approves it. Fix rounds count toward the round limit, including retries
+  after a block, so a fix that keeps breaking stops and waits for you.
 - plan.json is validated (schema, bullet lengths, sizes, dependency DAG) before
   any ticket exists; an invalid plan goes back to a fresh planner with the errors.
 - The checks command comes from the project settings in the DB, so a branch can't
@@ -122,6 +132,26 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
   comments, no change-comments, no redundant docstrings). The executor, fixer
   and reviewer get it with every prompt, and the reviewer treats violations as
   major findings.
+
+## Large repos (EnactServices, TTVPlatform)
+
+- **The repo's rules and skills.** Agents load the repo's CLAUDE.md files and
+  `.claude/rules` like an interactive session, and get the Skill tool for its
+  skills and commands. What Claude Code never reads by itself (Cursor rules
+  without a `.claude/rules` twin, `AGENTS.md` files without a CLAUDE.md beside
+  them) is listed in a `repo-guidance.md` every agent is pointed to. The
+  planner names the rules and skills that apply in each ticket's guidance.
+- **Exploring.** Agents get the Task tool, so they can send an Explore
+  subagent through a monorepo and keep only its conclusion.
+- **Worktrees.** Ignored files the repo's `.worktreeinclude` names (`.env` and
+  the like, gitignore syntax) are copied into every new worktree, then the
+  setup command runs there once. If setup fails, the ticket waits for you
+  instead of burning an agent run, and setup runs again on the next attempt.
+- **Checks on what changed.** The checks command, the setup command and the
+  agents get `$FACTORY_BASE` (the ref the branch is diffed against) and
+  `$FACTORY_BRANCH`, so the gate can check only what the branch touched, for
+  example `uv run prek run --from-ref "$FACTORY_BASE" --to-ref HEAD && uv run pytest --affected -q`
+  in EnactServices.
 
 ## Development
 

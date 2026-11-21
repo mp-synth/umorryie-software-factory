@@ -21,6 +21,7 @@ const MODELS: { key: keyof InitiativeSettings['models']; label: string }[] = [
   { key: 'review', label: 'Reviewer' },
   { key: 'fix', label: 'Fixer' },
   { key: 'mechanicalFix', label: 'Fixer (CI/lint only)' },
+  { key: 'verify', label: 'Fix verifier' },
   { key: 'ask', label: 'Advisor' },
 ];
 

@@ -62,7 +62,8 @@ exception: there the offending line itself is the evidence.
 
 On re-review: for each earlier finding, check whether it was fixed. If the
 fixer marked it INVALID with evidence and you agree, accept the rebuttal. If
-you disagree, restate it with stronger evidence. Don't raise new nitpicks in
+you disagree, restate it with stronger evidence. For an UNCONFIRMED finding,
+settle it yourself: confirm it with a failure scenario or drop it. Don't raise new nitpicks in
 late rounds that you could have raised in round one.
 
 ## Write review.md

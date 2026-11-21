@@ -5,7 +5,7 @@ import fastifyStatic from '@fastify/static';
 import { resolveClaudeBin } from './agents/claude.ts';
 import { config } from './config.ts';
 import { migrate, sql } from './db.ts';
-import { recoverOnStartup, startScheduler } from './pipeline/engine.ts';
+import { recoverOnStartup, startScheduler, stopAllAgents } from './pipeline/engine.ts';
 import { routes } from './routes.ts';
 
 async function main(): Promise<void> {
@@ -35,6 +35,7 @@ async function main(): Promise<void> {
   console.log(`    claude    ${resolveClaudeBin() ?? 'NOT FOUND (set CLAUDE_BIN)'}\n`);
 
   const shutdown = async () => {
+    stopAllAgents();
     await app.close();
     await sql.end({ timeout: 2 });
     process.exit(0);

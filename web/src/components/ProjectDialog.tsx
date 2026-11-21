@@ -130,13 +130,13 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
             </Select>
           </Field>
         </div>
-        <Field label="Checks command" hint="The gate. Runs in each worktree after every build and fix; a failure goes straight to a fixer, never to a reviewer.">
+        <Field label="Checks command" hint="The gate. Runs in each worktree after every build and fix; a failure goes straight to a fixer, never to a reviewer. $FACTORY_BASE is the ref the branch is diffed against, so a large repo can check only what changed.">
           <Input value={checksCommand} onChange={(e) => (setTouched(true), setChecks(e.target.value))} placeholder="pnpm lint && pnpm test" className="font-mono text-xs" />
         </Field>
-        <Field label="Setup command" hint="Runs once in each fresh worktree before the executor starts (installs dependencies).">
+        <Field label="Setup command" hint="Runs once in each fresh worktree before the executor starts (installs dependencies); if it fails, the ticket waits for you. Ignored files listed in the repo's .worktreeinclude (e.g. .env) are copied in first.">
           <Input value={setupCommand} onChange={(e) => (setTouched(true), setSetup(e.target.value))} placeholder="pnpm install --frozen-lockfile" className="font-mono text-xs" />
         </Field>
-        <Field label="Notes for agents" hint="Optional. Conventions or context every planner should know. CLAUDE.md in the repo is read automatically.">
+        <Field label="Notes for agents" hint="Optional. Conventions or context every planner should know. The repo's CLAUDE.md, .claude/rules and skills are used automatically, and Cursor rules and AGENTS.md files are pointed out to every agent.">
           <Textarea value={notes} onChange={(e) => (setTouched(true), setNotes(e.target.value))} className="min-h-[70px]" />
         </Field>
       </div>
