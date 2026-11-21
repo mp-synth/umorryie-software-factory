@@ -1,0 +1,28 @@
+# Local state for the software factory. Only Postgres runs in Docker: the server
+# must run on the host because it drives your local git repos, worktrees, `gh`
+# and the `claude` CLI with your own login.
+#
+# No password: the port is bound to 127.0.0.1 only and uses trust auth, so no
+# secret is ever written to disk or committed. Don't expose this port.
+name: software-factory
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: factory
+      POSTGRES_DB: factory
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-54329}:5432"
+    volumes:
+      - factory-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factory -d factory"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  factory-pgdata:

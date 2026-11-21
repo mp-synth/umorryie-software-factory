@@ -1,0 +1,457 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { z } from 'zod';
+import { DEFAULT_INITIATIVE_SETTINGS, type ChangeEvent, type InitiativeDetail, type RunEvent } from '@factory/shared';
+import { claudeVersion, resolveClaudeBin } from './agents/claude.ts';
+import { config } from './config.ts';
+import { sql } from './db.ts';
+import { bus } from './events.ts';
+import * as gitx from './git.ts';
+import { ghUser } from './github.ts';
+import * as engine from './pipeline/engine.ts';
+import { slugify } from './pipeline/plan.ts';
+import * as repo from './repo.ts';
+
+const id = z.object({ id: z.string().uuid() });
+const model = z.enum(['opus', 'sonnet', 'haiku']);
+
+const settingsPatch = z
+  .object({
+    autoPlanReview: z.boolean(),
+    autoExecute: z.boolean(),
+    autoReview: z.boolean(),
+    autoFix: z.boolean(),
+    createPrs: z.boolean(),
+    postReviewsToPr: z.boolean(),
+    maxRounds: z.number().int().min(1).max(10),
+    maxPlanRounds: z.number().int().min(1).max(5),
+    concurrency: z.number().int().min(1).max(10),
+    maxTickets: z.number().int().min(1).max(30),
+    models: z
+      .object({ plan: model, plan_review: model, execute: model, review: model, fix: model, mechanicalFix: model, ask: model })
+      .partial(),
+  })
+  .partial();
+
+function expandPath(p: string): string {
+  const trimmed = p.trim();
+  return path.resolve(trimmed === '~' || trimmed.startsWith('~/') ? path.join(os.homedir(), trimmed.slice(1)) : trimmed);
+}
+
+function sse(req: FastifyRequest, reply: FastifyReply): (event: string, data: unknown) => void {
+  reply.hijack();
+  reply.raw.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  reply.raw.write('retry: 2000\n\n');
+  // A real event (not a comment) so the client can tell a live stream from a silently dead one.
+  const ping = setInterval(() => reply.raw.write(`event: ping\ndata: ${Date.now()}\n\n`), 10_000);
+  req.raw.on('close', () => clearInterval(ping));
+  return (event, data) => reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+export async function routes(app: FastifyInstance): Promise<void> {
+  app.setErrorHandler((err: Error & { statusCode?: number; status?: number }, _req, reply) => {
+    if (err instanceof z.ZodError) {
+      return reply.status(400).send({ error: err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
+    }
+    const status = err instanceof engine.PipelineError ? err.status : err.statusCode ?? 500;
+    if (status >= 500) app.log.error(err);
+    return reply.status(status).send({ error: err.message });
+  });
+
+  // ---------------- system ----------------
+
+  app.get('/api/health', async () => {
+    let db = false;
+    try {
+      await sql`select 1`;
+      db = true;
+    } catch {
+      db = false;
+    }
+    const [version, user] = await Promise.all([claudeVersion(), ghUser()]);
+    return {
+      db,
+      claude: { ok: !!version, path: resolveClaudeBin(), version },
+      gh: { ok: !!user, user },
+      home: config.home,
+    };
+  });
+
+  app.get('/api/settings', async () => repo.getAppSettings());
+  app.patch('/api/settings', async (req) => {
+    const body = z
+      .object({
+        maxConcurrentAgents: z.number().int().min(1).max(20),
+        runTimeoutMinutes: z.number().int().min(5).max(600),
+        maxBudgetUsdPerRun: z.number().positive().max(1000).nullable(),
+        loadUserSettings: z.boolean(),
+        gateTimeoutMinutes: z.number().int().min(1).max(180),
+      })
+      .partial()
+      .parse(req.body);
+    const next = await repo.updateAppSettings(body);
+    engine.kick();
+    return next;
+  });
+
+  app.get('/api/defaults', async () => ({ initiativeSettings: DEFAULT_INITIATIVE_SETTINGS }));
+
+  app.get('/api/stream', async (req, reply) => {
+    const send = sse(req, reply);
+    const onChange = (e: ChangeEvent) => send('change', e);
+    bus.on('change', onChange);
+    req.raw.on('close', () => bus.off('change', onChange));
+  });
+
+  // ---------------- projects ----------------
+
+  app.get('/api/projects', async () => repo.listProjects());
+
+  app.get('/api/fs/inspect', async (req) => {
+    const { path: p } = z.object({ path: z.string().min(1) }).parse(req.query);
+    const dir = expandPath(p);
+    if (!fs.existsSync(dir)) return { ok: false, path: dir, error: 'Path does not exist' };
+    if (!(await gitx.isGitRepo(dir))) return { ok: false, path: dir, error: 'Not the root of a git repository' };
+    const [defaultBranch, remote, branches] = await Promise.all([
+      gitx.detectDefaultBranch(dir),
+      gitx.remoteUrl(dir),
+      gitx.listBranches(dir),
+    ]);
+    const has = (f: string) => fs.existsSync(path.join(dir, f));
+    let suggestedChecks: string | null = null;
+    let suggestedSetup: string | null = null;
+    if (has('package.json')) {
+      const pm = has('pnpm-lock.yaml') ? 'pnpm' : has('yarn.lock') ? 'yarn' : has('bun.lockb') ? 'bun' : 'npm';
+      const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
+      const scripts = ['lint', 'typecheck', 'test'].filter((s) => pkg.scripts?.[s]);
+      suggestedChecks = scripts.length ? scripts.map((s) => `${pm} run ${s}`).join(' && ') : null;
+      suggestedSetup = `${pm} install`;
+    } else if (has('pyproject.toml')) {
+      suggestedChecks = has('uv.lock') ? 'uv run pytest -q' : 'pytest -q';
+      suggestedSetup = has('uv.lock') ? 'uv sync' : null;
+    } else if (has('Cargo.toml')) {
+      suggestedChecks = 'cargo test --quiet';
+    } else if (has('go.mod')) {
+      suggestedChecks = 'go test ./...';
+    }
+    return {
+      ok: true,
+      path: dir,
+      name: path.basename(dir),
+      defaultBranch,
+      remoteUrl: remote,
+      github: gitx.isGithubUrl(remote),
+      branches,
+      suggestedChecks,
+      suggestedSetup,
+      hasClaudeMd: has('CLAUDE.md') || has('AGENTS.md'),
+    };
+  });
+
+  const projectBody = z.object({
+    name: z.string().trim().min(1).max(80),
+    repoPath: z.string().trim().min(1),
+    defaultBranch: z.string().trim().min(1).optional(),
+    checksCommand: z.string().trim().max(2000).nullable().optional(),
+    setupCommand: z.string().trim().max(2000).nullable().optional(),
+    notes: z.string().max(20_000).nullable().optional(),
+  });
+
+  app.post('/api/projects', async (req, reply) => {
+    const body = projectBody.parse(req.body);
+    const dir = expandPath(body.repoPath);
+    if (!(await gitx.isGitRepo(dir))) return reply.status(400).send({ error: `${dir} is not the root of a git repository` });
+    const project = await repo.insertProject({
+      name: body.name,
+      repoPath: dir,
+      defaultBranch: body.defaultBranch || (await gitx.detectDefaultBranch(dir)),
+      checksCommand: body.checksCommand || null,
+      setupCommand: body.setupCommand || null,
+      notes: body.notes || null,
+      remoteUrl: await gitx.remoteUrl(dir),
+    });
+    return reply.status(201).send(project);
+  });
+
+  app.patch('/api/projects/:id', async (req) => {
+    const { id: pid } = id.parse(req.params);
+    const body = projectBody.omit({ repoPath: true }).partial().parse(req.body);
+    return repo.updateProject(pid, body);
+  });
+
+  app.delete('/api/projects/:id', async (req, reply) => {
+    const { id: pid } = id.parse(req.params);
+    const [{ n }] = await sql<{ n: number }[]>`select count(*)::int as n from initiatives where project_id = ${pid} and status <> 'archived'`;
+    if (n > 0) return reply.status(409).send({ error: 'Delete or archive this project’s initiatives first' });
+    await repo.deleteProject(pid);
+    return { ok: true };
+  });
+
+  app.get('/api/projects/:id/branches', async (req) => {
+    const { id: pid } = id.parse(req.params);
+    const p = await repo.getProject(pid);
+    if (!p) throw new engine.PipelineError('project not found', 404);
+    return { branches: await gitx.listBranches(p.repoPath), defaultBranch: p.defaultBranch };
+  });
+
+  // ---------------- initiatives ----------------
+
+  app.get('/api/initiatives', async () => repo.listInitiativeSummaries());
+
+  app.post('/api/initiatives', async (req, reply) => {
+    const body = z
+      .object({
+        projectId: z.string().uuid(),
+        title: z.string().trim().min(3).max(120),
+        brief: z.string().trim().min(10).max(50_000),
+        baseBranch: z.string().trim().min(1).optional(),
+        settings: settingsPatch.optional(),
+        start: z.boolean().default(true),
+      })
+      .parse(req.body);
+    const project = await repo.getProject(body.projectId);
+    if (!project) return reply.status(404).send({ error: 'project not found' });
+    const baseBranch = body.baseBranch || project.defaultBranch;
+    if (!(await gitx.refExists(project.repoPath, baseBranch)) && !(await gitx.refExists(project.repoPath, `origin/${baseBranch}`))) {
+      return reply.status(400).send({ error: `branch "${baseBranch}" does not exist in ${project.name}` });
+    }
+    const init = await repo.insertInitiative({
+      projectId: project.id,
+      slug: slugify(body.title, 32),
+      title: body.title,
+      brief: body.brief,
+      baseBranch,
+      settings: { ...DEFAULT_INITIATIVE_SETTINGS, ...body.settings, models: { ...DEFAULT_INITIATIVE_SETTINGS.models, ...body.settings?.models } },
+    });
+    if (body.start) await engine.enqueue({ kind: 'plan', initiativeId: init.id, trigger: 'manual' });
+    return reply.status(201).send(init);
+  });
+
+  app.get('/api/initiatives/:id', async (req, reply): Promise<InitiativeDetail | undefined> => {
+    const { id: iid } = id.parse(req.params);
+    const initiative = await repo.getInitiative(iid);
+    if (!initiative) {
+      reply.status(404).send({ error: 'initiative not found' });
+      return;
+    }
+    const [project, tickets, runs, messages, [{ cost }]] = await Promise.all([
+      repo.getProject(initiative.projectId),
+      repo.listTickets(iid),
+      repo.listRuns({ initiativeId: iid, limit: 500 }),
+      repo.listMessages(iid),
+      sql<{ cost: number }[]>`select coalesce(sum(cost_usd), 0)::float8 as cost from runs where initiative_id = ${iid}`,
+    ]);
+    return { initiative, project: project!, tickets, runs, messages, costUsd: cost };
+  });
+
+  app.patch('/api/initiatives/:id', async (req) => {
+    const { id: iid } = id.parse(req.params);
+    const body = z
+      .object({
+        title: z.string().trim().min(3).max(120),
+        brief: z.string().trim().min(10).max(50_000),
+        status: z.enum(['archived', 'draft']),
+        settings: settingsPatch,
+      })
+      .partial()
+      .parse(req.body);
+    const init = await repo.getInitiative(iid);
+    if (!init) throw new engine.PipelineError('initiative not found', 404);
+    if (body.status === 'draft' && init.status !== 'archived') throw new engine.PipelineError('only archived initiatives can be restored');
+    const status = body.status === 'draft' ? (init.planJson ? (init.approvedAt ? 'in_progress' : 'awaiting_approval') : 'draft') : body.status;
+    const settings = body.settings
+      ? { ...init.settings, ...body.settings, models: { ...init.settings.models, ...body.settings.models } }
+      : undefined;
+    const next = await repo.updateInitiative(iid, { title: body.title, brief: body.brief, status, settings });
+    if (body.settings) engine.kick();
+    return next;
+  });
+
+  app.delete('/api/initiatives/:id', async (req) => {
+    const { id: iid } = id.parse(req.params);
+    await engine.deleteInitiative(iid);
+    return { ok: true };
+  });
+
+  app.post('/api/initiatives/:id/plan', async (req) => {
+    const { id: iid } = id.parse(req.params);
+    const { feedback } = z.object({ feedback: z.string().trim().max(20_000).optional() }).parse(req.body ?? {});
+    if (feedback) return engine.requestPlanChanges(iid, feedback).then(() => ({ ok: true }));
+    return engine.enqueue({ kind: 'plan', initiativeId: iid, trigger: 'manual' });
+  });
+
+  app.post('/api/initiatives/:id/plan-review', async (req) => {
+    const { id: iid } = id.parse(req.params);
+    return engine.enqueue({ kind: 'plan_review', initiativeId: iid, trigger: 'manual' });
+  });
+
+  app.post('/api/initiatives/:id/approve', async (req) => {
+    const { id: iid } = id.parse(req.params);
+    const { note } = z.object({ note: z.string().max(5000).optional() }).parse(req.body ?? {});
+    await engine.approvePlan(iid, note);
+    return { ok: true };
+  });
+
+  app.post('/api/initiatives/:id/reset', async (req) => {
+    const { id: iid } = id.parse(req.params);
+    await engine.resetInitiative(iid);
+    return { ok: true };
+  });
+
+  app.post('/api/initiatives/:id/actions/:action', async (req) => {
+    const { id: iid, action } = z
+      .object({ id: z.string().uuid(), action: z.enum(['run-ready', 'review-all', 'fix-all', 'sync-prs']) })
+      .parse(req.params);
+    const n = await engine.bulk(iid, action);
+    return { ok: true, count: n };
+  });
+
+  app.post('/api/initiatives/:id/messages', async (req, reply) => {
+    const { id: iid } = id.parse(req.params);
+    const body = z
+      .object({
+        body: z.string().trim().min(1).max(20_000),
+        kind: z.enum(['comment', 'feedback', 'question']),
+        ticketId: z.string().uuid().nullable().optional(),
+        /** For feedback: start the agent that consumes it right away. */
+        act: z.boolean().default(true),
+      })
+      .parse(req.body);
+    const ticketId = body.ticketId ?? null;
+    if (body.kind === 'question') {
+      const run = await engine.ask(iid, ticketId, body.body);
+      return reply.status(201).send({ ok: true, runId: run.id });
+    }
+    if (body.kind === 'feedback' && !ticketId && body.act) {
+      await engine.requestPlanChanges(iid, body.body);
+      return reply.status(201).send({ ok: true });
+    }
+    const msg = await repo.addMessage({ initiativeId: iid, ticketId, author: 'human', kind: body.kind, body: body.body });
+    if (body.kind === 'feedback' && ticketId && body.act) {
+      const t = await repo.getTicket(ticketId);
+      const kind = t?.branch ? 'fix' : 'execute';
+      const run = await engine.enqueue({ kind, initiativeId: iid, ticketId, trigger: 'manual' });
+      return reply.status(201).send({ ok: true, message: msg, runId: run.id });
+    }
+    return reply.status(201).send({ ok: true, message: msg });
+  });
+
+  // ---------------- tickets ----------------
+
+  app.patch('/api/tickets/:id', async (req) => {
+    const { id: tid } = id.parse(req.params);
+    const t = await repo.getTicket(tid);
+    if (!t) throw new engine.PipelineError('ticket not found', 404);
+    if (!['proposed', 'todo', 'blocked'].includes(t.status)) throw new engine.PipelineError('only tickets that have not started can be edited');
+    const bullet = z.string().trim().min(1).max(400);
+    const body = z
+      .object({
+        title: z.string().trim().min(3).max(120),
+        what: z.string().trim().max(2000),
+        goal: z.string().trim().max(2000),
+        outcome: z.string().trim().max(2000),
+        guidance: z.array(bullet).max(12),
+        acceptance: z.array(bullet).max(12),
+      })
+      .partial()
+      .parse(req.body);
+    return repo.updateTicket(tid, body);
+  });
+
+  app.post('/api/tickets/:id/:action', async (req) => {
+    const { id: tid, action } = z
+      .object({
+        id: z.string().uuid(),
+        action: z.enum(['run', 'check', 'review', 'fix', 'reset', 'mark-approved', 'mark-merged', 'mark-todo']),
+      })
+      .parse(req.params);
+    const t = await repo.getTicket(tid);
+    if (!t) throw new engine.PipelineError('ticket not found', 404);
+    switch (action) {
+      case 'run':
+        return engine.enqueue({ kind: 'execute', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
+      case 'check':
+        return engine.enqueue({ kind: 'gate', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
+      case 'review':
+        return engine.enqueue({ kind: 'review', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
+      case 'fix':
+        return engine.enqueue({ kind: 'fix', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
+      case 'reset':
+        await engine.resetTicket(t.id);
+        return { ok: true };
+      case 'mark-approved':
+        await engine.setTicketStatus(t.id, 'approved');
+        return { ok: true };
+      case 'mark-merged':
+        await engine.setTicketStatus(t.id, 'merged');
+        return { ok: true };
+      case 'mark-todo':
+        await engine.setTicketStatus(t.id, 'todo');
+        return { ok: true };
+    }
+  });
+
+  // ---------------- runs ----------------
+
+  app.get('/api/runs', async (req) => {
+    const q = z
+      .object({
+        initiativeId: z.string().uuid().optional(),
+        ticketId: z.string().uuid().optional(),
+        active: z.coerce.boolean().optional(),
+        limit: z.coerce.number().int().min(1).max(1000).optional(),
+      })
+      .parse(req.query);
+    return repo.listRuns(q);
+  });
+
+  app.get('/api/runs/:id', async (req, reply) => {
+    const { id: rid } = id.parse(req.params);
+    const [run] = await repo.listRunsById(rid);
+    if (!run) return reply.status(404).send({ error: 'run not found' });
+    return run;
+  });
+
+  app.get('/api/runs/:id/events', async (req) => {
+    const { id: rid } = id.parse(req.params);
+    return repo.listRunEvents(rid);
+  });
+
+  app.get('/api/runs/:id/stream', async (req, reply) => {
+    const { id: rid } = id.parse(req.params);
+    const { after } = z.object({ after: z.coerce.number().int().min(0).default(0) }).parse(req.query);
+    const send = sse(req, reply);
+    let last = after;
+    const buffer: RunEvent[] = [];
+    let replaying = true;
+    const onEvent = (e: RunEvent) => {
+      if (replaying) buffer.push(e);
+      else if (Number(e.id) > last) {
+        last = Number(e.id);
+        send('event', e);
+      }
+    };
+    bus.on(`run:${rid}`, onEvent);
+    req.raw.on('close', () => bus.off(`run:${rid}`, onEvent));
+    for (const e of await repo.listRunEvents(rid, after)) {
+      last = Number(e.id);
+      send('event', e);
+    }
+    replaying = false;
+    for (const e of buffer) onEvent(e);
+    send('ready', { last });
+  });
+
+  app.post('/api/runs/:id/cancel', async (req) => {
+    const { id: rid } = id.parse(req.params);
+    await engine.cancelRun(rid);
+    return { ok: true };
+  });
+}

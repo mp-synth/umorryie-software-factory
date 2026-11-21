@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "factory-server",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@factory/server", "dev"],
+      "port": 4317
+    },
+    {
+      "name": "factory-web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@factory/web", "dev"],
+      "port": 5173
+    }
+  ]
+}

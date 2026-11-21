@@ -1,0 +1,25 @@
+{
+  "name": "software-factory",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local software factory: plan, build, review and fix features with fresh-context Claude Code agents.",
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "engines": { "node": ">=20.12" },
+  "scripts": {
+    "bootstrap": "bash scripts/setup.sh",
+    "db:up": "docker compose up -d --wait db",
+    "db:logs": "docker compose logs -f db",
+    "db:psql": "docker compose exec db psql -U factory factory",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && docker compose up -d --wait db",
+    "dev": "pnpm db:up && concurrently -k -n server,web -c magenta,cyan \"pnpm --filter @factory/server dev\" \"pnpm --filter @factory/web dev\"",
+    "build": "pnpm --filter @factory/web build",
+    "start": "pnpm db:up && pnpm build && pnpm --filter @factory/server start",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
