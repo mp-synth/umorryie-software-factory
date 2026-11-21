@@ -59,7 +59,6 @@
   }
 }
 
-/* Markdown rendered from agents */
 .md {
   @apply prose prose-invert prose-sm max-w-none;
   --tw-prose-body: theme(colors.zinc.300);

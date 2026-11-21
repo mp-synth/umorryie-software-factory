@@ -1,6 +1,3 @@
--- Software factory schema. Every agent step is a row in `runs`; every line an
--- agent streams is a row in `run_events`, so any run can be replayed in the UI.
-
 create extension if not exists pgcrypto;
 
 create table projects (

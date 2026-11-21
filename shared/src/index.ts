@@ -1,5 +1,3 @@
-// Types and constants shared by the server and the web UI.
-
 export type Model = 'opus' | 'sonnet' | 'haiku';
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -17,17 +15,17 @@ export const INITIATIVE_STATUSES = [
 export type InitiativeStatus = (typeof INITIATIVE_STATUSES)[number];
 
 export const TICKET_STATUSES = [
-  'proposed', // in a plan that is not approved yet
-  'todo', // approved, waiting for dependencies or a manual start
-  'building', // executor queued or running
-  'checking', // gate (checks command) queued or running
-  'built', // committed and checked, waiting for review
-  'in_review', // reviewer queued or running
-  'changes_requested', // review said CHANGES or the gate failed
-  'fixing', // fixer queued or running
-  'approved', // reviewer approved: ready to merge
-  'merged', // PR merged (seen by "Sync PRs")
-  'blocked', // an agent reported BLOCKED or rounds ran out: needs a human
+  'proposed',
+  'todo',
+  'building',
+  'checking',
+  'built',
+  'in_review',
+  'changes_requested',
+  'fixing',
+  'approved',
+  'merged',
+  'blocked',
   'canceled',
 ] as const;
 export type TicketStatus = (typeof TICKET_STATUSES)[number];
@@ -39,25 +37,15 @@ export const RUN_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'cancel
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 export interface InitiativeSettings {
-  /** Run the plan reviewer automatically after every plan. */
   autoPlanReview: boolean;
-  /** After approval, start tickets as soon as their dependencies allow. */
   autoExecute: boolean;
-  /** Review a branch as soon as it is built and checked. */
   autoReview: boolean;
-  /** Fix automatically when a review asks for changes or checks fail. */
   autoFix: boolean;
-  /** Push branches and open draft PRs (requires a GitHub `origin`). */
   createPrs: boolean;
-  /** Post every review as a PR comment. */
   postReviewsToPr: boolean;
-  /** Build → review → fix rounds per ticket before a human is asked. */
   maxRounds: number;
-  /** Planner ↔ plan-reviewer rounds before the plan goes to you anyway. */
   maxPlanRounds: number;
-  /** Tickets of this initiative that may have an agent running at once. */
   concurrency: number;
-  /** Most tickets the planner may create. */
   maxTickets: number;
   models: Record<Exclude<RunKind, 'gate'>, Model> & { mechanicalFix: Model };
 }
@@ -85,15 +73,10 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
 };
 
 export interface AppSettings {
-  /** Agents (and gates) running at once across every initiative. */
   maxConcurrentAgents: number;
-  /** Hard stop for a single agent run, in minutes. */
   runTimeoutMinutes: number;
-  /** Optional per-run spend cap passed to `claude --max-budget-usd`. */
   maxBudgetUsdPerRun: number | null;
-  /** Load your user-level Claude settings (hooks, plugins) into agents. Off keeps agents clean. */
   loadUserSettings: boolean;
-  /** Timeout for the checks command, in minutes. */
   gateTimeoutMinutes: number;
 }
 
@@ -130,7 +113,6 @@ export interface PlanTicket {
   size: 'XS' | 'S' | 'M';
 }
 
-/** The structured half of a plan (plan.json). plan.md holds the long form. */
 export interface PlanJson {
   title: string;
   summary: string[];
@@ -218,7 +200,6 @@ export interface Run {
   queuedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
-  // joined for lists
   initiativeTitle?: string;
   ticketTitle?: string | null;
   ticketSeq?: number | null;
@@ -278,6 +259,5 @@ export interface Health {
   home: string;
 }
 
-/** Ticket statuses that count as finished for progress and dependency purposes. */
 export const DONE_TICKET_STATUSES: TicketStatus[] = ['approved', 'merged'];
 export const ACTIVE_TICKET_STATUSES: TicketStatus[] = ['building', 'checking', 'in_review', 'fixing'];

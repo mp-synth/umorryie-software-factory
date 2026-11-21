@@ -14,13 +14,10 @@ export interface ExecOptions {
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   input?: string;
-  /** Called with every chunk of combined output (for live logs). */
   onOutput?: (chunk: string) => void;
-  /** Keep at most this many characters of output (tail). */
   maxOutput?: number;
 }
 
-/** Runs a command without a shell. Never throws on non-zero exit. */
 export function exec(cmd: string, args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
   const max = opts.maxOutput ?? 2_000_000;
   return new Promise((resolve) => {
@@ -62,24 +59,30 @@ export function exec(cmd: string, args: string[], opts: ExecOptions = {}): Promi
   });
 }
 
+function trySignal(pid: number, signal: NodeJS.Signals): boolean {
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function killTree(pid: number | undefined): void {
   if (!pid) return;
-  try {
-    process.kill(-pid, 'SIGTERM');
-  } catch {
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {
-      /* already gone */
-    }
-  }
-  setTimeout(() => {
-    try {
-      process.kill(-pid, 'SIGKILL');
-    } catch {
-      /* already gone */
-    }
-  }, 5000).unref();
+  const processGroup = -pid;
+  if (!trySignal(processGroup, 'SIGTERM')) trySignal(pid, 'SIGTERM');
+  setTimeout(() => trySignal(processGroup, 'SIGKILL'), 5000).unref();
+}
+
+export function runInNonLoginShell(command: string, opts: ExecOptions): Promise<ExecResult> {
+  return exec('bash', ['-c', command], opts);
+}
+
+export function commandCouldNotRun(exitCode: number): boolean {
+  const notExecutable = 126;
+  const notFound = 127;
+  return exitCode === notExecutable || exitCode === notFound;
 }
 
 export async function git(cwd: string, args: string[], timeoutMs = 120_000): Promise<ExecResult> {
@@ -136,10 +139,6 @@ export async function refExists(repo: string, ref: string): Promise<boolean> {
   return (await git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).code === 0;
 }
 
-/**
- * The ref a new branch should start from. Prefers a freshly fetched
- * `origin/<branch>` so work starts from what is actually upstream.
- */
 export async function resolveBaseRef(repo: string, branch: string): Promise<string> {
   if (await remoteUrl(repo)) {
     await git(repo, ['fetch', '--quiet', 'origin', branch], 60_000);
@@ -149,7 +148,6 @@ export async function resolveBaseRef(repo: string, branch: string): Promise<stri
   throw new Error(`base branch "${branch}" not found in ${repo}`);
 }
 
-/** Creates (or reuses) a worktree for `branch`. Returns true when it was created now. */
 export async function ensureWorktree(repo: string, worktree: string, branch: string, baseRef: string): Promise<boolean> {
   if (fs.existsSync(path.join(worktree, '.git'))) {
     const current = (await git(worktree, ['branch', '--show-current'])).stdout.trim();
@@ -165,7 +163,6 @@ export async function ensureWorktree(repo: string, worktree: string, branch: str
   return true;
 }
 
-/** Removes a factory worktree and its local branch. Only touches `factory/*` branches. */
 export async function removeWorktree(repo: string, worktree: string | null, branch: string | null): Promise<void> {
   if (worktree && fs.existsSync(worktree)) {
     await git(repo, ['worktree', 'remove', '--force', worktree]);

@@ -5,6 +5,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import type { InitiativeDetail } from '@factory/shared';
 import { api, ApiError } from '@/lib/api';
+import { toastError, toastSuccess } from '@/lib/toasts';
 import { ago, copy, money, shortPath } from '@/lib/utils';
 import { AutopilotCard } from '@/components/AutopilotCard';
 import { Conversation } from '@/components/Conversation';
@@ -54,17 +55,17 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
   const update = useMutation({
     mutationFn: (p: { status?: 'archived' | 'draft' }) => api.updateInitiative(i.id, p),
     onSuccess: (_r, p) => toast.success(p.status === 'archived' ? 'Archived' : 'Restored'),
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   const reset = useMutation({
     mutationFn: () => api.resetInitiative(i.id),
-    onSuccess: () => toast.success('Reset to draft'),
-    onError: (e: Error) => toast.error(e.message),
+    onSuccess: toastSuccess('Reset to draft'),
+    onError: toastError,
   });
   const copyReport = useMutation({
-    mutationFn: () => api.report(i.id).then(copy),
-    onSuccess: () => toast.success('Report copied'),
-    onError: (e: Error) => toast.error(e.message),
+    mutationFn: () => api.reportMarkdown(i.id).then(copy),
+    onSuccess: toastSuccess('Report copied'),
+    onError: toastError,
   });
   const remove = useMutation({
     mutationFn: () => api.deleteInitiative(i.id),
@@ -72,7 +73,7 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
       toast.success('Initiative deleted');
       navigate('/');
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
 
   return (
@@ -191,7 +192,7 @@ function EditDialog({ detail, open, onOpenChange }: { detail: InitiativeDetail; 
       toast.success('Saved. The next planner reads the new brief.');
       onOpenChange(false);
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   return (
     <Dialog

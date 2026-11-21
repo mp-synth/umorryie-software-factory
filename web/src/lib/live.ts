@@ -2,11 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { ChangeEvent, RunEvent } from '@factory/shared';
 
-/**
- * EventSource that survives server restarts. The browser only retries on its
- * own after a dropped connection; an error *status* (e.g. the dev proxy's 502
- * while the server restarts) closes it for good, so we reopen it ourselves.
- */
+const DEAD_STREAM_SILENCE_MS = 25_000;
+const TAB_FOCUS_SILENCE_MS = 12_000;
+const WATCHDOG_INTERVAL_MS = 5_000;
+
 function openStream(url: () => string, setup: (es: EventSource) => void, onState?: (open: boolean) => void): () => void {
   let es: EventSource | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -21,13 +20,11 @@ function openStream(url: () => string, setup: (es: EventSource) => void, onState
     timer = setTimeout(connect, delay);
     delay = Math.min(delay * 2, 15_000);
   };
-  // The server pings every 10s. A proxy can keep a dead stream "open" forever, so silence means reconnect.
-  const check = (maxSilence: number) => {
+  const reopenIfSilentFor = (maxSilence: number) => {
     if (es && Date.now() - lastSeen > maxSilence) reopen();
   };
-  const watchdog = setInterval(() => check(25_000), 5_000);
-  // Coming back to the tab: don't wait for the next tick.
-  const onVisible = () => document.visibilityState === 'visible' && check(12_000);
+  const watchdog = setInterval(() => reopenIfSilentFor(DEAD_STREAM_SILENCE_MS), WATCHDOG_INTERVAL_MS);
+  const onVisible = () => document.visibilityState === 'visible' && reopenIfSilentFor(TAB_FOCUS_SILENCE_MS);
   document.addEventListener('visibilitychange', onVisible);
   window.addEventListener('focus', onVisible);
   const connect = () => {
@@ -58,7 +55,6 @@ function openStream(url: () => string, setup: (es: EventSource) => void, onState
   };
 }
 
-/** One EventSource for the whole app: entity changes invalidate the matching queries. */
 export function useLiveUpdates(): boolean {
   const qc = useQueryClient();
   const [connected, setConnected] = useState(false);
@@ -76,15 +72,14 @@ export function useLiveUpdates(): boolean {
       if (!timer) timer = setTimeout(flush, 120);
     };
     let wasOpen = false;
-    let pendingResync = false;
+    let missedChangesWhileDisconnected = false;
     const stop = openStream(
       () => '/api/stream',
       (es) => es.addEventListener('change', onChange),
       (open) => {
         setConnected(open);
-        // After a reconnect we may have missed changes: refresh everything once.
-        if (open && wasOpen === false && pendingResync) qc.invalidateQueries();
-        if (!open) pendingResync = true;
+        if (open && wasOpen === false && missedChangesWhileDisconnected) qc.invalidateQueries();
+        if (!open) missedChangesWhileDisconnected = true;
         wasOpen = open;
       },
     );
@@ -107,7 +102,6 @@ export function useLiveUpdates(): boolean {
   return connected;
 }
 
-/** Streams a run's events: replays history, then follows live. */
 export function useRunEvents(runId: string | null): { events: RunEvent[]; ready: boolean } {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [ready, setReady] = useState(false);
@@ -126,7 +120,6 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; ready:
       setEvents((prev) => prev.concat(batch));
     };
     const stop = openStream(
-      // Resume after the last event we have, so a reconnect never duplicates lines.
       () => `/api/runs/${runId}/stream?after=${lastId.current}`,
       (es) => {
         es.addEventListener('event', (msg) => {
@@ -147,7 +140,6 @@ export function useRunEvents(runId: string | null): { events: RunEvent[]; ready:
   return { events, ready };
 }
 
-/** Re-renders every `ms` so durations tick. */
 export function useNow(ms = 1000, enabled = true): number {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {

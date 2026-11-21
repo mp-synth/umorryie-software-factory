@@ -45,8 +45,8 @@ fresh reviewer after you finish.
   work (stacked). Build on its interfaces; don't re-implement them.
 - Make the smallest change that fully meets the ticket. No speculative
   options, fallbacks or extras. No drive-by refactors.
-- Match the surrounding code: idioms, naming, structure, error handling,
-  comment density. Reuse existing helpers.
+- Match the surrounding code: idioms, naming, structure, error handling.
+  Reuse existing helpers. Follow the owner's code rules below.
 - Handle the edge cases the plan assigns to this ticket.
 - Every new unit of behaviour gets a test where the repo has a test runner.
   Never weaken, skip or special-case an existing test to make it pass.
@@ -92,7 +92,22 @@ Each command you ran and whether it passed, including the checks command.
 
 ## Notes for the reviewer
 Decisions you made where the ticket was ambiguous, each with a one-line reason.
+
+## Pull request
+<title>
+
+<description>
 ```
+
+The `## Pull request` section becomes the PR the factory opens for your branch:
+
+- `<title>`: short, imperative, states the outcome for a user of the code, e.g.
+  "Retry failed Lago syncs automatically". No ticket number, no trailing period.
+- `<description>`: 2 to 4 plain sentences: what changes and why, at a high level.
+  No file lists, function names, step-by-step changes or test summaries (the
+  diff covers that). No headings, lists, checklists or boilerplate.
+- Mention a Linear ticket only when the brief or ticket explicitly gives one.
+  Never infer or invent ticket IDs.
 
 Write `STATUS: BLOCKED` on the first line instead when you can't meet the
 ticket: it contradicts itself or the code, it needs a decision only a human

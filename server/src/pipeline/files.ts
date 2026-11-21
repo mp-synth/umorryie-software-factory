@@ -1,12 +1,9 @@
-// Run folders: every agent reads files and writes exactly one output file.
-// The DB keeps a copy of every output, so these folders can always be rebuilt.
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Initiative, Message, Project, Ticket } from '@factory/shared';
 import { config } from '../config.ts';
+import { seqLabel, ticketLabel } from './labels.ts';
 import { slugify } from './plan.ts';
-
-const pad = (n: number) => String(n).padStart(2, '0');
 
 export function initiativeDir(i: Initiative): string {
   return path.join(config.home, 'initiatives', `${i.slug}-${i.id.slice(0, 8)}`);
@@ -17,7 +14,7 @@ export function planRoundDir(i: Initiative, round: number): string {
 }
 
 export function ticketDir(i: Initiative, t: Ticket): string {
-  return path.join(initiativeDir(i), 'tickets', `${pad(t.seq)}-${t.key}`);
+  return path.join(initiativeDir(i), 'tickets', `${seqLabel(t.seq)}-${t.key}`);
 }
 
 export function ticketRoundDir(i: Initiative, t: Ticket, round: number): string {
@@ -29,15 +26,11 @@ export function askDir(i: Initiative, runId: string): string {
 }
 
 export function worktreePath(p: Project, i: Initiative, t: Ticket): string {
-  return path.join(config.home, 'worktrees', slugify(p.name, 30), `${i.slug}-${i.id.slice(0, 8)}`, `${pad(t.seq)}-${t.key}`);
+  return path.join(config.home, 'worktrees', slugify(p.name, 30), `${i.slug}-${i.id.slice(0, 8)}`, `${seqLabel(t.seq)}-${t.key}`);
 }
 
 export function branchName(i: Initiative, t: Ticket): string {
-  return `factory/${i.slug}/${pad(t.seq)}-${t.key}`;
-}
-
-export function ticketLabel(t: Pick<Ticket, 'seq' | 'title'>): string {
-  return `[${pad(t.seq)}] ${t.title}`;
+  return `factory/${i.slug}/${seqLabel(t.seq)}-${t.key}`;
 }
 
 export function write(file: string, content: string): string {
@@ -116,4 +109,20 @@ export function renderConversation(msgs: Message[], question: string): string {
   }
   lines.push('# The question to answer now', '', question.trim());
   return lines.join('\n');
+}
+
+export function writeBrief(i: Initiative, p: Project): string {
+  return write(path.join(initiativeDir(i), 'brief.md'), renderBrief(i, p));
+}
+
+export function writePlanMd(i: Initiative): string {
+  return write(path.join(initiativeDir(i), 'plan.md'), i.planMd ?? '');
+}
+
+export function writeTicket(i: Initiative, t: Ticket, all: Ticket[]): string {
+  return write(path.join(ticketDir(i, t), 'ticket.md'), renderTicket(t, all));
+}
+
+export function writeFeedback(dir: string, msgs: Message[], subject: string): string {
+  return write(path.join(dir, 'feedback.md'), renderFeedback(msgs, `Owner feedback on ${subject}`));
 }

@@ -27,7 +27,8 @@ import { toast } from 'sonner';
 import type { InitiativeDetail, Run, Ticket } from '@factory/shared';
 import { api, type BulkAction, type TicketAction } from '@/lib/api';
 import { useNow } from '@/lib/live';
-import { runKind } from '@/lib/status';
+import { runKind, isRunInFlight } from '@/lib/status';
+import { copyWithToast, toastError } from '@/lib/toasts';
 import { ago, cn, copy, money, pad2, runDuration, shortPath } from '@/lib/utils';
 import { Markdown } from './Markdown';
 import { RunPill, TicketPill, VerdictPill } from './StatusPill';
@@ -49,7 +50,7 @@ function useExpanded(initiativeId: string) {
     try {
       localStorage.setItem(key, JSON.stringify([...set]));
     } catch {
-      /* storage unavailable */
+      return;
     }
   }, [key, set]);
   const toggle = (id: string) =>
@@ -72,7 +73,7 @@ export function TicketList({ detail }: { detail: InitiativeDetail }) {
       toast.success(
         a === 'sync-prs' ? `Synced PRs (${r.count} changed)` : r.count ? `Queued ${r.count} agent${r.count > 1 ? 's' : ''}` : 'Nothing to do right now',
       ),
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   const counts = (s: string[]) => tickets.filter((t) => s.includes(t.status)).length;
   const hasPrs = tickets.some((t) => t.prNumber);
@@ -176,7 +177,7 @@ function TicketRow({
 }) {
   const drawer = useRunDrawer();
   const [editing, setEditing] = useState(false);
-  const activeRun = runs.find((r) => r.status === 'running' || r.status === 'queued');
+  const activeRun = runs.find(isRunInFlight);
   const cost = runs.reduce((a, r) => a + (r.costUsd ?? 0), 0);
   const deps = t.dependsOn.map((k) => all.find((x) => x.key === k)).filter(Boolean) as Ticket[];
   const waitingOn = deps.filter((d) => !['approved', 'merged'].includes(d.status) && !d.branch);
@@ -195,7 +196,7 @@ function TicketRow({
       };
       toast.success(msg[a]);
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
 
   const primary = (() => {
@@ -403,7 +404,7 @@ function TicketDetail({ ticket: t, runs, initiativeId }: { ticket: Ticket; runs:
 
 function CopyChip({ value, display, icon }: { value: string; display?: string; icon?: ReactNode }) {
   return (
-    <button onClick={() => copy(value).then(() => toast.success('Copied'))} className="mono-chip hover:border-line-strong hover:text-zinc-200" title={value}>
+    <button onClick={() => copyWithToast(value)} className="mono-chip hover:border-line-strong hover:text-zinc-200" title={value}>
       {icon}
       <span className="max-w-[340px] truncate">{display ?? value}</span>
       <Copy className="h-2.5 w-2.5 opacity-60" />
@@ -455,7 +456,7 @@ function TicketComposer({ ticket: t, initiativeId }: { ticket: Ticket; initiativ
       setText('');
       toast.success(kind === 'question' ? 'Asked — the answer appears in Activity' : t.branch ? 'Feedback sent — a fresh fixer is starting' : 'Feedback saved — a fresh executor is starting');
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   if (['proposed'].includes(t.status)) return null;
   return (
@@ -497,7 +498,7 @@ function EditTicketDialog({ ticket: t, open, onOpenChange }: { ticket: Ticket; o
       toast.success('Ticket saved');
       onOpenChange(false);
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   const set = (k: keyof typeof form) => (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setForm((f) => ({ ...f, [k]: e.target.value }));
   return (

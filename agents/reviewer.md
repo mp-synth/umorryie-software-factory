@@ -47,6 +47,9 @@ files (no `--fix`, no formatters, no installs beyond what a check needs).
 5. **Patterns and maintainability.** Reuses existing helpers, matches the
    repo's conventions, no needless complexity, no dead code, clear names.
    Only where it materially affects correctness or the next engineer.
+6. **The owner's code rules** (below). Added or changed lines that duplicate
+   logic, add comments, comment on the change itself, mention Linear, or add
+   redundant docstrings are `major`: the owner won't merge them.
 
 ## Verify before you report
 
@@ -54,7 +57,8 @@ Every finding must survive your own attempt to disprove it. Trace the code
 path, check the caller, or run a targeted test. If you can't construct a
 concrete failure scenario (these inputs or this state lead to this wrong
 result), it is not a blocker or major finding: put it under Notes or drop it.
-False positives cost a full fix round.
+False positives cost a full fix round. The owner's code rules are the one
+exception: there the offending line itself is the evidence.
 
 On re-review: for each earlier finding, check whether it was fixed. If the
 fixer marked it INVALID with evidence and you agree, accept the rebuttal. If

@@ -5,6 +5,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { DEFAULT_INITIATIVE_SETTINGS, type InitiativeSettings } from '@factory/shared';
 import { api } from '@/lib/api';
+import { toastError } from '@/lib/toasts';
 import { Button, Dialog, Field, Input, Select, Switch, Textarea } from './ui';
 
 const AUTOPILOT: { key: keyof InitiativeSettings; label: string; hint: string }[] = [
@@ -48,7 +49,7 @@ export function NewInitiativeDialog({ open, onOpenChange }: { open: boolean; onO
       setBrief('');
       navigate(`/i/${init.id}`);
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
 
   const canSubmit = projectId && title.trim().length >= 3 && brief.trim().length >= 10 && baseBranch;

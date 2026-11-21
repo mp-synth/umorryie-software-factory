@@ -17,16 +17,24 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+async function errorFrom(res: Response): Promise<ApiError> {
+  const data = await res.json().catch(() => null);
+  return new ApiError(data?.error ?? `${res.status} ${res.statusText}`, res.status);
+}
+
+async function send(method: string, url: string, body?: unknown): Promise<Response> {
   const res = await fetch(url, {
     method,
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new ApiError(data?.error ?? `${res.status} ${res.statusText}`, res.status);
-  return data as T;
+  if (!res.ok) throw await errorFrom(res);
+  return res;
+}
+
+async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+  const text = await (await send(method, url, body)).text();
+  return (text ? JSON.parse(text) : null) as T;
 }
 
 const get = <T,>(url: string) => request<T>('GET', url);
@@ -81,13 +89,7 @@ export const api = {
   planReview: (id: string) => post(`/api/initiatives/${id}/plan-review`),
   approve: (id: string, note?: string) => post(`/api/initiatives/${id}/approve`, { note }),
   resetInitiative: (id: string) => post(`/api/initiatives/${id}/reset`),
-  // Plain markdown, so it can't go through request(), which JSON-parses the body.
-  report: async (id: string) => {
-    const res = await fetch(`/api/initiatives/${id}/report`);
-    if (res.ok) return res.text();
-    const data = await res.json().catch(() => null);
-    throw new ApiError(data?.error ?? `${res.status} ${res.statusText}`, res.status);
-  },
+  reportMarkdown: (id: string) => send('GET', `/api/initiatives/${id}/report`).then((res) => res.text()),
   bulk: (id: string, action: BulkAction) => post<{ ok: true; count: number }>(`/api/initiatives/${id}/actions/${action}`),
   message: (id: string, body: { body: string; kind: 'comment' | 'feedback' | 'question'; ticketId?: string | null; act?: boolean }) =>
     post<{ ok: true; runId?: string }>(`/api/initiatives/${id}/messages`, body),

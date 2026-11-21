@@ -1,9 +1,9 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Cpu, HardDrive, Settings2, XCircle } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
-import { toast } from 'sonner';
 import type { AppSettings } from '@factory/shared';
 import { api } from '@/lib/api';
+import { toastError, toastSuccess } from '@/lib/toasts';
 import { shortPath } from '@/lib/utils';
 import { Button, Card, CardHeader, Field, Input, Spinner, Switch } from '@/components/ui';
 
@@ -16,8 +16,8 @@ export function SettingsPage() {
   }, [settings]);
   const save = useMutation({
     mutationFn: (s: Partial<AppSettings>) => api.updateSettings(s),
-    onSuccess: () => toast.success('Settings saved'),
-    onError: (e: Error) => toast.error(e.message),
+    onSuccess: toastSuccess('Settings saved'),
+    onError: toastError,
   });
 
   return (
