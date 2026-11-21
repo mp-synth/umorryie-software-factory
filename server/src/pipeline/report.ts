@@ -24,6 +24,6 @@ export function renderReport({ initiative, tickets, costUsd }: ReportInput): str
     '',
     ...ticketLines,
     '',
-    `Agent spend: $${costUsd.toFixed(2)}`,
+    `Agent spend: ${costUsd > 0 && costUsd < 0.01 ? '<$0.01' : `$${costUsd.toFixed(2)}`}`,
   ].join('\n') + '\n';
 }

@@ -42,7 +42,7 @@ test('renderReport renders a planned initiative with mixed tickets', () => {
 
 test('renderReport handles no plan and no tickets', () => {
   const out = renderReport({ initiative: { title: 'Draft idea', planJson: null }, tickets: [], costUsd: 0.0042 });
-  assert.equal(out, '# Draft idea\n\nGoal: _no plan yet_\n\n- _No tickets yet._\n\nAgent spend: $0.00\n');
+  assert.equal(out, '# Draft idea\n\nGoal: _no plan yet_\n\n- _No tickets yet._\n\nAgent spend: <$0.01\n');
 });
 
 test('renderReport omits the PR link when prUrl is null', () => {
@@ -84,4 +84,13 @@ test('renderReport sorts tickets by seq without mutating input and formats zero 
     ].join('\n'),
   );
   assert.deepEqual(tickets.map((t) => t.seq), [2, 1]);
+});
+
+test('renderReport shows <$0.01 for non-zero spend below a cent', () => {
+  const spend = (costUsd: number) =>
+    renderReport({ initiative: { title: 'T', planJson }, tickets: [], costUsd }).trimEnd().split('\n').at(-1);
+  assert.equal(spend(0.0042), 'Agent spend: <$0.01');
+  assert.equal(spend(0.0099), 'Agent spend: <$0.01');
+  assert.equal(spend(0.01), 'Agent spend: $0.01');
+  assert.equal(spend(0), 'Agent spend: $0.00');
 });
