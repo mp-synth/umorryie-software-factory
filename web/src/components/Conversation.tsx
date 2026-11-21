@@ -1,9 +1,11 @@
+import { toastError } from '@/lib/toasts';
 import { useMutation } from '@tanstack/react-query';
 import { Bot, Info, MessageCircleQuestion, MessagesSquare, Send, StickyNote, User } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import type { InitiativeDetail, Message } from '@factory/shared';
 import { api } from '@/lib/api';
+import { isRunInFlight } from '@/lib/status';
 import { ago, cn, pad2 } from '@/lib/utils';
 import { Markdown } from './Markdown';
 import { useRunDrawer } from './RunDrawer';
@@ -27,7 +29,7 @@ export function Conversation({ detail }: { detail: InitiativeDetail }) {
     if (feedbackDisabled && mode === 'feedback') setMode('question');
   }, [feedbackDisabled, mode]);
 
-  const pendingAsks = runs.filter((r) => r.kind === 'ask' && (r.status === 'queued' || r.status === 'running'));
+  const pendingAsks = runs.filter((r) => r.kind === 'ask' && isRunInFlight(r));
   const shown = useMemo(() => (filter === 'talk' ? messages.filter((m) => m.kind !== 'event') : messages), [messages, filter]);
 
   useEffect(() => {
@@ -41,7 +43,7 @@ export function Conversation({ detail }: { detail: InitiativeDetail }) {
       setText('');
       if (mode === 'feedback') toast.success(ticketTarget ? 'Feedback sent to a fresh fixer' : 'Feedback sent — a fresh planner is revising');
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
 
   const placeholder =

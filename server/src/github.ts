@@ -1,6 +1,5 @@
 import { exec } from './git.ts';
 
-/** Marker on every comment the factory posts, so it never feeds its own output back to agents. */
 export const FACTORY_MARKER = '<!-- software-factory -->';
 
 async function gh(cwd: string, args: string[], input?: string, timeoutMs = 60_000) {
@@ -60,9 +59,9 @@ interface CheckRun {
 export interface PrSnapshot {
   number: number;
   url: string;
-  state: string; // OPEN | CLOSED | MERGED
+  state: string;
   isDraft: boolean;
-  mergeable: string; // MERGEABLE | CONFLICTING | UNKNOWN
+  mergeable: string;
   baseRefName: string;
   headRefOid: string;
   failingChecks: { name: string; url: string | null }[];
@@ -142,7 +141,6 @@ export async function unresolvedThreads(cwd: string, prNumber: number): Promise<
     .filter((t: ReviewThread) => t.comments.length > 0);
 }
 
-/** Last lines of a failed GitHub Actions job log, when the check links to one. */
 export async function failedLog(cwd: string, url: string | null): Promise<string | null> {
   const m = url?.match(/\/actions\/runs\/(\d+)/);
   if (!m) return null;

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Checks prerequisites, installs dependencies and starts Postgres.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

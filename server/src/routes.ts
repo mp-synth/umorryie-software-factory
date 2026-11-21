@@ -50,7 +50,6 @@ function sse(req: FastifyRequest, reply: FastifyReply): (event: string, data: un
     'X-Accel-Buffering': 'no',
   });
   reply.raw.write('retry: 2000\n\n');
-  // A real event (not a comment) so the client can tell a live stream from a silently dead one.
   const ping = setInterval(() => reply.raw.write(`event: ping\ndata: ${Date.now()}\n\n`), 10_000);
   req.raw.on('close', () => clearInterval(ping));
   return (event, data) => reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -65,8 +64,6 @@ export async function routes(app: FastifyInstance): Promise<void> {
     if (status >= 500) app.log.error(err);
     return reply.status(status).send({ error: err.message });
   });
-
-  // ---------------- system ----------------
 
   app.get('/api/health', async () => {
     let db = false;
@@ -110,8 +107,6 @@ export async function routes(app: FastifyInstance): Promise<void> {
     bus.on('change', onChange);
     req.raw.on('close', () => bus.off('change', onChange));
   });
-
-  // ---------------- projects ----------------
 
   app.get('/api/projects', async () => repo.listProjects());
 
@@ -202,8 +197,6 @@ export async function routes(app: FastifyInstance): Promise<void> {
     return { branches: await gitx.listBranches(p.repoPath), defaultBranch: p.defaultBranch };
   });
 
-  // ---------------- initiatives ----------------
-
   app.get('/api/initiatives', async () => repo.listInitiativeSummaries());
 
   app.post('/api/initiatives', async (req, reply) => {
@@ -242,12 +235,12 @@ export async function routes(app: FastifyInstance): Promise<void> {
       reply.status(404).send({ error: 'initiative not found' });
       return;
     }
-    const [project, tickets, runs, messages, [{ cost }]] = await Promise.all([
+    const [project, tickets, runs, messages, cost] = await Promise.all([
       repo.getProject(initiative.projectId),
       repo.listTickets(iid),
       repo.listRuns({ initiativeId: iid, limit: 500 }),
       repo.listMessages(iid),
-      sql<{ cost: number }[]>`select coalesce(sum(cost_usd), 0)::float8 as cost from runs where initiative_id = ${iid}`,
+      repo.initiativeCost(iid),
     ]);
     return { initiative, project: project!, tickets, runs, messages, costUsd: cost };
   });
@@ -256,9 +249,9 @@ export async function routes(app: FastifyInstance): Promise<void> {
     const { id: iid } = id.parse(req.params);
     const initiative = await repo.getInitiative(iid);
     if (!initiative) return reply.status(404).send({ error: 'initiative not found' });
-    const [tickets, [{ cost }]] = await Promise.all([
+    const [tickets, cost] = await Promise.all([
       repo.listTickets(iid),
-      sql<{ cost: number }[]>`select coalesce(sum(cost_usd), 0)::float8 as cost from runs where initiative_id = ${iid}`,
+      repo.initiativeCost(iid),
     ]);
     return reply.type('text/markdown; charset=utf-8').send(renderReport({ initiative, tickets, costUsd: cost }));
   });
@@ -332,11 +325,12 @@ export async function routes(app: FastifyInstance): Promise<void> {
         body: z.string().trim().min(1).max(20_000),
         kind: z.enum(['comment', 'feedback', 'question']),
         ticketId: z.string().uuid().nullable().optional(),
-        /** For feedback: start the agent that consumes it right away. */
         act: z.boolean().default(true),
       })
       .parse(req.body);
     const ticketId = body.ticketId ?? null;
+    const ticket = ticketId ? await repo.getTicket(ticketId) : null;
+    if (ticket && body.kind === 'feedback' && body.act) engine.assertTicketAcceptsWork(ticket);
     if (body.kind === 'question') {
       const run = await engine.ask(iid, ticketId, body.body);
       return reply.status(201).send({ ok: true, runId: run.id });
@@ -347,15 +341,12 @@ export async function routes(app: FastifyInstance): Promise<void> {
     }
     const msg = await repo.addMessage({ initiativeId: iid, ticketId, author: 'human', kind: body.kind, body: body.body });
     if (body.kind === 'feedback' && ticketId && body.act) {
-      const t = await repo.getTicket(ticketId);
-      const kind = t?.branch ? 'fix' : 'execute';
+      const kind = ticket?.branch ? 'fix' : 'execute';
       const run = await engine.enqueue({ kind, initiativeId: iid, ticketId, trigger: 'manual' });
       return reply.status(201).send({ ok: true, message: msg, runId: run.id });
     }
     return reply.status(201).send({ ok: true, message: msg });
   });
-
-  // ---------------- tickets ----------------
 
   app.patch('/api/tickets/:id', async (req) => {
     const { id: tid } = id.parse(req.params);
@@ -409,8 +400,6 @@ export async function routes(app: FastifyInstance): Promise<void> {
         return { ok: true };
     }
   });
-
-  // ---------------- runs ----------------
 
   app.get('/api/runs', async (req) => {
     const q = z

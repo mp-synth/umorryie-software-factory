@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { useLiveUpdates } from '@/lib/live';
+import { isNotArchived } from '@/lib/status';
 import { cn } from '@/lib/utils';
 import { NewInitiativeDialog } from './NewInitiativeDialog';
 import { RunDrawer } from './RunDrawer';
@@ -15,7 +16,7 @@ export function Layout() {
   const { data: active = [] } = useQuery({ queryKey: ['runs', 'active'], queryFn: () => api.runs({ active: true }), refetchInterval: 15_000 });
   const { data: initiatives = [] } = useQuery({ queryKey: ['initiatives'], queryFn: api.initiatives });
   const running = active.filter((r) => r.status === 'running').length;
-  const attention = initiatives.filter((i) => i.attention && i.status !== 'archived').length;
+  const attention = initiatives.filter((i) => i.attention && isNotArchived(i)).length;
 
   const nav = [
     { to: '/', label: 'Dashboard', icon: LayoutDashboard, badge: attention ? { n: attention, tone: 'bg-amber-400/15 text-amber-300' } : null },
@@ -65,7 +66,7 @@ export function Layout() {
           <div className="section-title px-2.5 pb-1.5">Initiatives</div>
           <div className="space-y-0.5">
             {initiatives
-              .filter((i) => i.status !== 'archived')
+              .filter(isNotArchived)
               .slice(0, 14)
               .map((i) => (
                 <NavLink

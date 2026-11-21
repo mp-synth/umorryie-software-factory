@@ -55,7 +55,8 @@ Check failures, CI failures and merge conflicts are VALID by definition.
 ## Step 2: fix what is real
 
 - Fix VALID items and the real part of PARTIAL items with the smallest change,
-  plus a regression test that fails without the fix.
+  plus a regression test that fails without the fix. Your changes follow the
+  owner's code rules below like any other code.
 - Merge conflicts: `git fetch origin && git merge origin/<base>`, resolve,
   commit. Never rebase.
 - Tests: fix the code, not the assertion. Never weaken, skip or delete a test

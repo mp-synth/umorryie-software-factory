@@ -3,8 +3,6 @@ import path from 'node:path';
 import postgres from 'postgres';
 import { config } from './config.ts';
 
-// Column names map snake_case <-> camelCase. JSON values are left untouched on
-// purpose: plan.json keeps the planner's snake_case keys.
 export const sql = postgres(config.databaseUrl, {
   max: 10,
   onnotice: () => {},

@@ -11,9 +11,7 @@ export interface AgentSpec {
   cwd: string;
   model: string;
   effort?: string | null;
-  /** Role instructions, appended to Claude Code's own system prompt. */
   rolePrompt: string;
-  /** The step header: absolute paths to inputs and outputs. Nothing else. */
   prompt: string;
   tools: string[];
   addDirs: string[];
@@ -73,27 +71,21 @@ export function resolveClaudeBin(): string | null {
 export async function claudeVersion(): Promise<string | null> {
   const bin = resolveClaudeBin();
   if (!bin) return null;
-  const r = await exec(bin, ['--version'], { timeoutMs: 15_000, env: agentEnv() });
+  const r = await exec(bin, ['--version'], { timeoutMs: 15_000, env: freshAgentEnv() });
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
-/**
- * The environment for an agent. When the factory itself runs inside a Claude
- * Code session, that session's variables would make the child think it is a
- * nested SDK session; strip them so every agent starts like a fresh `claude -p`
- * with the user's own login.
- */
-export function agentEnv(): NodeJS.ProcessEnv {
-  const keep = new Set(['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CONFIG_DIR']);
-  const insideHost = !!process.env.CLAUDECODE;
-  const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (keep.has(k)) env[k] = v;
-    else if (k.startsWith('CLAUDE') || k.startsWith('MCP_')) continue;
-    else if (insideHost && k === 'ANTHROPIC_BASE_URL') continue;
-    else env[k] = v;
-  }
-  return env;
+const CLAUDE_AUTH_VARIABLES = new Set(['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CONFIG_DIR']);
+
+function belongsToParentClaudeSession(name: string, serverRunsInsideClaudeSession: boolean): boolean {
+  if (CLAUDE_AUTH_VARIABLES.has(name)) return false;
+  if (name.startsWith('CLAUDE') || name.startsWith('MCP_')) return true;
+  return serverRunsInsideClaudeSession && name === 'ANTHROPIC_BASE_URL';
+}
+
+export function freshAgentEnv(): NodeJS.ProcessEnv {
+  const insideClaudeSession = !!process.env.CLAUDECODE;
+  return Object.fromEntries(Object.entries(process.env).filter(([name]) => !belongsToParentClaudeSession(name, insideClaudeSession)));
 }
 
 function truncate(s: string, n: number): string {
@@ -128,7 +120,6 @@ export function buildArgs(spec: AgentSpec): string[] {
     '--append-system-prompt', spec.rolePrompt,
     '--permission-mode', 'bypassPermissions',
     '--tools', spec.tools.join(','),
-    // Fresh, unpolluted context: no MCP servers, no user hooks/plugins by default.
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--setting-sources', spec.loadUserSettings ? 'user,project,local' : 'project,local',
   ];
@@ -154,7 +145,7 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
 
   const child = spawn(bin, buildArgs(spec), {
     cwd: spec.cwd,
-    env: agentEnv(),
+    env: freshAgentEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   });

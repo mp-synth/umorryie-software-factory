@@ -1,8 +1,8 @@
 import { useMutation } from '@tanstack/react-query';
 import { Gauge } from 'lucide-react';
-import { toast } from 'sonner';
 import type { Initiative, InitiativeSettings, Model } from '@factory/shared';
 import { api } from '@/lib/api';
+import { toastError } from '@/lib/toasts';
 import { Card, CardHeader, Select, Switch } from './ui';
 
 const TOGGLES: { key: keyof InitiativeSettings; label: string }[] = [
@@ -27,7 +27,7 @@ const MODELS: { key: keyof InitiativeSettings['models']; label: string }[] = [
 export function AutopilotCard({ initiative: i }: { initiative: Initiative }) {
   const save = useMutation({
     mutationFn: (settings: Partial<InitiativeSettings>) => api.updateInitiative(i.id, { settings }),
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   const s = i.settings;
   return (

@@ -1,9 +1,10 @@
+import { toastError, toastSuccess } from '@/lib/toasts';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { FolderGit2, Github, GitBranch, MoreHorizontal, Pencil, Plus, ShieldCheck, Trash2, Wrench } from 'lucide-react';
 import { useState } from 'react';
-import { toast } from 'sonner';
 import type { Project } from '@factory/shared';
 import { api } from '@/lib/api';
+import { isNotArchived } from '@/lib/status';
 import { shortPath } from '@/lib/utils';
 import { ProjectDialog } from '@/components/ProjectDialog';
 import { Button, Card, Chip, EmptyState, Menu, MenuItem, Skeleton } from '@/components/ui';
@@ -14,8 +15,8 @@ export function ProjectsPage() {
   const [dialog, setDialog] = useState<{ open: boolean; project: Project | null }>({ open: false, project: null });
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteProject(id),
-    onSuccess: () => toast.success('Project removed'),
-    onError: (e: Error) => toast.error(e.message),
+    onSuccess: toastSuccess('Project removed'),
+    onError: toastError,
   });
 
   return (
@@ -48,7 +49,7 @@ export function ProjectsPage() {
       ) : (
         <div className="grid gap-3 md:grid-cols-2">
           {projects.map((p) => {
-            const count = initiatives.filter((i) => i.projectId === p.id && i.status !== 'archived').length;
+            const count = initiatives.filter((i) => i.projectId === p.id && isNotArchived(i)).length;
             return (
               <Card key={p.id} className="p-4">
                 <div className="flex items-start gap-3">

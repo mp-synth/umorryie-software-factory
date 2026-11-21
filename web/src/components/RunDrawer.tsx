@@ -19,15 +19,15 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { toast } from 'sonner';
 import type { Run, RunEvent } from '@factory/shared';
 import { api } from '@/lib/api';
 import { useNow, useRunEvents } from '@/lib/live';
-import { runKind } from '@/lib/status';
+import { runKind, isRunInFlight } from '@/lib/status';
+import { copyWithToast, toastError, toastSuccess } from '@/lib/toasts';
 import { cn, copy, money, pad2, runDuration, shortPath, tokens } from '@/lib/utils';
 import { Markdown } from './Markdown';
 import { RunPill, VerdictPill } from './StatusPill';
-import { Button, Chip, Segmented, Spinner } from './ui';
+import { Button, Chip, Segmented, Spinner, LiveDot } from './ui';
 
 export function useRunDrawer() {
   const [params, setParams] = useSearchParams();
@@ -66,13 +66,13 @@ export function RunDrawer() {
 function RunView({ runId, onClose }: { runId: string; onClose: () => void }) {
   const { data: run } = useQuery({ queryKey: ['run', runId], queryFn: () => api.run(runId), refetchInterval: (q) => (q.state.data?.status === 'running' ? 5000 : false) });
   const { events, ready } = useRunEvents(runId);
-  const live = run?.status === 'running' || run?.status === 'queued';
+  const live = !!run && isRunInFlight(run);
   const now = useNow(1000, live);
   const [tab, setTab] = useState<'activity' | 'output' | 'prompt'>('activity');
   const cancel = useMutation({
     mutationFn: () => api.cancelRun(runId),
-    onSuccess: () => toast.success('Cancel requested'),
-    onError: (e: Error) => toast.error(e.message),
+    onSuccess: toastSuccess('Cancel requested'),
+    onError: toastError,
   });
   useEffect(() => {
     if (run && !live && run.outputMd && tab === 'activity' && events.length === 0 && ready) setTab('output');
@@ -140,13 +140,13 @@ function RunView({ runId, onClose }: { runId: string; onClose: () => void }) {
             value={tab}
             onChange={setTab}
             options={[
-              { value: 'activity', label: <>Activity {live && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />}</> },
+              { value: 'activity', label: <>Activity {live && <LiveDot />}</> },
               { value: 'output', label: 'Output' },
               { value: 'prompt', label: 'Prompt' },
             ]}
           />
           {resume && (
-            <Button size="xs" variant="ghost" icon={<Terminal className="h-3 w-3" />} onClick={() => copy(resume).then(() => toast.success('Resume command copied'))}>
+            <Button size="xs" variant="ghost" icon={<Terminal className="h-3 w-3" />} onClick={() => copyWithToast(resume, 'Resume command copied')}>
               Copy resume command
             </Button>
           )}
@@ -195,7 +195,7 @@ function PromptTab({ run }: { run: Run }) {
             <dd className="flex min-w-0 items-center gap-1.5 font-mono text-zinc-300">
               <span className="truncate" title={v ?? ''}>{shortPath(v) || '—'}</span>
               {v && (
-                <button className="text-zinc-600 hover:text-zinc-300" onClick={() => copy(v).then(() => toast.success('Copied'))} aria-label={`Copy ${k}`}>
+                <button className="text-zinc-600 hover:text-zinc-300" onClick={() => copyWithToast(v)} aria-label={`Copy ${k}`}>
                   <Copy className="h-3 w-3" />
                 </button>
               )}
@@ -206,8 +206,6 @@ function PromptTab({ run }: { run: Run }) {
     </div>
   );
 }
-
-// ---------------------------------------------------------------- activity stream
 
 type Item = { type: 'event'; e: RunEvent } | { type: 'tool'; use: RunEvent; result?: RunEvent } | { type: 'logs'; lines: RunEvent[] };
 
@@ -299,7 +297,7 @@ function Activity({ run, events, ready }: { run: Run; events: RunEvent[]; ready:
       </ol>
       {live && (
         <div className="mt-3 flex items-center gap-2 pl-1 text-2xs text-cyan-300/80">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" /> working…
+          <LiveDot /> working…
         </div>
       )}
     </div>

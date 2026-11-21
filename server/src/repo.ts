@@ -1,4 +1,3 @@
-// Data access. Every write that the UI should see goes through here and emits a change event.
 import {
   DEFAULT_APP_SETTINGS,
   DEFAULT_INITIATIVE_SETTINGS,
@@ -27,8 +26,6 @@ function prepare(patch: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
-// ---------- settings ----------
-
 export async function getAppSettings(): Promise<AppSettings> {
   const [row] = await sql<{ data: Partial<AppSettings> }[]>`select data from app_settings where id = 1`;
   return { ...DEFAULT_APP_SETTINGS, ...(row?.data ?? {}) };
@@ -49,8 +46,6 @@ export function initiativeSettings(i: Pick<Initiative, 'settings'>): InitiativeS
     models: { ...DEFAULT_INITIATIVE_SETTINGS.models, ...(s.models ?? {}) },
   };
 }
-
-// ---------- projects ----------
 
 export async function listProjects(): Promise<Project[]> {
   return sql<Project[]>`select * from projects order by name`;
@@ -78,8 +73,6 @@ export async function deleteProject(id: string): Promise<void> {
   emitChange({ type: 'project', id });
 }
 
-// ---------- initiatives ----------
-
 function normalizeInitiative(i: Initiative): Initiative {
   return { ...i, settings: initiativeSettings(i) };
 }
@@ -101,6 +94,11 @@ export async function updateInitiative(id: string, patch: Partial<Initiative>): 
   const [row] = await sql<Initiative[]>`update initiatives set ${sql(prepare(patch))}, updated_at = now() where id = ${id} returning *`;
   emitChange({ type: 'initiative', id, initiativeId: id });
   return normalizeInitiative(row);
+}
+
+export async function initiativeCost(id: string): Promise<number> {
+  const [{ cost }] = await sql<{ cost: number }[]>`select coalesce(sum(cost_usd), 0)::float8 as cost from runs where initiative_id = ${id}`;
+  return cost;
 }
 
 export async function deleteInitiative(id: string): Promise<void> {
@@ -140,8 +138,6 @@ export function attentionFor(status: string, counts: Record<string, number>): st
   return null;
 }
 
-// ---------- tickets ----------
-
 export async function listTickets(initiativeId: string): Promise<Ticket[]> {
   return sql<Ticket[]>`select * from tickets where initiative_id = ${initiativeId} order by seq`;
 }
@@ -156,8 +152,6 @@ export async function updateTicket(id: string, patch: Partial<Ticket>): Promise<
   emitChange({ type: 'ticket', id, initiativeId: row.initiativeId });
   return row;
 }
-
-// ---------- runs ----------
 
 export async function getRun(id: string): Promise<Run | null> {
   const [r] = await sql<Run[]>`select * from runs where id = ${id}`;
@@ -176,13 +170,20 @@ export async function updateRun(id: string, patch: Partial<Run> & { pid?: number
   return row;
 }
 
+export function ticketScope(initiativeId: string, ticketId: string | null) {
+  return ticketId ? sql`ticket_id = ${ticketId}` : sql`initiative_id = ${initiativeId} and ticket_id is null`;
+}
+
+const runsWithTitles = () => sql`
+  select r.*, i.title as initiative_title, t.title as ticket_title, t.seq as ticket_seq
+  from runs r
+  join initiatives i on i.id = r.initiative_id
+  left join tickets t on t.id = r.ticket_id`;
+
 export async function listRuns(opts: { initiativeId?: string; ticketId?: string; active?: boolean; limit?: number }): Promise<Run[]> {
   const limit = opts.limit ?? 200;
   return sql<Run[]>`
-    select r.*, i.title as initiative_title, t.title as ticket_title, t.seq as ticket_seq
-    from runs r
-    join initiatives i on i.id = r.initiative_id
-    left join tickets t on t.id = r.ticket_id
+    ${runsWithTitles()}
     where true
       ${opts.initiativeId ? sql`and r.initiative_id = ${opts.initiativeId}` : sql``}
       ${opts.ticketId ? sql`and r.ticket_id = ${opts.ticketId}` : sql``}
@@ -192,17 +193,13 @@ export async function listRuns(opts: { initiativeId?: string; ticketId?: string;
 }
 
 export async function listRunsById(id: string): Promise<Run[]> {
-  return sql<Run[]>`
-    select r.*, i.title as initiative_title, t.title as ticket_title, t.seq as ticket_seq
-    from runs r join initiatives i on i.id = r.initiative_id left join tickets t on t.id = r.ticket_id
-    where r.id = ${id}`;
+  return sql<Run[]>`${runsWithTitles()} where r.id = ${id}`;
 }
 
-/** Latest finished run of a kind for a ticket (or for the initiative's plan when ticketId is null). */
 export async function latestRun(initiativeId: string, ticketId: string | null, kind: string): Promise<Run | null> {
-  const [r] = ticketId
-    ? await sql<Run[]>`select * from runs where ticket_id = ${ticketId} and kind = ${kind} and status = 'succeeded' order by queued_at desc limit 1`
-    : await sql<Run[]>`select * from runs where initiative_id = ${initiativeId} and ticket_id is null and kind = ${kind} and status = 'succeeded' order by queued_at desc limit 1`;
+  const [r] = await sql<Run[]>`
+    select * from runs where ${ticketScope(initiativeId, ticketId)} and kind = ${kind} and status = 'succeeded'
+    order by queued_at desc limit 1`;
   return r ?? null;
 }
 
@@ -216,8 +213,6 @@ export async function listRunEvents(runId: string, afterId = 0, limit = 5000): P
   return rows.map((r) => ({ ...r, id: String(r.id) }));
 }
 
-// ---------- messages ----------
-
 export async function addMessage(m: Pick<Message, 'initiativeId' | 'author' | 'body'> & Partial<Message>): Promise<Message> {
   const [row] = await sql<Message[]>`insert into messages ${sql(prepare(m))} returning *`;
   emitChange({ type: 'message', id: row.id, initiativeId: row.initiativeId });
@@ -228,11 +223,11 @@ export async function listMessages(initiativeId: string): Promise<Message[]> {
   return sql<Message[]>`select * from messages where initiative_id = ${initiativeId} order by created_at`;
 }
 
-/** Human feedback not yet handed to an agent. ticketId null = initiative-level (plan) feedback. */
 export async function pendingFeedback(initiativeId: string, ticketId: string | null): Promise<Message[]> {
-  return ticketId
-    ? sql<Message[]>`select * from messages where initiative_id = ${initiativeId} and ticket_id = ${ticketId} and kind = 'feedback' and consumed_by_run is null order by created_at`
-    : sql<Message[]>`select * from messages where initiative_id = ${initiativeId} and ticket_id is null and kind = 'feedback' and consumed_by_run is null order by created_at`;
+  return sql<Message[]>`
+    select * from messages where initiative_id = ${initiativeId} and ${ticketScope(initiativeId, ticketId)}
+      and kind = 'feedback' and consumed_by_run is null
+    order by created_at`;
 }
 
 export async function consumeFeedback(ids: string[], runId: string): Promise<void> {

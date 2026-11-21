@@ -20,33 +20,34 @@ import { useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import type { InitiativeDetail, Run } from '@factory/shared';
 import { api } from '@/lib/api';
-import { runKind } from '@/lib/status';
+import { runKind, findSucceededRun, isRunInFlight } from '@/lib/status';
 import { cn, money, pad2, runDuration } from '@/lib/utils';
 import { useNow } from '@/lib/live';
+import { toastError, toastSuccess } from '@/lib/toasts';
 import { Markdown } from './Markdown';
 import { VerdictPill } from './StatusPill';
 import { useRunDrawer } from './RunDrawer';
-import { Button, Card, CardHeader, Chip, Skeleton, Textarea } from './ui';
+import { Button, Card, CardHeader, Chip, Skeleton, Textarea, LiveDot } from './ui';
 
 export function PlanPanel({ detail }: { detail: InitiativeDetail }) {
   const { initiative: i, runs, tickets } = detail;
   const drawer = useRunDrawer();
-  const activePlanRun = runs.find((r) => !r.ticketId && (r.kind === 'plan' || r.kind === 'plan_review') && (r.status === 'running' || r.status === 'queued'));
-  const lastReview = runs.find((r) => r.kind === 'plan_review' && r.status === 'succeeded');
-  const lastPlan = runs.find((r) => r.kind === 'plan' && r.status === 'succeeded');
+  const activePlanRun = runs.find((r) => !r.ticketId && (r.kind === 'plan' || r.kind === 'plan_review') && isRunInFlight(r));
+  const lastReview = findSucceededRun(runs, 'plan_review');
+  const lastPlan = findSucceededRun(runs, 'plan');
   const plan = i.planJson;
   const canReplan = !['in_progress', 'done'].includes(i.status) && !activePlanRun;
   const [showReplan, setShowReplan] = useState(false);
 
   const start = useMutation({
     mutationFn: () => api.plan(i.id),
-    onSuccess: () => toast.success('Planner started'),
-    onError: (e: Error) => toast.error(e.message),
+    onSuccess: toastSuccess('Planner started'),
+    onError: toastError,
   });
   const review = useMutation({
     mutationFn: () => api.planReview(i.id),
-    onSuccess: () => toast.success('Plan reviewer started'),
-    onError: (e: Error) => toast.error(e.message),
+    onSuccess: toastSuccess('Plan reviewer started'),
+    onError: toastError,
   });
 
   return (
@@ -108,7 +109,7 @@ export function PlanPanel({ detail }: { detail: InitiativeDetail }) {
         )}
         {activePlanRun && plan && (
           <div className="mt-4 flex items-center gap-2 rounded-lg border border-cyan-400/20 bg-cyan-400/[0.05] px-3 py-2 text-xs text-cyan-200">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />
+            <LiveDot />
             {runKind[activePlanRun.kind].agent} is working on round {activePlanRun.round}. The overview below is the previous round.
           </div>
         )}
@@ -160,7 +161,7 @@ function Questions({ detail }: { detail: InitiativeDetail }) {
       setAnswer('');
       toast.success('Answer sent — a fresh planner is starting');
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   const blocked = i.planMd?.match(/##\s+Blocked\s*\n([\s\S]*?)(\n##\s|$)/i)?.[1] ?? i.planMd ?? '';
   return (
@@ -190,7 +191,7 @@ function ReplanBox({ initiativeId, onDone }: { initiativeId: string; onDone: () 
       toast.success('A fresh planner is revising the plan');
       onDone();
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   return (
     <div className="space-y-2 rounded-xl border border-line bg-black/20 p-3">
@@ -322,7 +323,7 @@ function ApprovalBar({ detail }: { detail: InitiativeDetail }) {
   const approve = useMutation({
     mutationFn: () => api.approve(i.id, text.trim() || undefined),
     onSuccess: () => toast.success(i.settings.autoExecute ? 'Approved — building the first wave' : 'Approved'),
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   const change = useMutation({
     mutationFn: () => api.plan(i.id, text.trim()),
@@ -330,7 +331,7 @@ function ApprovalBar({ detail }: { detail: InitiativeDetail }) {
       setText('');
       toast.success('Feedback sent — a fresh planner is revising');
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
   const firstWave = tickets.filter((t) => t.wave === 0).length;
   return (

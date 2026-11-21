@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import type { Project } from '@factory/shared';
 import { api } from '@/lib/api';
+import { toastError } from '@/lib/toasts';
 import { Button, Dialog, Field, Input, Select, Spinner, Textarea } from './ui';
 
 function useDebounced<T>(value: T, ms: number): T {
@@ -61,7 +62,7 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
       toast.success(editing ? 'Project saved' : 'Project added');
       onOpenChange(false);
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: toastError,
   });
 
   const branches = info?.branches ?? (project ? [project.defaultBranch] : []);

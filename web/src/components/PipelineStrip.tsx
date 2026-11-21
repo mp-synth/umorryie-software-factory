@@ -1,6 +1,7 @@
 import { Check, type LucideIcon } from 'lucide-react';
 import { BrainCircuit, ClipboardCheck, Hammer, Rocket, ScanSearch, UserCheck, Wrench } from 'lucide-react';
 import type { InitiativeDetail } from '@factory/shared';
+import { findSucceededRun } from '@/lib/status';
 import { cn } from '@/lib/utils';
 
 type State = 'done' | 'active' | 'attention' | 'pending' | 'skipped' | 'failed';
@@ -19,7 +20,7 @@ export function stagesFor(d: InitiativeDetail): Stage[] {
   const approvedOrMerged = count((s) => s === 'approved' || s === 'merged');
   const merged = count((s) => s === 'merged');
   const built = count((s) => !['proposed', 'todo', 'building', 'canceled'].includes(s));
-  const planReviewRun = runs.find((r) => r.kind === 'plan_review' && r.status === 'succeeded');
+  const planReviewRun = findSucceededRun(runs, 'plan_review');
   const fixRuns = runs.filter((r) => r.kind === 'fix' && r.status === 'succeeded').length;
   const approved = !!i.approvedAt;
 

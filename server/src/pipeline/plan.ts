@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import type { PlanJson } from '@factory/shared';
 
-// Tight limits on purpose: the overview a human reads must stay short and specific.
 const bullet = z.string().trim().min(3).max(240);
 const bullets = (min: number, max: number) => z.array(bullet).min(min).max(max);
 
@@ -37,7 +36,6 @@ export interface OrderedTicket {
   wave: number;
 }
 
-/** Validates plan.json. Returns the parsed plan plus a stable topological order, or a list of errors. */
 export function validatePlan(raw: unknown, maxTickets: number): { plan?: PlanJson; order?: OrderedTicket[]; errors: string[] } {
   const parsed = planSchema.safeParse(raw);
   if (!parsed.success) {
@@ -67,10 +65,6 @@ export function validatePlan(raw: unknown, maxTickets: number): { plan?: PlanJso
   return { plan, order, errors: [] };
 }
 
-/**
- * Kahn's algorithm that keeps the planner's array order wherever dependencies
- * allow, so [01] is always something that can start first. Wave = dependency depth.
- */
 export function topoOrder(items: { key: string; dependsOn: string[] }[]): OrderedTicket[] | null {
   const index = new Map(items.map((t, i) => [t.key, i]));
   const remaining = new Map(items.map((t) => [t.key, new Set(t.dependsOn)]));
@@ -93,14 +87,12 @@ export function topoOrder(items: { key: string; dependsOn: string[] }[]): Ordere
   return out;
 }
 
-/** First non-empty line, used as an agent's verdict. */
 export function firstLine(md: string | null | undefined): string | null {
   if (!md) return null;
   const line = md.split('\n').find((l) => l.trim());
   return line ? line.trim().replace(/^#+\s*/, '') : null;
 }
 
-/** Extracts a "## Heading" section from markdown. */
 export function section(md: string, heading: string): string | null {
   const re = new RegExp(`^##\\s+${heading}\\s*$`, 'im');
   const m = re.exec(md);
@@ -116,7 +108,6 @@ export function slugify(s: string, max = 40): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
   if (full.length <= max) return full || 'item';
-  // Cut at a word boundary when there is one in the second half.
   const cut = full.slice(0, max + 1);
   const dash = cut.lastIndexOf('-');
   return (dash > max / 2 ? cut.slice(0, dash) : full.slice(0, max)).replace(/-+$/g, '') || 'item';

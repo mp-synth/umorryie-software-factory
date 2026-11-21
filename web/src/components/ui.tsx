@@ -7,7 +7,6 @@ import { forwardRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type R
 import { cn } from '@/lib/utils';
 import { toneClasses, type Tone } from '@/lib/status';
 
-// ---------------------------------------------------------------- Button
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'outline' | 'success';
 type Size = 'xs' | 'sm' | 'md';
@@ -67,7 +66,6 @@ export const IconButton = forwardRef<HTMLButtonElement, ButtonProps & { label: s
   );
 });
 
-// ---------------------------------------------------------------- Pill / badges
 
 export function Pill({ tone = 'neutral', live, children, className, dot = true }: { tone?: Tone; live?: boolean; children: ReactNode; className?: string; dot?: boolean }) {
   const t = toneClasses[tone];
@@ -100,7 +98,6 @@ export function Spinner({ className }: { className?: string }) {
   return <Loader2 className={cn('h-3.5 w-3.5 animate-spin text-zinc-500', className)} />;
 }
 
-// ---------------------------------------------------------------- Card
 
 export function Card({ className, children }: { className?: string; children: ReactNode }) {
   return <section className={cn('card', className)}>{children}</section>;
@@ -121,7 +118,6 @@ export function CardHeader({ title, icon, right, sub, className }: { title: Reac
   );
 }
 
-// ---------------------------------------------------------------- Inputs
 
 const fieldBase =
   'w-full rounded-lg border border-line-strong bg-black/30 px-3 text-[13px] text-zinc-100 placeholder:text-zinc-600 transition-colors focus:border-violet-400/60 focus:outline-none focus:ring-2 focus:ring-violet-500/20 disabled:opacity-50';
@@ -190,7 +186,6 @@ export function Segmented<T extends string>({ value, onChange, options, size = '
   );
 }
 
-// ---------------------------------------------------------------- Tooltip
 
 export function Tooltip({ content, children, side = 'top' }: { content: ReactNode; children: ReactNode; side?: 'top' | 'bottom' | 'left' | 'right' }) {
   if (!content) return <>{children}</>;
@@ -212,7 +207,6 @@ export function Tooltip({ content, children, side = 'top' }: { content: ReactNod
 
 export const TooltipProvider = TooltipPrimitive.Provider;
 
-// ---------------------------------------------------------------- Dialog
 
 export function Dialog({
   open,
@@ -258,7 +252,6 @@ export function Dialog({
   );
 }
 
-// ---------------------------------------------------------------- Dropdown
 
 export function Menu({ trigger, children, align = 'end' }: { trigger: ReactNode; children: ReactNode; align?: 'start' | 'end' }) {
   return (
@@ -302,7 +295,6 @@ export function MenuLabel({ children }: { children: ReactNode }) {
   return <DropdownPrimitive.Label className="px-2.5 pb-1 pt-1.5 text-2xs font-medium uppercase tracking-wider text-zinc-600">{children}</DropdownPrimitive.Label>;
 }
 
-// ---------------------------------------------------------------- Progress
 
 export function SegmentedBar({ segments, className }: { segments: { value: number; tone: Tone; label?: string }[]; className?: string }) {
   const total = segments.reduce((a, s) => a + s.value, 0);
@@ -340,4 +332,8 @@ export function Skeleton({ className }: { className?: string }) {
       <div className="absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-white/[0.05] to-transparent" />
     </div>
   );
+}
+
+export function LiveDot({ className }: { className?: string }) {
+  return <span className={cn('h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400', className)} />;
 }

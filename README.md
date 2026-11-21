@@ -113,6 +113,15 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
   change the checks it is judged by. Checks failures never reach a reviewer.
 - No secrets: Postgres listens on loopback only with trust auth, so there is no
   password to store. Agents use your existing `claude` login.
+- PRs are drafts with a short imperative title that states the outcome and a
+  2-4 sentence description of what changes and why, written by the executor.
+  No headings, checklists, file lists or ticket numbers; if the executor's text
+  breaks those rules the ticket's own plain-language summary is used instead.
+  Dependent tickets open stacked PRs.
+- `agents/code-style.md` holds the owner's code rules (no duplication, no
+  comments, no change-comments, no redundant docstrings). The executor, fixer
+  and reviewer get it with every prompt, and the reviewer treats violations as
+  major findings.
 
 ## Development
 
@@ -130,7 +139,8 @@ pnpm db:reset       # wipe the database volume
 Layout: `server/` (Fastify + postgres.js, the orchestrator in
 `server/src/pipeline/engine.ts`, the `claude` runner in
 `server/src/agents/claude.ts`), `web/` (React + Vite + Tailwind + TanStack
-Query, live via SSE), `shared/` (types), `agents/` (role prompts).
+Query, live via SSE), `shared/` (types), `agents/` (role prompts and the shared
+code rules).
 
 Inspired by zazencodes' software-factory v2 (scripts own state, one file per
 agent, gate before review), the project-harness design (fresh agent per step,

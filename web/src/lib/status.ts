@@ -74,7 +74,6 @@ export const runKind: Record<RunKind, { label: string; agent: string; icon: Luci
 export const AgentIcon = Bot;
 export const DoneIcon = CheckCircle2;
 
-/** Verdict → tone, e.g. "VERDICT: APPROVE" → success. */
 export function verdictTone(v: string | null | undefined): Tone {
   if (!v) return 'muted';
   if (/APPROVE|PASS|READY|APPLIED|SKIPPED/i.test(v)) return /SKIPPED/i.test(v) ? 'neutral' : 'success';
@@ -87,3 +86,10 @@ export function shortVerdict(v: string | null | undefined): string | null {
   if (!v) return null;
   return v.replace(/^(VERDICT|STATUS|PLAN|FIX|GATE):\s*/i, '').split(/\s+·\s+/)[0].slice(0, 28);
 }
+
+export const isRunInFlight = (r: { status: RunStatus }): boolean => r.status === 'running' || r.status === 'queued';
+
+export const isNotArchived = (i: { status: InitiativeStatus }): boolean => i.status !== 'archived';
+
+export const findSucceededRun = <R extends { kind: RunKind; status: RunStatus }>(runs: R[], kind: RunKind): R | undefined =>
+  runs.find((r) => r.kind === kind && r.status === 'succeeded');

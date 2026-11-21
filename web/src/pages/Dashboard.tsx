@@ -5,11 +5,11 @@ import { Link, useOutletContext } from 'react-router-dom';
 import type { InitiativeSummary, Run } from '@factory/shared';
 import { api } from '@/lib/api';
 import { useNow } from '@/lib/live';
-import { runKind } from '@/lib/status';
+import { runKind, isNotArchived } from '@/lib/status';
 import { ago, cn, money, pad2, runDuration } from '@/lib/utils';
 import { InitiativePill } from '@/components/StatusPill';
 import { useRunDrawer } from '@/components/RunDrawer';
-import { Button, EmptyState, Segmented, SegmentedBar, Skeleton } from '@/components/ui';
+import { Button, EmptyState, Segmented, SegmentedBar, Skeleton, LiveDot } from '@/components/ui';
 
 type Filter = 'active' | 'done' | 'archived' | 'all';
 
@@ -22,7 +22,7 @@ export function Dashboard() {
 
   const list = initiatives ?? [];
   const stats = useMemo(() => {
-    const live = list.filter((i) => i.status !== 'archived');
+    const live = list.filter(isNotArchived);
     const tickets = live.reduce((a, i) => a + i.ticketTotal, 0);
     const shipped = live.reduce((a, i) => a + (i.ticketCounts.approved ?? 0) + (i.ticketCounts.merged ?? 0), 0);
     return {
@@ -37,7 +37,7 @@ export function Dashboard() {
   const filtered = list.filter((i) =>
     filter === 'all' ? true : filter === 'active' ? !['done', 'archived'].includes(i.status) : i.status === filter,
   );
-  const attention = list.filter((i) => i.attention && i.status !== 'archived');
+  const attention = list.filter((i) => i.attention && isNotArchived(i));
   const running = active.filter((r) => r.status === 'running');
 
   return (
@@ -168,7 +168,7 @@ function Stat({ icon, label, value, sub, live, tone }: { icon: ReactNode; label:
       <div className="flex items-center gap-2 text-2xs text-zinc-500 [&>svg]:h-3.5 [&>svg]:w-3.5">
         {icon}
         {label}
-        {live && <span className="ml-auto h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />}
+        {live && <LiveDot className="ml-auto" />}
       </div>
       <div className={cn('mt-1.5 font-mono text-2xl font-medium tabular-nums tracking-tight', tone === 'attention' ? 'text-amber-200' : 'text-zinc-100')}>{value}</div>
       {sub && <div className="text-2xs text-zinc-600">{sub}</div>}
@@ -198,7 +198,7 @@ function InitiativeCard({ i }: { i: InitiativeSummary }) {
           <span>{i.ticketTotal ? `${done}/${i.ticketTotal} tickets approved` : i.status === 'planning' ? 'Planning…' : 'No tickets yet'}</span>
           {i.activeRuns > 0 && (
             <span className="flex items-center gap-1 text-cyan-300">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" /> {i.activeRuns} agent{i.activeRuns > 1 ? 's' : ''}
+              <LiveDot /> {i.activeRuns} agent{i.activeRuns > 1 ? 's' : ''}
             </span>
           )}
         </div>
