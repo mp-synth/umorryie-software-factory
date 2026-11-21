@@ -12,6 +12,7 @@ import * as gitx from './git.ts';
 import { ghUser } from './github.ts';
 import * as engine from './pipeline/engine.ts';
 import { slugify } from './pipeline/plan.ts';
+import { renderReport } from './pipeline/report.ts';
 import * as repo from './repo.ts';
 
 const id = z.object({ id: z.string().uuid() });
@@ -249,6 +250,17 @@ export async function routes(app: FastifyInstance): Promise<void> {
       sql<{ cost: number }[]>`select coalesce(sum(cost_usd), 0)::float8 as cost from runs where initiative_id = ${iid}`,
     ]);
     return { initiative, project: project!, tickets, runs, messages, costUsd: cost };
+  });
+
+  app.get('/api/initiatives/:id/report', async (req, reply) => {
+    const { id: iid } = id.parse(req.params);
+    const initiative = await repo.getInitiative(iid);
+    if (!initiative) return reply.status(404).send({ error: 'initiative not found' });
+    const [tickets, [{ cost }]] = await Promise.all([
+      repo.listTickets(iid),
+      sql<{ cost: number }[]>`select coalesce(sum(cost_usd), 0)::float8 as cost from runs where initiative_id = ${iid}`,
+    ]);
+    return reply.type('text/markdown; charset=utf-8').send(renderReport({ initiative, tickets, costUsd: cost }));
   });
 
   app.patch('/api/initiatives/:id', async (req) => {

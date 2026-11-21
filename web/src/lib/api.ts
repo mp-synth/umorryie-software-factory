@@ -81,6 +81,13 @@ export const api = {
   planReview: (id: string) => post(`/api/initiatives/${id}/plan-review`),
   approve: (id: string, note?: string) => post(`/api/initiatives/${id}/approve`, { note }),
   resetInitiative: (id: string) => post(`/api/initiatives/${id}/reset`),
+  // Plain markdown, so it can't go through request(), which JSON-parses the body.
+  report: async (id: string) => {
+    const res = await fetch(`/api/initiatives/${id}/report`);
+    if (res.ok) return res.text();
+    const data = await res.json().catch(() => null);
+    throw new ApiError(data?.error ?? `${res.status} ${res.statusText}`, res.status);
+  },
   bulk: (id: string, action: BulkAction) => post<{ ok: true; count: number }>(`/api/initiatives/${id}/actions/${action}`),
   message: (id: string, body: { body: string; kind: 'comment' | 'feedback' | 'question'; ticketId?: string | null; act?: boolean }) =>
     post<{ ok: true; runId?: string }>(`/api/initiatives/${id}/messages`, body),
