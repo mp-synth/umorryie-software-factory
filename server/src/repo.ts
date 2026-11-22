@@ -8,6 +8,7 @@ import {
   type InitiativeSummary,
   type Message,
   type Project,
+  type Rule,
   type Run,
   type RunEvent,
   type RunEventType,
@@ -270,7 +271,7 @@ export async function arbiterDecisionsSinceOwner(initiativeId: string, ticketId:
 
 export async function lastStoppedStep(initiativeId: string, ticketId: string | null): Promise<Run | null> {
   const [r] = await sql<Run[]>`
-    select * from runs where ${ticketScope(initiativeId, ticketId)} and kind not in ('arbitrate', 'ask') and status not in ('queued', 'running')
+    select * from runs where ${ticketScope(initiativeId, ticketId)} and kind not in ('arbitrate', 'ask', 'steer', 'retro') and status not in ('queued', 'running')
     order by queued_at desc limit 1`;
   return r ?? null;
 }
@@ -354,4 +355,57 @@ export async function pendingFeedback(initiativeId: string, ticketId: string | n
 export async function consumeFeedback(ids: string[], runId: string): Promise<void> {
   if (!ids.length) return;
   await sql`update messages set consumed_by_run = ${runId} where id in ${sql(ids)}`;
+}
+
+export async function retroScopes(initiativeId: string): Promise<Set<string>> {
+  const rows = await sql<{ scope: string }[]>`
+    select coalesce(ticket_id, initiative_id)::text as scope from runs
+    where initiative_id = ${initiativeId} and kind = 'retro' and status <> 'canceled'`;
+  return new Set(rows.map((r) => r.scope));
+}
+
+export async function ticketRetroInFlight(initiativeId: string): Promise<boolean> {
+  const [row] = await sql`
+    select 1 from runs where initiative_id = ${initiativeId} and ticket_id is not null and kind = 'retro' and status in ('queued','running') limit 1`;
+  return !!row;
+}
+
+export async function runIdsOfKind(initiativeId: string, kind: Run['kind']): Promise<Set<string>> {
+  const rows = await sql<{ id: string }[]>`select id from runs where initiative_id = ${initiativeId} and kind = ${kind}`;
+  return new Set(rows.map((r) => r.id));
+}
+
+function emitRuleChange(rule: Pick<Rule, 'id' | 'projectId' | 'initiativeId'>): void {
+  emitChange({ type: 'project', id: rule.projectId });
+  if (rule.initiativeId) emitChange({ type: 'initiative', id: rule.initiativeId, initiativeId: rule.initiativeId });
+}
+
+export async function insertRules(rows: Pick<Rule, 'projectId' | 'initiativeId' | 'ticketId' | 'runId' | 'scope' | 'role' | 'body' | 'why'>[]): Promise<Rule[]> {
+  if (!rows.length) return [];
+  const inserted = await sql<Rule[]>`insert into rules ${sql(rows.map((r) => prepare(r)))} returning *`;
+  for (const r of inserted) emitRuleChange(r);
+  return inserted;
+}
+
+export async function listRules(where: { projectId?: string; initiativeId?: string }): Promise<Rule[]> {
+  return sql<Rule[]>`
+    select * from rules where true
+      ${where.projectId ? sql`and project_id = ${where.projectId}` : sql``}
+      ${where.initiativeId ? sql`and initiative_id = ${where.initiativeId}` : sql``}
+    order by created_at`;
+}
+
+export async function getRule(id: string): Promise<Rule | null> {
+  const [r] = await sql<Rule[]>`select * from rules where id = ${id}`;
+  return r ?? null;
+}
+
+export async function updateRule(id: string, patch: Partial<Pick<Rule, 'scope' | 'role' | 'body' | 'status' | 'decidedAt'>>): Promise<Rule> {
+  const [r] = await sql<Rule[]>`update rules set ${sql(prepare(patch))} where id = ${id} returning *`;
+  emitRuleChange(r);
+  return r;
+}
+
+export async function acceptedProjectRules(projectId: string): Promise<Rule[]> {
+  return sql<Rule[]>`select * from rules where project_id = ${projectId} and scope = 'project' and status = 'accepted' order by decided_at, created_at`;
 }

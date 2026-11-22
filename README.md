@@ -164,8 +164,9 @@ initiatives.
 | Dashboard | Every initiative with segmented progress, what is waiting on you, agents running now, total spend |
 | Initiative → Plan | High-level overview first (goal, summary, success criteria, definition of done), then edge cases, test strategy, risks, assumptions, the plan review and the full plan.md on demand. Paths the plan names that do not exist at the base are listed for the plan reviewer (never a rejection). **Approve & build** or **Request changes** (your words go to a fresh planner as binding feedback). Answer the planner's questions when it is blocked |
 | Initiative → Tickets | One row per ticket: status, verdict, PR, cost. Expand for what/goal/outcome, acceptance checks, guidance, branch/worktree, every agent run, and the latest output. **Run / Review / Fix** per ticket; **Run ready / Review all / Fix all PRs / Sync PRs** in bulk; edit a ticket before it starts; reset a ticket; mark approved/merged. The row shows the lines the ticket changed outside tests, lockfiles and files the repo marks `linguist-generated`, flagged when over 1.5 times its size budget (XS 50, S 200, M 500) |
-| Initiative → Activity | The conversation with the agents. **Ask** starts a read-only advisor that answers from the code; **Feedback** re-plans (before approval) or goes to a fresh fixer (per ticket); **Note** just records |
-| Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs, hold dependents until CI is green, the arbiter deciding for you; round limits, arbiter decisions in a row, parallelism and the model per step (Fable, Opus, Sonnet or Haiku) |
+| Initiative → Activity | The conversation with the agents. **Ask** starts a read-only advisor that answers from the code; **Feedback** re-plans (before approval), goes to a fresh fixer (per ticket) or, for the whole initiative after approval, to a steering router that splits it across the PRs; **Note** just records |
+| Initiative → Learned rules | Rules a retro proposed from your steering: **Accept**, **Edit** or **Reject**, and the rules active in the project with **Retire** |
+| Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs, hold dependents until CI is green, the arbiter deciding for you, a retro once a steered PR merges or queues; round limits, arbiter decisions in a row, parallelism and the model per step (Fable, Opus, Sonnet or Haiku) |
 | Sidebar | The theme switcher (system, light or dark) sits next to the live indicator |
 | Run drawer | Live stream of any agent: tool calls with inputs and results, text, thinking, the checks log, cost/tokens/turns. Its output file, the exact prompt header, and a `claude --resume` command to continue that session in your terminal. **Stop** kills it |
 | Agents | Every run across all initiatives, live |
@@ -216,6 +217,67 @@ back until it changes; the activity feed says so. Only tickets the factory's
 review approved are merged, and GitHub's own rules (approvals, required checks)
 still apply.
 
+## After the PRs: steer once, then teach the factory
+
+When you read the PRs and want something changed, write it once in the
+initiative's **Feedback** with **Whole initiative** selected and press **Send
+to the PRs**. This works while the initiative builds and after it is done. A
+fresh, read-only steering router (Opus) reads your words, the brief, the plan
+and every ticket's diff, and sends each change to the ticket whose diff adds
+that code. When several stacked tickets touch it, the change goes to the lowest
+open one, because the stack carries it up. Each of those tickets gets the
+router's numbered instructions with your words quoted as binding feedback, and
+a fresh fixer runs them through checks, the verifier and a push as usual.
+Merged or canceled tickets can't take changes: the router says which part went
+nowhere and needs a follow-up initiative. Before the plan is approved, the same
+box still re-plans.
+
+Feedback that arrives while a ticket is busy (building, in review, being fixed)
+is not left behind: once the ticket's last step ends, a fixer picks it up.
+
+Every time you had to steer, the factory missed something. With **Retro once a
+steered PR merges or queues** on (the default, in Autopilot), a ticket whose PR
+merges or enters the merge queue gets a retro: a fresh Opus agent that never
+saw the work. It only runs when you steered that ticket: your feedback or notes,
+sending work back, approving or overruling a step by hand, routed feedback, or
+review comments people left on the PR (bot findings don't count). It reads:
+
+- a timeline of every step with what you said in between, in bold;
+- the people's PR comments the fixer got;
+- the brief, the plan and the ticket;
+- each step's output, the diff and the repo's own rules;
+- the rules learned so far.
+
+For each steering item it writes what was wrong, which step should have caught
+it first, and why that step didn't: a rule was missing, a rule exists and was
+ignored, or the agent couldn't have known. Then it proposes at most three
+durable rules, often none. A rule names its scope and the agent it is for:
+
+- **this project**: kept in the database and added to the system prompt of
+  every matching agent in this project, under "Rules learned in this project";
+- **every project**: written into the role file (`agents/<role>.md`, or
+  `repo-rules.md`, `code-style.md` or `writing.md`) under `## Learned rules`.
+  That edits your factory checkout: commit it, or a `git checkout` or reset
+  drops the rule while the database still lists it as active.
+
+Once every PR of the initiative is merged or in the queue, and you steered the
+plan or the whole initiative, one more retro looks at the plan. It runs after
+the ticket retros and reads what they found. Retros never hold a ticket, and a
+merge doesn't stop them. To run one yourself, use **Retro: learn from my
+steering** in a ticket's menu or **More → Retro on the plan**.
+
+Proposed rules wait in the initiative's **Learned rules** card. Nothing changes
+until you act on one:
+
+- **Accept** applies the rule from the next step on.
+- **Edit** changes its text, scope or agent before you accept it.
+- **Reject** drops it, and later retros see the rejection so they don't propose
+  it again.
+- **Retire**, on a rule that is already active, takes it out again; for an
+  every-project rule it also removes the line from the role file.
+
+The card also lists every rule active in the project.
+
 ## Where things live
 
 - **Postgres (Docker, `127.0.0.1:54329`)**: projects, initiatives (brief, plan.md,
@@ -254,7 +316,9 @@ still apply.
   be compared across prompt edits, CLI upgrades and factory versions.
 - **`~/.software-factory/initiatives/<slug>/`**: the files agents read and write
   (`brief.md`, `plan/round-N/plan.md|plan.json|plan-review.md`,
-  `tickets/<nn>-<key>/ticket.md`, `round-N/build.md|checks.md|review.md|fix.md`).
+  `tickets/<nn>-<key>/ticket.md`, `round-N/build.md|checks.md|review.md|fix.md`,
+  `steer/<run>/route.md`, and `retro/<run>/retro.md` next to the ticket or the
+  initiative it covers).
 - **`~/.software-factory/worktrees/`**: one git worktree per ticket, removed
   once the ticket is merged. Your own checkout is never modified.
 - **`~/.software-factory/spool/<run id>/`**: one folder per run that has a
@@ -262,10 +326,12 @@ still apply.
   `stderr.log`) and, once it ends, its exit code. The server reads the run's
   events from here, so they survive a restart. Removed when the run ends.
 - **`agents/*.md`**: the role instructions for planner, plan reviewer, executor,
-  reviewer, fixer, mechanical fixer, fix verifier, arbiter and advisor, plus the
-  shared `repo-rules.md` (every agent), `code-style.md` (agents that write or
-  judge code) and `writing.md` (agents whose text reaches people: executor,
-  reviewer, fixer, arbiter). Edit them to change how the factory thinks.
+  reviewer, fixer, mechanical fixer, fix verifier, arbiter, advisor, steering
+  router and retro, plus the shared `repo-rules.md` (every agent),
+  `code-style.md` (agents that write or judge code) and `writing.md` (agents
+  whose text reaches people: executor, reviewer, fixer, arbiter). Edit them to
+  change how the factory thinks. An accepted every-project rule lands in one of
+  these files under `## Learned rules`.
 
 ## Guardrails
 

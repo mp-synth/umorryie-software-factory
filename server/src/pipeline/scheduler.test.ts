@@ -93,3 +93,8 @@ test('fills free slots first and counts them toward the guaranteed slots', () =>
 test('without a guarantee a full pool starts nothing', () => {
   assert.deepEqual(pickRunsToStart([queued('c1', 'C', 'c-t1')], busy('A', 4), 0), []);
 });
+
+test('never limits a retro by ticket concurrency, nor counts it toward the limit', () => {
+  const running = [{ id: 'r', initiativeId: 'A', ticketId: 't1', kind: 'retro' as const }];
+  assert.deepEqual(ids(pickRunsToStart([queued('retro', 'A', 't2', 1, 'retro'), queued('fix', 'A', 't3', 1, 'fix')], running, 2)), ['retro', 'fix']);
+});

@@ -9,6 +9,9 @@ import type {
   InitiativeSettings,
   InitiativeSummary,
   Project,
+  Rule,
+  RuleRole,
+  RuleScope,
   Run,
   RunEvent,
   Ticket,
@@ -58,7 +61,7 @@ export interface InspectResult {
 }
 
 export type BulkAction = 'run-ready' | 'review-all' | 'fix-all' | 'fix-prs' | 'sync-prs';
-export type TicketAction = 'run' | 'check' | 'review' | 'fix' | 'reset' | 'mark-approved' | 'mark-merged' | 'mark-todo';
+export type TicketAction = 'run' | 'check' | 'review' | 'fix' | 'retro' | 'reset' | 'mark-approved' | 'mark-merged' | 'mark-todo';
 
 export const api = {
   health: () => get<Health>('/api/health'),
@@ -76,6 +79,10 @@ export const api = {
   updateProject: (id: string, p: Partial<Project>) => patch<Project>(`/api/projects/${id}`, p),
   deleteProject: (id: string) => del<{ ok: true }>(`/api/projects/${id}`),
   branches: (id: string) => get<{ branches: string[]; defaultBranch: string }>(`/api/projects/${id}/branches`),
+  projectRules: (id: string) => get<Rule[]>(`/api/projects/${id}/rules`),
+  acceptRule: (id: string, edit: { body?: string; role?: RuleRole; scope?: RuleScope } = {}) => post<Rule>(`/api/rules/${id}/accept`, edit),
+  rejectRule: (id: string) => post<Rule>(`/api/rules/${id}/reject`),
+  retireRule: (id: string) => post<Rule>(`/api/rules/${id}/retire`),
 
   initiatives: () => get<InitiativeSummary[]>('/api/initiatives'),
   initiative: (id: string) => get<InitiativeDetail>(`/api/initiatives/${id}`),
@@ -95,6 +102,7 @@ export const api = {
   approve: (id: string, note?: string) => post(`/api/initiatives/${id}/approve`, { note }),
   resetInitiative: (id: string) => post(`/api/initiatives/${id}/reset`),
   reportMarkdown: (id: string) => send('GET', `/api/initiatives/${id}/report`).then((res) => res.text()),
+  retro: (id: string) => post<Run>(`/api/initiatives/${id}/retro`),
   bulk: (id: string, action: BulkAction) => post<{ ok: true; count: number }>(`/api/initiatives/${id}/actions/${action}`),
   message: (id: string, body: { body: string; kind: 'comment' | 'feedback' | 'question'; ticketId?: string | null; act?: boolean }) =>
     post<{ ok: true; runId?: string }>(`/api/initiatives/${id}/messages`, body),

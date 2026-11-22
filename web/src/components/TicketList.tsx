@@ -8,6 +8,7 @@ import {
   GitBranch,
   GitMerge,
   GitPullRequest,
+  GraduationCap,
   Hammer,
   Layers,
   ListChecks,
@@ -199,6 +200,7 @@ function TicketRow({
         check: 'Checks queued',
         review: 'Reviewer queued',
         fix: 'Fixer queued',
+        retro: 'Retro queued: it proposes rules under Learned rules',
         reset: 'Ticket reset',
         'mark-approved': 'Marked approved',
         'mark-merged': 'Marked merged',
@@ -326,6 +328,9 @@ function TicketRow({
             </MenuItem>
             <MenuItem icon={<Wrench />} disabled={!t.branch || !!activeRun} onSelect={() => act.mutate('fix')}>
               Fix (review, checks, PR comments)
+            </MenuItem>
+            <MenuItem icon={<GraduationCap />} disabled={!t.branch} onSelect={() => act.mutate('retro')}>
+              Retro: learn from my steering
             </MenuItem>
             <MenuSeparator />
             <MenuItem icon={<CheckCheck />} disabled={!approved || t.status === 'approved'} onSelect={() => act.mutate('mark-approved')}>

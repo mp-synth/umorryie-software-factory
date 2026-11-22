@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DEFAULT_INITIATIVE_SETTINGS, MAX_MANUAL_AGENTS, MODELS, type ChangeEvent, type InitiativeDetail, type RunEvent } from '@factory/shared';
+import { DEFAULT_INITIATIVE_SETTINGS, MAX_MANUAL_AGENTS, MODELS, RULE_ROLES, RULE_SCOPES, type ChangeEvent, type InitiativeDetail, type RunEvent } from '@factory/shared';
 import { claudeVersion, resolveClaudeBin } from './agents/claude.ts';
 import { config } from './config.ts';
 import { sql } from './db.ts';
@@ -30,13 +30,14 @@ const settingsPatch = z
     dependentsWaitForCi: z.boolean(),
     autoArbiter: z.boolean(),
     autoMerge: z.boolean(),
+    autoRetro: z.boolean(),
     maxRounds: z.number().int().min(1).max(10),
     maxPlanRounds: z.number().int().min(1).max(5),
     maxArbiterDecisions: z.number().int().min(1).max(10),
     concurrency: z.number().int().min(1).max(10),
     maxTickets: z.number().int().min(1).max(30),
     models: z
-      .object({ plan: model, plan_review: model, execute: model, review: model, fix: model, mechanicalFix: model, verify: model, arbitrate: model, ask: model })
+      .object({ plan: model, plan_review: model, execute: model, review: model, fix: model, mechanicalFix: model, verify: model, arbitrate: model, ask: model, steer: model, retro: model })
       .partial(),
   })
   .partial();
@@ -212,6 +213,22 @@ export async function routes(app: FastifyInstance): Promise<void> {
     return { ok: true };
   });
 
+  app.get('/api/projects/:id/rules', async (req) => {
+    const { id: pid } = id.parse(req.params);
+    return repo.listRules({ projectId: pid });
+  });
+
+  app.post('/api/rules/:id/:action', async (req) => {
+    const { id: rid, action } = z.object({ id: z.string().uuid(), action: z.enum(['accept', 'reject', 'retire']) }).parse(req.params);
+    if (action === 'reject') return engine.rejectRule(rid);
+    if (action === 'retire') return engine.retireRule(rid);
+    const edit = z
+      .object({ body: z.string().trim().min(1).max(600), role: z.enum(RULE_ROLES), scope: z.enum(RULE_SCOPES) })
+      .partial()
+      .parse(req.body ?? {});
+    return engine.acceptRule(rid, edit);
+  });
+
   app.get('/api/projects/:id/branches', async (req) => {
     const { id: pid } = id.parse(req.params);
     const p = await repo.getProject(pid);
@@ -257,14 +274,15 @@ export async function routes(app: FastifyInstance): Promise<void> {
       reply.status(404).send({ error: 'initiative not found' });
       return;
     }
-    const [project, tickets, runs, messages, cost] = await Promise.all([
+    const [project, tickets, runs, messages, rules, cost] = await Promise.all([
       repo.getProject(initiative.projectId),
       repo.listTickets(iid),
       repo.listRuns({ initiativeId: iid, limit: 500 }),
       repo.listMessages(iid),
+      repo.listRules({ initiativeId: iid }),
       repo.initiativeCost(iid),
     ]);
-    return { initiative, project: project!, tickets, runs, messages, costUsd: cost };
+    return { initiative, project: project!, tickets, runs, messages, rules, costUsd: cost };
   });
 
   app.get('/api/initiatives/:id/report', async (req, reply) => {
@@ -341,6 +359,11 @@ export async function routes(app: FastifyInstance): Promise<void> {
     return { ok: true, count: n };
   });
 
+  app.post('/api/initiatives/:id/retro', async (req) => {
+    const { id: iid } = id.parse(req.params);
+    return engine.retroNow(iid, null);
+  });
+
   app.post('/api/initiatives/:id/messages', async (req, reply) => {
     const { id: iid } = id.parse(req.params);
     const body = z
@@ -359,7 +382,7 @@ export async function routes(app: FastifyInstance): Promise<void> {
       return reply.status(201).send({ ok: true, runId: run.id });
     }
     if (body.kind === 'feedback' && !ticketId && body.act) {
-      await engine.requestPlanChanges(iid, body.body);
+      await engine.steerInitiative(iid, body.body);
       return reply.status(201).send({ ok: true });
     }
     const msg = await repo.addMessage({ initiativeId: iid, ticketId, author: 'human', kind: body.kind, body: body.body });
@@ -395,7 +418,7 @@ export async function routes(app: FastifyInstance): Promise<void> {
     const { id: tid, action } = z
       .object({
         id: z.string().uuid(),
-        action: z.enum(['run', 'check', 'review', 'fix', 'reset', 'mark-approved', 'mark-merged', 'mark-todo']),
+        action: z.enum(['run', 'check', 'review', 'fix', 'retro', 'reset', 'mark-approved', 'mark-merged', 'mark-todo']),
       })
       .parse(req.params);
     const t = await repo.getTicket(tid);
@@ -409,6 +432,8 @@ export async function routes(app: FastifyInstance): Promise<void> {
         return engine.enqueue({ kind: 'review', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
       case 'fix':
         return engine.enqueue({ kind: 'fix', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
+      case 'retro':
+        return engine.retroNow(t.initiativeId, t.id);
       case 'reset':
         await engine.resetTicket(t.id);
         return { ok: true };

@@ -31,8 +31,11 @@ export const TICKET_STATUSES = [
 ] as const;
 export type TicketStatus = (typeof TICKET_STATUSES)[number];
 
-export const RUN_KINDS = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'verify', 'arbitrate', 'ask'] as const;
+export const RUN_KINDS = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'verify', 'arbitrate', 'ask', 'steer', 'retro'] as const;
 export type RunKind = (typeof RUN_KINDS)[number];
+
+export const SIDE_RUN_KINDS: readonly RunKind[] = ['ask', 'retro'];
+export const isSideRun = (kind: RunKind): boolean => SIDE_RUN_KINDS.includes(kind);
 
 export const RUN_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'canceled', 'interrupted'] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
@@ -47,6 +50,7 @@ export interface InitiativeSettings {
   dependentsWaitForCi: boolean;
   autoArbiter: boolean;
   autoMerge: boolean;
+  autoRetro: boolean;
   maxRounds: number;
   maxPlanRounds: number;
   maxArbiterDecisions: number;
@@ -65,6 +69,7 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
   dependentsWaitForCi: false,
   autoArbiter: true,
   autoMerge: false,
+  autoRetro: true,
   maxRounds: 5,
   maxPlanRounds: 3,
   maxArbiterDecisions: 3,
@@ -80,6 +85,8 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
     verify: 'opus',
     arbitrate: 'fable',
     ask: 'sonnet',
+    steer: 'opus',
+    retro: 'opus',
   },
 };
 
@@ -303,12 +310,36 @@ export interface InitiativeSummary extends Initiative {
   attention: string | null;
 }
 
+export const RULE_SCOPES = ['project', 'factory'] as const;
+export type RuleScope = (typeof RULE_SCOPES)[number];
+
+export const RULE_ROLES = ['all', 'code', 'writing', 'planner', 'plan-reviewer', 'executor', 'reviewer', 'fixer', 'verifier', 'arbiter'] as const;
+export type RuleRole = (typeof RULE_ROLES)[number];
+
+export type RuleStatus = 'proposed' | 'accepted' | 'rejected' | 'retired';
+
+export interface Rule {
+  id: string;
+  projectId: string;
+  initiativeId: string | null;
+  ticketId: string | null;
+  runId: string | null;
+  scope: RuleScope;
+  role: RuleRole;
+  body: string;
+  why: string;
+  status: RuleStatus;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
 export interface InitiativeDetail {
   initiative: Initiative;
   project: Project;
   tickets: Ticket[];
   runs: Run[];
   messages: Message[];
+  rules?: Rule[];
   costUsd: number;
 }
 

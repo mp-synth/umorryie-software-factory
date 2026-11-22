@@ -33,6 +33,14 @@ export function arbiterDir(i: Initiative, t: Ticket | null, runId: string): stri
   return path.join(t ? ticketDir(i, t) : path.join(initiativeDir(i), 'plan'), 'arbiter', runId.slice(0, 8));
 }
 
+export function steerDir(i: Initiative, runId: string): string {
+  return path.join(initiativeDir(i), 'steer', runId.slice(0, 8));
+}
+
+export function retroDir(i: Initiative, t: Ticket | null, runId: string): string {
+  return path.join(t ? ticketDir(i, t) : initiativeDir(i), 'retro', runId.slice(0, 8));
+}
+
 export function spoolRoot(): string {
   return path.join(config.home, 'spool');
 }
@@ -111,7 +119,7 @@ export function renderTicket(t: Ticket, all: Ticket[]): string {
   ].join('\n');
 }
 
-const FEEDBACK_SOURCE: Record<Message['author'], string> = { human: 'The owner', agent: "The arbiter, on the owner's behalf", system: 'The factory' };
+const FEEDBACK_SOURCE: Record<Message['author'], string> = { human: 'The owner', agent: "An agent, on the owner's behalf", system: 'The factory' };
 const SPEAKER: Record<Message['author'], string> = { human: 'Owner', agent: 'Agent', system: 'System' };
 
 export function renderFeedback(msgs: Message[], title: string): string {

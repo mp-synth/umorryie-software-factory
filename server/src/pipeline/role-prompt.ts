@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { RunKind } from '@factory/shared';
+import type { Rule, RuleRole, RunKind } from '@factory/shared';
 import { config } from '../config.ts';
+import { renderProjectRules } from './retro.ts';
 
 export type AgentKind = Exclude<RunKind, 'gate'>;
 
@@ -15,6 +16,8 @@ export const ROLE_FILES: Record<AgentKind, string> = {
   verify: 'verifier.md',
   arbitrate: 'arbiter.md',
   ask: 'advisor.md',
+  steer: 'steer.md',
+  retro: 'retro.md',
 };
 export const MECHANICAL_FIXER_FILE = 'mechanical-fixer.md';
 
@@ -32,6 +35,8 @@ export const TOOLS: Record<AgentKind, string[]> = {
   verify: READ_TOOLS,
   arbitrate: READ_TOOLS,
   ask: READ_TOOLS,
+  steer: READ_TOOLS,
+  retro: READ_TOOLS,
 };
 
 const DENIED_FOR_EVERY_AGENT = [
@@ -62,6 +67,8 @@ export const DISALLOWED_TOOLS: Record<AgentKind, string[]> = {
   verify: READ_ONLY_DENIALS,
   arbitrate: READ_ONLY_DENIALS,
   ask: READ_ONLY_DENIALS,
+  steer: READ_ONLY_DENIALS,
+  retro: READ_ONLY_DENIALS,
 };
 
 export const EFFORT: Record<AgentKind, string> = {
@@ -73,6 +80,8 @@ export const EFFORT: Record<AgentKind, string> = {
   verify: 'high',
   arbitrate: 'high',
   ask: 'medium',
+  steer: 'high',
+  retro: 'high',
 };
 
 const STEPS_THAT_WRITE_OR_JUDGE_CODE: RunKind[] = ['execute', 'fix', 'review', 'verify', 'arbitrate'];
@@ -82,10 +91,46 @@ export function readAgentFile(file: string): string {
   return fs.readFileSync(path.isAbsolute(file) ? file : path.join(config.agentsDir, file), 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
 }
 
-export function rolePrompt(kind: AgentKind, roleFile = ROLE_FILES[kind]): string {
+const RULE_ROLE_FILES: Record<RuleRole, string> = {
+  all: 'repo-rules.md',
+  code: 'code-style.md',
+  writing: 'writing.md',
+  planner: ROLE_FILES.plan,
+  'plan-reviewer': ROLE_FILES.plan_review,
+  executor: ROLE_FILES.execute,
+  reviewer: ROLE_FILES.review,
+  fixer: ROLE_FILES.fix,
+  verifier: ROLE_FILES.verify,
+  arbiter: ROLE_FILES.arbitrate,
+};
+
+const RULE_ROLE_STEPS: Record<RuleRole, readonly RunKind[]> = {
+  all: Object.keys(ROLE_FILES) as AgentKind[],
+  code: STEPS_THAT_WRITE_OR_JUDGE_CODE,
+  writing: STEPS_THAT_WRITE_FOR_PEOPLE,
+  planner: ['plan'],
+  'plan-reviewer': ['plan_review'],
+  executor: ['execute'],
+  reviewer: ['review'],
+  fixer: ['fix'],
+  verifier: ['verify'],
+  arbiter: ['arbitrate'],
+};
+
+export function ruleFile(role: RuleRole): string {
+  return path.join(config.agentsDir, RULE_ROLE_FILES[role]);
+}
+
+export function ruleAppliesTo(role: RuleRole, kind: AgentKind): boolean {
+  return RULE_ROLE_STEPS[role].includes(kind);
+}
+
+export function rolePrompt(kind: AgentKind, roleFile = ROLE_FILES[kind], projectRules: Pick<Rule, 'role' | 'body'>[] = []): string {
   const parts = [readAgentFile(roleFile), readAgentFile('repo-rules.md')];
   if (STEPS_THAT_WRITE_OR_JUDGE_CODE.includes(kind)) parts.push(readAgentFile('code-style.md'));
   if (STEPS_THAT_WRITE_FOR_PEOPLE.includes(kind)) parts.push(readAgentFile('writing.md'));
+  const learned = renderProjectRules(projectRules.filter((r) => ruleAppliesTo(r.role, kind)));
+  if (learned) parts.push(learned);
   return parts.join('\n\n');
 }
 

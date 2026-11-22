@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query';
 import { Gauge } from 'lucide-react';
-import { MODELS, type Initiative, type InitiativeSettings, type Model } from '@factory/shared';
+import { DEFAULT_INITIATIVE_SETTINGS, MODELS, type Initiative, type InitiativeSettings, type Model } from '@factory/shared';
 import { api } from '@/lib/api';
 import { toastError } from '@/lib/toasts';
 import { Card, CardHeader, Select, Switch } from './ui';
@@ -14,6 +14,7 @@ const TOGGLES: { key: keyof InitiativeSettings; label: string }[] = [
   { key: 'postReviewsToPr', label: 'Post reviews on PRs' },
   { key: 'dependentsWaitForCi', label: 'Dependents wait for green CI' },
   { key: 'autoArbiter', label: 'Arbiter decides instead of waiting for you' },
+  { key: 'autoRetro', label: 'Retro once a steered PR merges or queues' },
 ];
 
 const ROLES: { key: keyof InitiativeSettings['models']; label: string }[] = [
@@ -26,6 +27,8 @@ const ROLES: { key: keyof InitiativeSettings['models']; label: string }[] = [
   { key: 'verify', label: 'Fix verifier' },
   { key: 'arbitrate', label: 'Arbiter' },
   { key: 'ask', label: 'Advisor' },
+  { key: 'steer', label: 'Feedback router' },
+  { key: 'retro', label: 'Retro' },
 ];
 
 const MODEL_LABELS: Record<Model, string> = { fable: 'Fable', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
@@ -35,7 +38,7 @@ export function AutopilotCard({ initiative: i }: { initiative: Initiative }) {
     mutationFn: (settings: Partial<InitiativeSettings>) => api.updateInitiative(i.id, { settings }),
     onError: toastError,
   });
-  const s = i.settings;
+  const s: InitiativeSettings = { ...DEFAULT_INITIATIVE_SETTINGS, ...i.settings, models: { ...DEFAULT_INITIATIVE_SETTINGS.models, ...i.settings.models } };
   return (
     <Card>
       <CardHeader icon={<Gauge className="h-3.5 w-3.5" />} title="Autopilot" sub="What runs without you pressing a button" />

@@ -9,11 +9,16 @@ const STEPS_THAT_READ_FEEDBACK: RunKind[] = ['plan', 'execute', 'fix'];
 
 const AGENT_NAMES: Partial<Record<RunKind, string>> = {
   plan: 'planner',
+  plan_review: 'plan reviewer',
   execute: 'executor',
   gate: 'checks run',
   review: 'reviewer',
   fix: 'fixer',
   verify: 'fix verifier',
+  arbitrate: 'arbiter',
+  ask: 'advisor',
+  steer: 'steering router',
+  retro: 'retro',
 };
 
 export function agentName(kind: RunKind): string {

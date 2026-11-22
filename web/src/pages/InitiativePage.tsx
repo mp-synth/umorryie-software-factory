@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, GitMerge, MoreHorizontal, Pencil, RotateCcw, Trash2, Wrench } from 'lucide-react';
+import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, GitMerge, GraduationCap, MoreHorizontal, Pencil, RotateCcw, Trash2, Wrench } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -12,6 +12,7 @@ import { Conversation } from '@/components/Conversation';
 import { Markdown } from '@/components/Markdown';
 import { PipelineStrip } from '@/components/PipelineStrip';
 import { PlanPanel } from '@/components/PlanPanel';
+import { RulesCard } from '@/components/RulesCard';
 import { InitiativePill } from '@/components/StatusPill';
 import { TicketList } from '@/components/TicketList';
 import { Button, Chip, Dialog, EmptyState, Field, Input, Menu, MenuItem, MenuSeparator, Skeleton, Textarea } from '@/components/ui';
@@ -77,6 +78,11 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
     onSuccess: (_r, on) => toast.success(on ? 'Auto-merge on: each approved PR joins the merge queue once the PRs below it merge' : 'Auto-merge off'),
     onError: toastError,
   });
+  const retro = useMutation({
+    mutationFn: () => api.retro(i.id),
+    onSuccess: toastSuccess('Retro queued: it proposes rules under Learned rules'),
+    onError: toastError,
+  });
   const isFeature = i.kind !== 'open-prs';
   const hasOpenPrs = detail.tickets.some((t) => t.prNumber && t.prState !== 'MERGED' && t.prState !== 'CLOSED');
   const remove = useMutation({
@@ -138,6 +144,12 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
                 <span className="block">Auto-merge PRs</span>
                 <span className="block text-2xs text-zinc-500">Queue each approved PR once the PRs below it merge</span>
               </MenuItem>
+              {isFeature && (
+                <MenuItem icon={<GraduationCap />} disabled={!i.approvedAt || retro.isPending} onSelect={() => retro.mutate()}>
+                  <span className="block">Retro on the plan</span>
+                  <span className="block text-2xs text-zinc-500">What you steered by hand, and rules so you don’t have to again</span>
+                </MenuItem>
+              )}
               <MenuSeparator />
               <MenuItem icon={<Pencil />} onSelect={() => setEditing(true)}>
                 Edit title & brief
@@ -189,6 +201,7 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
         </div>
         <div className="space-y-5 xl:sticky xl:top-5 xl:self-start">
           <Conversation detail={detail} />
+          <RulesCard detail={detail} />
           <AutopilotCard initiative={i} />
           <div className="px-1 text-2xs leading-relaxed text-zinc-600">
             Agents never touch <span className="font-mono">{shortPath(project.repoPath)}</span> directly: each ticket gets its own worktree and{' '}

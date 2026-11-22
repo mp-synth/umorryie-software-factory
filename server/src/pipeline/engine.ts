@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { ACTIVE_TICKET_STATUSES, DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings, type CapacityStatus, type Initiative, type MachinePressure, type Message, type Project, type Run, type RunKind, type Ticket } from '@factory/shared';
+import { ACTIVE_TICKET_STATUSES, DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, SIDE_RUN_KINDS, isSideRun, type AppSettings, type CapacityStatus, type Initiative, type MachinePressure, type Message, type Project, type Rule, type RuleRole, type RuleScope, type Run, type RunKind, type Ticket } from '@factory/shared';
 import { agentEnvironment, type AgentEnvironment, type Redact } from '../agent-env.ts';
 import { ROOT, config } from '../config.ts';
 import { sql } from '../db.ts';
@@ -19,9 +19,12 @@ import {
   planRoundDir,
   readIfExists,
   renderConversation,
+  renderFeedback,
   renderOwnerHistory,
+  retroDir,
   spoolDir,
   spoolRoot,
+  steerDir,
   stoppedOnPurposeMark,
   ticketDir,
   ticketRoundDir,
@@ -62,7 +65,9 @@ import { malformedVerdictReason, outputFailure, parseVerdict } from './verdict.t
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
 import { describeIgnored, describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
-import { MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, type AgentKind } from './role-prompt.ts';
+import { MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, ruleFile, type AgentKind } from './role-prompt.ts';
+import { hasHumanPrItems, isSteering, oneLine, parseProposedRules, renderTimeline, retroSummary, withLearnedRule, withoutLearnedRule } from './retro.ts';
+import { parseRoutes, renderTicketsForSteering, routeBlocker, routeReason, routesByTicket } from './steer.ts';
 import { HELD_REASON, INTERRUPTED_REASON, ORPHAN_INITIATIVE_STATUSES, ORPHAN_REASON, orphanRunKind, restingInitiativeStatus, restingTicketStatus, shouldResumeInterrupted, startupFate, type StartupFate } from './recovery.ts';
 import { activeLanes, pickRunsToStart, type SchedulableRun } from './scheduler.ts';
 import { GUARANTEED_AGENTS_PER_INITIATIVE, agentCeiling, agentLimit, localWorkSlots, mostAgentsWithGuarantees, pressureOf, sampleMachine, thisMachine } from './capacity.ts';
@@ -187,7 +192,7 @@ async function diffBase(project: Project, ticket: Ticket): Promise<string> {
   return base;
 }
 
-const AGENT_KINDS: RunKind[] = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'verify', 'arbitrate'];
+const AGENT_KINDS: RunKind[] = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'verify', 'arbitrate', 'steer'];
 
 function factoryEnv(ticket: Ticket, base: string): Record<string, string> {
   return { FACTORY_BASE: base, FACTORY_BRANCH: ticket.branch ?? '' };
@@ -230,7 +235,7 @@ export async function enqueue(opts: {
   let round = 0;
   let model: string | null = null;
 
-  if (opts.kind !== 'ask') {
+  if (!isSideRun(opts.kind)) {
     if (opts.trigger === 'manual') await stopArbiterFor(init.id, ticketId);
     const busy = await activeRunFor(init.id, ticketId, AGENT_KINDS);
     if (busy) throw new PipelineError(`an agent is already ${busy.status} for this ${ticketId ? 'ticket' : 'plan'} (${busy.kind})`);
@@ -255,13 +260,18 @@ export async function enqueue(opts: {
     } else if (opts.kind === 'ask') {
       round = 0;
       model = s.models.ask;
+    } else if (opts.kind === 'steer') {
+      if (!['in_progress', 'done'].includes(init.status)) throw new PipelineError('the plan is not approved yet; feedback goes to the planner');
+      model = s.models.steer;
+    } else if (opts.kind === 'retro') {
+      model = s.models.retro;
     } else {
       throw new PipelineError(`${opts.kind} needs a ticket`, 400);
     }
   } else {
     const t = await mustTicket(ticketId);
     if (t.initiativeId !== init.id) throw new PipelineError('ticket does not belong to this initiative', 400);
-    if (opts.kind !== 'ask') assertTicketAcceptsWork(t);
+    if (!isSideRun(opts.kind)) assertTicketAcceptsWork(t);
     switch (opts.kind) {
       case 'execute': {
         const all = await repo.listTickets(init.id);
@@ -306,6 +316,10 @@ export async function enqueue(opts: {
       case 'ask':
         model = s.models.ask;
         break;
+      case 'retro':
+        round = t.round;
+        model = s.models.retro;
+        break;
       default:
         throw new PipelineError(`${opts.kind} is not a ticket step`, 400);
     }
@@ -326,7 +340,7 @@ export async function enqueue(opts: {
       if (isSecondActiveAgent(err)) throw new PipelineError(`another agent is already active for this ${ticketId ? 'ticket' : 'plan'}`);
       throw err;
     });
-  if (ticketId && opts.kind !== 'ask') await refreshInitiativeStatus(init.id);
+  if (ticketId && !isSideRun(opts.kind)) await refreshInitiativeStatus(init.id);
   kick();
   return run;
 }
@@ -458,6 +472,8 @@ const STEPS: Record<RunKind, (run: Run) => Promise<void>> = {
   verify: runVerify,
   arbitrate: runArbitrate,
   ask: runAsk,
+  steer: runSteer,
+  retro: runRetro,
 };
 
 async function runStep(run: Run): Promise<void> {
@@ -500,6 +516,7 @@ async function failRun(run: Run, err: unknown): Promise<void> {
 async function wrapUp(run: Run): Promise<void> {
   await discardSpool(run.id).catch((err) => console.warn('[spool]', err.message));
   if (run.ticketId) await releaseSweepClaimIfIdle(run.ticketId).catch((err) => console.warn('[pr-sweep]', err.message));
+  await actOnPendingFeedback(run).catch((err) => console.warn('[feedback]', err.message));
   await handOverToArbiter(run).catch((err) => console.warn('[arbiter]', err.message));
 }
 
@@ -548,6 +565,8 @@ type StoppedStep = Pick<Run, 'initiativeId' | 'ticketId' | 'kind'> & { id?: stri
 const STEPS_THAT_LEAVE_STATUS_ALONE: Partial<Record<RunKind, string>> = {
   ask: 'The advisor could not answer',
   arbitrate: 'The arbiter could not decide, so this waits for you',
+  steer: 'Your feedback could not be routed to the PRs; send it again or give it per ticket',
+  retro: 'The retro could not finish',
 };
 
 async function revertAfterStop(run: StoppedStep, reason: string | null, failed = reason !== null): Promise<void> {
@@ -594,7 +613,7 @@ function environmentNote(environment: AgentEnvironment, referenceDirs: string[])
 export function projectAgentSpec(
   project: Project,
   app: AppSettings,
-  opts: { kind: AgentKind; cwd: string; prompt: string; model: string; effort?: string | null; roleFile?: string; addDirs: string[]; env?: Record<string, string> },
+  opts: { kind: AgentKind; cwd: string; prompt: string; model: string; effort?: string | null; roleFile?: string; addDirs: string[]; env?: Record<string, string>; projectRules?: Rule[] },
 ): AgentSpec {
   const environment = agentEnvironment(project.repoPath, project.copyFiles ?? []);
   const referenceDirs = (project.referenceDirs ?? []).filter((d) => fs.existsSync(d));
@@ -602,7 +621,7 @@ export function projectAgentSpec(
     cwd: opts.cwd,
     model: opts.model,
     effort: opts.effort,
-    rolePrompt: rolePrompt(opts.kind, opts.roleFile),
+    rolePrompt: rolePrompt(opts.kind, opts.roleFile, opts.projectRules),
     prompt: [opts.prompt, ...environmentNote(environment, referenceDirs)].join('\n'),
     tools: TOOLS[opts.kind],
     disallowedTools: DISALLOWED_TOOLS[opts.kind],
@@ -642,6 +661,8 @@ interface StepStates {
   verify: { start: string; fixRunIds: string[] };
   arbitrate: { approveBlocker: string | null; stoppedRunId: string | null };
   ask: Record<string, never>;
+  steer: { feedbackIds: string[] };
+  retro: Record<string, never>;
 }
 
 const AFTER_AGENT: { [K in AgentKind]: (run: Run, step: StepResult, state: StepStates[K]) => Promise<void> } = {
@@ -653,6 +674,8 @@ const AFTER_AGENT: { [K in AgentKind]: (run: Run, step: StepResult, state: StepS
   verify: afterVerify,
   arbitrate: afterArbitrate,
   ask: afterAsk,
+  steer: afterSteer,
+  retro: afterRetro,
 };
 
 const offsetsOf = (spool: repo.RunSpool): SpoolOffsets => ({ stdout: spool.stdoutOffset, stderr: spool.stderrOffset });
@@ -741,6 +764,7 @@ async function runAgent<K extends AgentKind>(
     roleFile: opts.roleFile,
     addDirs: [opts.runDir, initiativeDir(init)],
     env: opts.env,
+    projectRules: await repo.acceptedProjectRules(project.id),
   });
   const ticket = TICKET_DIFF_STEPS.includes(opts.kind) && run.ticketId ? await repo.getTicket(run.ticketId) : null;
   const baseSha = ticket ? await gitx.revParse(opts.cwd, await diffBase(project, ticket)) : null;
@@ -2096,8 +2120,10 @@ async function stopArbiterFor(initiativeId: string, ticketId: string | null): Pr
   for (let i = 0; i < 40 && inFlight.has(arbiter.id); i++) await new Promise((res) => setTimeout(res, 250));
 }
 
+const STEPS_THE_ARBITER_NEVER_FOLLOWS: RunKind[] = ['arbitrate', 'ask', 'steer', 'retro'];
+
 async function handOverToArbiter(run: Run): Promise<void> {
-  if (run.kind === 'arbitrate' || run.kind === 'ask') return;
+  if (STEPS_THE_ARBITER_NEVER_FOLLOWS.includes(run.kind)) return;
   if ((await repo.getRun(run.id))?.status === 'canceled') return;
   const init = await repo.getInitiative(run.initiativeId);
   const ticket = run.ticketId ? await repo.getTicket(run.ticketId) : null;
@@ -2289,6 +2315,339 @@ export async function ask(initiativeId: string, ticketId: string | null, body: s
   return run;
 }
 
+const LIVE_INITIATIVE_STATUSES: Initiative['status'][] = ['in_progress', 'done'];
+const FEEDBACK_STARTS_A_FIX_IN: Ticket['status'][] = ['built', 'changes_requested', 'approved'];
+
+export async function steerInitiative(initiativeId: string, body: string): Promise<void> {
+  const init = await mustInitiative(initiativeId);
+  if (!LIVE_INITIATIVE_STATUSES.includes(init.status)) return requestPlanChanges(init.id, body);
+  await repo.addMessage({ initiativeId: init.id, author: 'human', kind: 'feedback', body });
+  if (await activeRunFor(init.id, null, ['steer'])) return;
+  await enqueue({ kind: 'steer', initiativeId: init.id, trigger: 'manual' });
+}
+
+async function runSteer(run: Run): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const project = await mustProject(init.projectId);
+  const feedback = await repo.pendingFeedback(init.id, null);
+  if (!feedback.length) {
+    await finish(run, 'succeeded', { verdict: 'ROUTE: NONE', outputMd: 'ROUTE: NONE\n\n## Reason\nNo feedback waits to be routed.' });
+    return;
+  }
+  const dir = steerDir(init, run.id);
+  const tickets = (await repo.listTickets(init.id)).filter((t) => t.status !== 'canceled');
+  const out = path.join(dir, 'route.md');
+  const prompt = header(
+    `Factory step: steer. Initiative: ${init.title}`,
+    [
+      ['Main checkout (read-only)', project.repoPath],
+      ['Base branch', init.baseBranch],
+      ["Initiative folder (every ticket's files)", initiativeDir(init)],
+    ],
+    [
+      write(path.join(dir, 'feedback.md'), renderFeedback(feedback, "The owner's feedback on the whole initiative")),
+      write(path.join(dir, 'tickets.md'), renderTicketsForSteering(tickets, init.baseBranch)),
+      writeBrief(init, project),
+      ...(init.planMd ? [writePlanMd(init)] : []),
+    ],
+    [out],
+    'Reply with one line: the first line of route.md.',
+  );
+  await runAgent(run, { kind: 'steer', cwd: project.repoPath, prompt, runDir: dir, outputPath: out }, { feedbackIds: feedback.map((f) => f.id) });
+}
+
+async function afterSteer(run: Run, step: StepResult, state: StepStates['steer']): Promise<void> {
+  if (await stoppedEarly(run, step, 'route.md')) return;
+  const verdict = parseVerdict('steer', step.output);
+  if (!verdict) return failMalformedVerdict(run, step.output);
+  await repo.consumeFeedback(state.feedbackIds, run.id);
+  await finish(run, 'succeeded');
+  const init = await mustInitiative(run.initiativeId);
+  const tickets = await repo.listTickets(init.id);
+  const ownerWords = (await repo.listMessages(init.id)).filter((m) => state.feedbackIds.includes(m.id)).map((m) => quote(m.body)).join('\n\n');
+  const { routed, unknownRefs } = routesByTicket(verdict === 'TICKETS' ? parseRoutes(step.output!) : [], tickets);
+  const outcome = unknownRefs.map((ref) => `- "${ref}": no such ticket, so nothing was sent.`);
+  let sent = 0;
+  for (const { ticket, instructions } of routed) {
+    const blocker = routeBlocker(ticket);
+    if (blocker) {
+      outcome.push(`- ${ticketLabel(ticket)}: not sent, ${blocker}.`);
+      continue;
+    }
+    sent++;
+    await repo.addMessage({
+      initiativeId: init.id,
+      ticketId: ticket.id,
+      runId: run.id,
+      author: 'agent',
+      kind: 'feedback',
+      body: [`**Your feedback on the whole initiative, routed to ${ticketLabel(ticket)}.**`, instructions, `What you wrote:\n\n${ownerWords}`].join('\n\n'),
+    });
+    outcome.push(`- ${await actOnRoutedFeedback(init, ticket)}`);
+  }
+  const reason = routeReason(step.output!);
+  const head = sent ? `**Routed your feedback to ${sent} ticket${sent > 1 ? 's' : ''}.**` : '**Your feedback went to no ticket.**';
+  await agentMessage(run, [[head, reason].filter(Boolean).join(' '), outcome.join('\n')].filter(Boolean).join('\n\n'));
+}
+
+async function actOnRoutedFeedback(init: Initiative, ticket: Ticket): Promise<string> {
+  const label = ticketLabel(ticket);
+  if (!ticket.branch) return `${label}: its executor reads it when the ticket starts.`;
+  if (!(await ticketIdle(ticket.id))) return `${label}: busy now; a fresh fixer takes it as soon as the current step ends.`;
+  try {
+    await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: ticket.id, trigger: 'manual' });
+    return `${label}: a fresh fixer is on it.`;
+  } catch (err) {
+    return `${label}: the fixer could not start (${(err as Error).message}); the feedback waits for the next fixer.`;
+  }
+}
+
+async function actOnPendingFeedback(run: Run): Promise<void> {
+  if (isSideRun(run.kind) || (await repo.getRun(run.id))?.status !== 'succeeded') return;
+  const init = await repo.getInitiative(run.initiativeId);
+  if (!init || !LIVE_INITIATIVE_STATUSES.includes(init.status)) return;
+  if (!run.ticketId) {
+    if (run.kind === 'steer' && (await repo.pendingFeedback(init.id, null)).length) await enqueue({ kind: 'steer', initiativeId: init.id, trigger: 'auto' });
+    return;
+  }
+  const ticket = await repo.getTicket(run.ticketId);
+  if (!ticket?.branch || !FEEDBACK_STARTS_A_FIX_IN.includes(ticket.status) || !(await ticketIdle(ticket.id))) return;
+  if (!(await repo.pendingFeedback(init.id, ticket.id)).length) return;
+  await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+  await systemMessage(run, `${ticketLabel(ticket)}: feedback arrived while it was busy; a fresh fixer is on it.`);
+}
+
+interface SteeringEvidence {
+  messages: Message[];
+  routedBy: Set<string>;
+}
+
+async function steeringEvidence(init: Initiative): Promise<SteeringEvidence> {
+  const [messages, routedBy] = await Promise.all([repo.listMessages(init.id), repo.runIdsOfKind(init.id, 'steer')]);
+  return { messages, routedBy };
+}
+
+function roundsWithHumanPrComments(init: Initiative, ticket: Ticket): string[] {
+  const dir = ticketDir(init, ticket);
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((name) => /^round-\d+$/.test(name))
+    .sort((a, b) => Number(a.slice(6)) - Number(b.slice(6)))
+    .map((name) => path.join(dir, name))
+    .filter((round) => hasHumanPrItems(readPrItems(round)) && fs.existsSync(path.join(round, 'pr-comments.md')))
+    .map((round) => path.join(round, 'pr-comments.md'));
+}
+
+function steeredIn(init: Initiative, ticket: Ticket | null, evidence: SteeringEvidence): boolean {
+  const scope = ticket?.id ?? null;
+  if (evidence.messages.some((m) => m.ticketId === scope && isSteering(m, evidence.routedBy))) return true;
+  return !!ticket && roundsWithHumanPrComments(init, ticket).length > 0;
+}
+
+async function inMergeQueue(project: Project, ticket: Ticket): Promise<boolean> {
+  if (ticket.status !== 'approved' || !ticket.prNumber || ticket.prState !== 'OPEN') return false;
+  const cwd = ticket.worktreePath && fs.existsSync(ticket.worktreePath) ? ticket.worktreePath : project.repoPath;
+  return !!(await gh.mergeStatus(cwd, ticket.prNumber))?.isInMergeQueue;
+}
+
+const retrosStarting = new Set<string>();
+
+async function startDueRetros(initiativeId: string, opts: { inQueue?: string } = {}): Promise<void> {
+  try {
+    const init = await repo.getInitiative(initiativeId);
+    if (!init || init.kind !== 'feature' || !repo.initiativeSettings(init).autoRetro) return;
+    const project = await mustProject(init.projectId);
+    const done = await repo.retroScopes(init.id);
+    const tickets = (await repo.listTickets(init.id)).filter((t) => t.status !== 'canceled');
+    const evidence = await steeringEvidence(init);
+    const finality = new Map<string, string | null>();
+    const finalBecause = async (t: Ticket): Promise<string | null> => {
+      if (!finality.has(t.id)) {
+        const why = t.status === 'merged' ? `its PR ${t.prNumber ? `#${t.prNumber} ` : ''}merged` : t.id === opts.inQueue || (await inMergeQueue(project, t)) ? `its PR #${t.prNumber} is in the merge queue` : null;
+        finality.set(t.id, why);
+      }
+      return finality.get(t.id)!;
+    };
+    let ticketRetroStarted = false;
+    for (const t of tickets) {
+      if (done.has(t.id) || !steeredIn(init, t, evidence)) continue;
+      const why = await finalBecause(t);
+      if (why && (await startRetro(init, t, 'auto', why))) ticketRetroStarted = true;
+    }
+    if (!tickets.length || done.has(init.id) || !steeredIn(init, null, evidence)) return;
+    if (ticketRetroStarted || (await repo.ticketRetroInFlight(init.id))) return;
+    for (const t of tickets) if (!(await finalBecause(t))) return;
+    await startRetro(init, null, 'auto', 'every PR of the initiative is merged or in the merge queue');
+  } catch (err) {
+    console.warn('[retro]', (err as Error).message);
+  }
+}
+
+async function startRetro(init: Initiative, ticket: Ticket | null, trigger: Run['trigger'], why: string): Promise<Run | null> {
+  const scope = ticket?.id ?? init.id;
+  if (retrosStarting.has(scope)) return null;
+  retrosStarting.add(scope);
+  try {
+    return await enqueue({ kind: 'retro', initiativeId: init.id, ticketId: ticket?.id ?? null, trigger, question: why });
+  } catch (err) {
+    if (trigger === 'manual') throw err;
+    console.warn('[retro]', (err as Error).message);
+    return null;
+  } finally {
+    retrosStarting.delete(scope);
+  }
+}
+
+export async function retroNow(initiativeId: string, ticketId: string | null): Promise<Run> {
+  const init = await mustInitiative(initiativeId);
+  const ticket = ticketId ? await mustTicket(ticketId) : null;
+  const run = await startRetro(init, ticket, 'manual', 'you asked for it');
+  if (!run) throw new PipelineError('a retro is already starting here');
+  return run;
+}
+
+function renderKnownRules(rules: Rule[]): string {
+  const list = (status: Rule['status']) => {
+    const found = rules.filter((r) => r.status === status);
+    return found.length ? found.map((r) => `- (${r.scope}, ${r.role}) ${r.body}`) : ['- none'];
+  };
+  return [
+    '# Rules that already exist',
+    '',
+    `The factory's role files are in ${config.agentsDir}: one per agent (planner.md, plan-reviewer.md, executor.md, reviewer.md, fixer.md, verifier.md, arbiter.md) plus the shared repo-rules.md, code-style.md and writing.md. Read the ones your rules would go into.`,
+    '',
+    '## Accepted for this project (every agent here already gets them)',
+    ...list('accepted'),
+    '',
+    '## Proposed earlier and waiting for the owner (never propose these again)',
+    ...list('proposed'),
+    '',
+    '## Rejected by the owner (never propose these again)',
+    ...list('rejected'),
+  ].join('\n');
+}
+
+function renderRetroSituation(init: Initiative, ticket: Ticket | null, why: string, humanPrRounds: string[]): string {
+  const subject = ticket ? ticketLabel(ticket) : `the plan of "${init.title}"`;
+  return [
+    `# Retro on ${subject}`,
+    '',
+    `Why now: ${why}.`,
+    ticket ? `PR: ${ticket.prUrl ?? 'none'} · Rounds: ${ticket.round} · Last review: ${ticket.lastVerdict ?? 'none'}` : `Plan rounds: ${init.planRound}`,
+    '',
+    'The steering to evaluate:',
+    '- every bold line in timeline.md: what the owner said or did by hand',
+    ...(humanPrRounds.length ? ['- the human review comments in the pr-comments.md files among your inputs (bot findings there are not steering)'] : []),
+    '',
+    'What happens to your rules: each goes to the owner as a proposal, and nothing changes until they accept it. A project rule joins the system prompt of every matching agent in this project; a factory rule is appended to the role file in every project.',
+  ].join('\n');
+}
+
+async function runRetro(run: Run): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const project = await mustProject(init.projectId);
+  const ticket = run.ticketId ? await mustTicket(run.ticketId) : null;
+  const why = run.prompt ?? 'you asked for it';
+  const dir = retroDir(init, ticket, run.id);
+  const evidence = await steeringEvidence(init);
+  const scope = ticket?.id ?? null;
+  const steps = await sql<Run[]>`select * from runs where ${repo.ticketScope(init.id, scope)} and kind <> 'retro' order by queued_at`;
+  const humanPrRounds = ticket ? roundsWithHumanPrComments(init, ticket) : [];
+  const ticketRetros = ticket ? [] : (await sql<Run[]>`select * from runs where initiative_id = ${init.id} and ticket_id is not null and kind = 'retro' and status = 'succeeded'`).flatMap((r) => (r.outputPath && fs.existsSync(r.outputPath) ? [r.outputPath] : []));
+  const subject = ticket ? ticketLabel(ticket) : 'the plan';
+  const out = path.join(dir, 'retro.md');
+  const prompt = header(
+    `Factory step: retro. Initiative: ${init.title}${ticket ? ` · Ticket: ${ticketLabel(ticket)} (key ${ticket.key})` : ''}`,
+    [
+      ['Main checkout (read-only)', project.repoPath],
+      ['Base branch', init.baseBranch],
+      ['Factory role files', config.agentsDir],
+      [ticket ? "Ticket folder (every round's files)" : "Initiative folder (every step's files)", ticket ? ticketDir(init, ticket) : initiativeDir(init)],
+      ['PR', ticket?.prUrl],
+      ['Diff', ticket?.prNumber ? `gh pr diff ${ticket.prNumber}` : null],
+    ],
+    [
+      write(path.join(dir, 'situation.md'), renderRetroSituation(init, ticket, why, humanPrRounds)),
+      write(path.join(dir, 'timeline.md'), renderTimeline(`Timeline of ${subject}`, steps, evidence.messages.filter((m) => m.ticketId === scope), evidence.routedBy)),
+      ...humanPrRounds,
+      writeBrief(init, project),
+      ...(init.planMd ? [writePlanMd(init)] : []),
+      ...(ticket ? [writeTicket(init, ticket, await repo.listTickets(init.id))] : []),
+      write(path.join(dir, 'known-rules.md'), renderKnownRules(await repo.listRules({ projectId: project.id }))),
+      ...ticketRetros,
+    ],
+    [out],
+    'Reply with one line: the first line of retro.md.',
+  );
+  await runAgent(run, { kind: 'retro', cwd: project.repoPath, prompt, runDir: dir, outputPath: out }, {});
+}
+
+async function afterRetro(run: Run, step: StepResult): Promise<void> {
+  if (await stoppedEarly(run, step, 'retro.md')) return;
+  const verdict = parseVerdict('retro', step.output);
+  if (!verdict) return failMalformedVerdict(run, step.output);
+  await finish(run, 'succeeded');
+  const init = await mustInitiative(run.initiativeId);
+  const ticket = run.ticketId ? await repo.getTicket(run.ticketId) : null;
+  const parsed = verdict === 'RULES' ? parseProposedRules(step.output!) : { rules: [], dropped: [] };
+  const known = new Set((await repo.listRules({ projectId: init.projectId })).map((r) => ruleKey(r.body)));
+  const rules = parsed.rules.filter((r) => !known.has(ruleKey(r.body)));
+  for (const d of parsed.dropped) await log(run, `Dropped a proposed rule: ${d}`);
+  for (const r of parsed.rules.filter((x) => !rules.includes(x))) await log(run, `Dropped a proposed rule the project already has: ${r.body}`);
+  await repo.insertRules(rules.map((r) => ({ ...r, projectId: init.projectId, initiativeId: init.id, ticketId: run.ticketId, runId: run.id })));
+  const proposed = rules.length
+    ? `Proposed ${rules.length} rule${rules.length > 1 ? 's' : ''} under **Learned rules**. Nothing changes until you accept one.`
+    : 'No new rule proposed.';
+  await agentMessage(run, [`**Retro on ${ticket ? ticketLabel(ticket) : 'the plan'}.** ${retroSummary(step.output!)}`.trim(), proposed].join('\n\n'));
+  if (run.ticketId) void startDueRetros(init.id);
+}
+
+const ruleKey = (body: string) => oneLine(body).toLowerCase();
+
+async function mustRule(id: string): Promise<Rule> {
+  const rule = await repo.getRule(id);
+  if (!rule) throw new PipelineError('rule not found', 404);
+  return rule;
+}
+
+function editRoleFile(role: RuleRole, edit: (content: string) => string): void {
+  const file = ruleFile(role);
+  fs.writeFileSync(file, edit(fs.readFileSync(file, 'utf8')));
+}
+
+async function recordRuleDecision(rule: Rule, what: string): Promise<void> {
+  if (!rule.initiativeId) return;
+  const where = rule.scope === 'factory' ? `factory rule for the ${rule.role} prompt (${path.basename(ruleFile(rule.role))})` : `project rule for ${rule.role === 'all' ? 'every agent' : `the ${rule.role}`}`;
+  await systemMessage({ initiativeId: rule.initiativeId, ticketId: rule.ticketId ?? undefined }, `${what} a ${where}: ${rule.body}`);
+}
+
+export async function acceptRule(id: string, edit: { body?: string; role?: RuleRole; scope?: RuleScope }): Promise<Rule> {
+  const rule = await mustRule(id);
+  if (rule.status !== 'proposed') throw new PipelineError(`this rule is already ${rule.status}`);
+  const next = { scope: edit.scope ?? rule.scope, role: edit.role ?? rule.role, body: oneLine(edit.body ?? rule.body) };
+  if (!next.body) throw new PipelineError('a rule needs text', 400);
+  if (next.scope === 'factory') editRoleFile(next.role, (content) => withLearnedRule(content, next.body));
+  const accepted = await repo.updateRule(id, { ...next, status: 'accepted', decidedAt: new Date().toISOString() });
+  await recordRuleDecision(accepted, 'Accepted');
+  return accepted;
+}
+
+export async function rejectRule(id: string): Promise<Rule> {
+  const rule = await mustRule(id);
+  if (rule.status !== 'proposed') throw new PipelineError(`this rule is already ${rule.status}`);
+  return repo.updateRule(id, { status: 'rejected', decidedAt: new Date().toISOString() });
+}
+
+export async function retireRule(id: string): Promise<Rule> {
+  const rule = await mustRule(id);
+  if (rule.status !== 'accepted') throw new PipelineError('only an accepted rule can be retired');
+  if (rule.scope === 'factory') editRoleFile(rule.role, (content) => withoutLearnedRule(content, rule.body));
+  const retired = await repo.updateRule(id, { status: 'retired', decidedAt: new Date().toISOString() });
+  await recordRuleDecision(retired, 'Retired');
+  return retired;
+}
+
 export async function cancelRun(runId: string): Promise<void> {
   const run = await repo.getRun(runId);
   if (!run) throw new PipelineError('run not found', 404);
@@ -2317,10 +2676,11 @@ export async function releaseRuns(exit: ServerExit): Promise<number> {
   return followed.length;
 }
 
-async function cancelActive(where: { initiativeId: string; ticketId?: string }): Promise<void> {
-  const runs = where.ticketId
+async function cancelActive(where: { initiativeId: string; ticketId?: string }, { keepSideRuns = false } = {}): Promise<void> {
+  const found = where.ticketId
     ? await sql<Run[]>`select * from runs where ticket_id = ${where.ticketId} and status in ('queued','running')`
     : await sql<Run[]>`select * from runs where initiative_id = ${where.initiativeId} and status in ('queued','running')`;
+  const runs = keepSideRuns ? found.filter((r) => !isSideRun(r.kind)) : found;
   for (const r of runs) await cancelRun(r.id);
   for (let i = 0; i < 20 && runs.some((r) => active.has(r.id)); i++) await new Promise((res) => setTimeout(res, 250));
 }
@@ -2360,7 +2720,7 @@ async function cleanUpMergedTickets(initiativeId: string): Promise<void> {
   const init = await mustInitiative(initiativeId);
   const project = await mustProject(init.projectId);
   for (const { ticket, branchToDelete } of mergedTicketCleanups(await repo.listTickets(init.id))) {
-    await cancelActive({ initiativeId: init.id, ticketId: ticket.id });
+    await cancelActive({ initiativeId: init.id, ticketId: ticket.id }, { keepSideRuns: true });
     await gitx.removeWorktree(project.repoPath, ticket.worktreePath, branchToDelete);
     if (!ticket.worktreePath) continue;
     await repo.updateTicket(ticket.id, { worktreePath: null });
@@ -2381,6 +2741,7 @@ export async function setTicketStatus(ticketId: string, status: 'approved' | 'me
   if (status === 'merged') await cleanUpMergedTickets(t.initiativeId);
   await refreshInitiativeStatus(t.initiativeId);
   await startReadyTickets(t.initiativeId);
+  if (status === 'merged') void startDueRetros(t.initiativeId);
 }
 
 export async function resetInitiative(initiativeId: string): Promise<void> {
@@ -2468,6 +2829,7 @@ export async function syncPrs(initiativeId: string): Promise<number> {
   await refreshInitiativeStatus(initiativeId);
   await startReadyTickets(initiativeId);
   void syncStack(initiativeId).then(() => advanceAutoMerge(initiativeId));
+  void startDueRetros(initiativeId);
   return changed;
 }
 
@@ -2619,6 +2981,7 @@ async function advanceTicketMerge(init: Initiative, project: Project, ticket: Ti
       return;
     case 'queue': {
       const { outcome, message } = await gh.addToMergeQueue(cwd, ticket.prNumber!, pr.headRefOid);
+      if (outcome === 'in-queue' || outcome === 'queued') void startDueRetros(init.id, { inQueue: ticket.id });
       if (outcome === 'in-queue' || outcome === 'merged') return;
       mergeQueueAttempts.set(ticket.id, { head: pr.headRefOid, times: queuedAtHead + 1 });
       const said = {
@@ -2662,12 +3025,12 @@ async function stackDependentTickets(): Promise<void> {
 }
 
 function ticketInFlight(ticketId: string): boolean {
-  return [...inFlight.values()].some((r) => r.ticketId === ticketId && r.kind !== 'ask');
+  return [...inFlight.values()].some((r) => r.ticketId === ticketId && !isSideRun(r.kind));
 }
 
 async function ticketIdle(ticketId: string): Promise<boolean> {
   if (ticketInFlight(ticketId)) return false;
-  const [busy] = await sql`select 1 from runs where ticket_id = ${ticketId} and status in ('queued','running') and kind <> 'ask' limit 1`;
+  const [busy] = await sql`select 1 from runs where ticket_id = ${ticketId} and status in ('queued','running') and kind not in ${sql([...SIDE_RUN_KINDS])} limit 1`;
   return !busy;
 }
 

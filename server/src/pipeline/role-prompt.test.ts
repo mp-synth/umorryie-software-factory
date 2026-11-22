@@ -47,3 +47,17 @@ test('an absolute role file is honoured', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('project rules reach exactly the agents their role names', () => {
+  const rules = [
+    { role: 'code' as const, body: 'Use the shared client.' },
+    { role: 'planner' as const, body: 'Plan migrations as their own ticket.' },
+  ];
+  assert.ok(rolePrompt('execute', undefined, rules).includes('- Use the shared client.'));
+  assert.ok(rolePrompt('review', undefined, rules).includes('- Use the shared client.'));
+  assert.ok(!rolePrompt('execute', undefined, rules).includes('Plan migrations'));
+  assert.ok(rolePrompt('plan', undefined, rules).includes('- Plan migrations as their own ticket.'));
+  assert.ok(!rolePrompt('plan', undefined, rules).includes('shared client'));
+  assert.equal(rolePrompt('ask', undefined, rules), rolePrompt('ask'));
+  assert.ok(rolePrompt('ask', undefined, [{ role: 'all', body: 'Everyone.' }]).includes('- Everyone.'));
+});

@@ -3,7 +3,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Bot, Info, MessageCircleQuestion, MessagesSquare, Send, StickyNote, User } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import type { InitiativeDetail, Message } from '@factory/shared';
+import type { InitiativeDetail, Message, RunKind } from '@factory/shared';
 import { api } from '@/lib/api';
 import { isRunInFlight } from '@/lib/status';
 import { ago, cn, pad2 } from '@/lib/utils';
@@ -12,6 +12,12 @@ import { useRunDrawer } from './RunDrawer';
 import { Button, Card, CardHeader, Segmented, Select, Spinner, Textarea } from './ui';
 
 type Mode = 'question' | 'feedback' | 'comment';
+
+const WORKING: Partial<Record<RunKind, string>> = {
+  ask: 'Advisor is reading the code…',
+  steer: 'Routing your feedback to the PRs it belongs to…',
+  retro: 'Retro is looking at what you had to steer…',
+};
 
 export function Conversation({ detail }: { detail: InitiativeDetail }) {
   const { initiative: i, messages, tickets, runs } = detail;
@@ -23,13 +29,14 @@ export function Conversation({ detail }: { detail: InitiativeDetail }) {
   const scroller = useRef<HTMLDivElement>(null);
   const planLocked = ['in_progress', 'done'].includes(i.status);
   const ticketTarget = target !== 'initiative' ? tickets.find((t) => t.id === target) : null;
-  const feedbackDisabled = !ticketTarget && planLocked;
+  const steering = !ticketTarget && planLocked;
+  const feedbackDisabled = !!ticketTarget && ['merged', 'canceled'].includes(ticketTarget.status);
 
   useEffect(() => {
     if (feedbackDisabled && mode === 'feedback') setMode('question');
   }, [feedbackDisabled, mode]);
 
-  const pendingAsks = runs.filter((r) => r.kind === 'ask' && isRunInFlight(r));
+  const pendingAsks = runs.filter((r) => WORKING[r.kind] && isRunInFlight(r));
   const shown = useMemo(() => (filter === 'talk' ? messages.filter((m) => m.kind !== 'event') : messages), [messages, filter]);
 
   useEffect(() => {
@@ -41,7 +48,9 @@ export function Conversation({ detail }: { detail: InitiativeDetail }) {
     mutationFn: () => api.message(i.id, { body: text, kind: mode, ticketId: ticketTarget?.id ?? null, act: true }),
     onSuccess: () => {
       setText('');
-      if (mode === 'feedback') toast.success(ticketTarget ? 'Feedback sent to a fresh fixer' : 'Feedback sent — a fresh planner is revising');
+      if (mode === 'feedback') {
+        toast.success(ticketTarget ? 'Feedback sent to a fresh fixer' : steering ? 'Feedback sent — a fresh agent routes it to the PRs it belongs to' : 'Feedback sent — a fresh planner is revising');
+      }
     },
     onError: toastError,
   });
@@ -52,7 +61,9 @@ export function Conversation({ detail }: { detail: InitiativeDetail }) {
       : mode === 'feedback'
         ? ticketTarget
           ? `What should change in ${pad2(ticketTarget.seq)}? A fresh fixer applies it.`
-          : 'What should the planner change? Be specific: what is good, what to change, what not to touch.'
+          : steering
+            ? 'What should change across the PRs? A fresh agent finds the PRs it belongs to and sends each to a fresh fixer.'
+            : 'What should the planner change? Be specific: what is good, what to change, what not to touch.'
         : 'A note for the record. No agent is started.';
 
   return (
@@ -70,7 +81,7 @@ export function Conversation({ detail }: { detail: InitiativeDetail }) {
         ))}
         {pendingAsks.map((r) => (
           <button key={r.id} onClick={() => drawer.open(r.id)} className="flex items-center gap-2 rounded-lg border border-fuchsia-400/20 bg-fuchsia-400/[0.05] px-3 py-2 text-xs text-fuchsia-200">
-            <Spinner className="text-fuchsia-300" /> Advisor is reading the code…
+            <Spinner className="text-fuchsia-300" /> {WORKING[r.kind]}
           </button>
         ))}
       </div>
@@ -109,7 +120,7 @@ export function Conversation({ detail }: { detail: InitiativeDetail }) {
         <div className="mt-2 flex items-center justify-between">
           <span className="text-2xs text-zinc-600">⌘↵ to send</span>
           <Button size="sm" variant="primary" disabled={!text.trim()} loading={send.isPending} onClick={() => send.mutate()} icon={<Send className="h-3 w-3" />}>
-            {mode === 'question' ? 'Ask' : mode === 'feedback' ? (ticketTarget ? 'Send to fixer' : 'Send & re-plan') : 'Add note'}
+            {mode === 'question' ? 'Ask' : mode === 'feedback' ? (ticketTarget ? 'Send to fixer' : steering ? 'Send to the PRs' : 'Send & re-plan') : 'Add note'}
           </Button>
         </div>
       </div>

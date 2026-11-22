@@ -1,4 +1,4 @@
-import type { RunKind } from '@factory/shared';
+import { isSideRun, type RunKind } from '@factory/shared';
 
 export interface SchedulableRun {
   id: string;
@@ -27,13 +27,13 @@ export function pickRunsToStart<Q extends QueuedRun>(queuedOldestFirst: Q[], run
   const busyTickets = new Map<string, Set<string>>();
   const occupy = (r: SchedulableRun) => {
     agentsPerInitiative.set(r.initiativeId, (agentsPerInitiative.get(r.initiativeId) ?? 0) + 1);
-    if (!r.ticketId || r.kind === 'ask') return;
+    if (!r.ticketId || isSideRun(r.kind)) return;
     const tickets = busyTickets.get(r.initiativeId) ?? new Set<string>();
     tickets.add(r.ticketId);
     busyTickets.set(r.initiativeId, tickets);
   };
   const fitsTicketLimit = (q: Q) => {
-    if (!q.ticketId || q.kind === 'ask') return true;
+    if (!q.ticketId || isSideRun(q.kind)) return true;
     const tickets = busyTickets.get(q.initiativeId);
     return !tickets || tickets.has(q.ticketId) || tickets.size < q.concurrency;
   };

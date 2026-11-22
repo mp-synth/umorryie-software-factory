@@ -1,10 +1,12 @@
 import {
   Bot,
   BrainCircuit,
+  GraduationCap,
   CheckCircle2,
   ClipboardCheck,
   Hammer,
   MessageCircleQuestion,
+  Route,
   Scale,
   ScanSearch,
   ShieldCheck,
@@ -73,6 +75,8 @@ export const runKind: Record<RunKind, { label: string; agent: string; icon: Luci
   verify: { label: 'Verify fix', agent: 'Fix verifier', icon: UserCheck, color: 'text-lime-300' },
   arbitrate: { label: 'Decide', agent: 'Arbiter', icon: Scale, color: 'text-orange-300' },
   ask: { label: 'Ask', agent: 'Advisor', icon: MessageCircleQuestion, color: 'text-fuchsia-300' },
+  steer: { label: 'Route feedback', agent: 'Steering router', icon: Route, color: 'text-rose-300' },
+  retro: { label: 'Retro', agent: 'Retro', icon: GraduationCap, color: 'text-emerald-300' },
 };
 
 export const AgentIcon = Bot;
@@ -88,7 +92,7 @@ export function verdictTone(v: string | null | undefined): Tone {
 
 export function shortVerdict(v: string | null | undefined): string | null {
   if (!v) return null;
-  return v.replace(/^(VERDICT|STATUS|PLAN|FIX|GATE|DECISION):\s*/i, '').split(/\s+·\s+/)[0].slice(0, 28);
+  return v.replace(/^(VERDICT|STATUS|PLAN|FIX|GATE|DECISION|ROUTE|RETRO):\s*/i, '').split(/\s+·\s+/)[0].slice(0, 28);
 }
 
 export const isRunInFlight = (r: { status: RunStatus }): boolean => r.status === 'running' || r.status === 'queued';
