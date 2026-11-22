@@ -2,7 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Cpu, HardDrive, Settings2, XCircle } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
-import { PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings } from '@factory/shared';
+import { DEFAULT_APP_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings } from '@factory/shared';
 import { api } from '@/lib/api';
 import { toastError, toastSuccess } from '@/lib/toasts';
 import { shortPath } from '@/lib/utils';
@@ -12,8 +12,11 @@ export function SettingsPage() {
   const { data: settings } = useQuery({ queryKey: ['settings'], queryFn: api.settings });
   const { data: health, isLoading: healthLoading } = useQuery({ queryKey: ['health'], queryFn: api.health, staleTime: 30_000 });
   const [form, setForm] = useState<AppSettings | null>(null);
+  const [noiseAuthors, setNoiseAuthors] = useState('');
   useEffect(() => {
-    if (settings) setForm(settings);
+    if (!settings) return;
+    setForm(settings);
+    setNoiseAuthors((settings.prNoiseCommentAuthors ?? DEFAULT_APP_SETTINGS.prNoiseCommentAuthors).join(', '));
   }, [settings]);
   const save = useMutation({
     mutationFn: (s: Partial<AppSettings>) => api.updateSettings(s),
@@ -90,17 +93,29 @@ export function SettingsPage() {
               checked={form.loadUserSettings}
               onChange={(v) => setForm({ ...form, loadUserSettings: v })}
             />
+            <Field
+              label="PR comment authors to ignore"
+              hint="Comma-separated logins, with or without [bot]. Their top-level PR comments (coverage, plan and deploy reports) never start a fixer; their review threads, review bodies and failing checks still do."
+            >
+              <Input value={noiseAuthors} onChange={(e) => setNoiseAuthors(e.target.value)} />
+            </Field>
             <Toggle
               label={`Fix open PRs every ${PR_SWEEP_INTERVAL_MINUTES} minutes`}
               hint={`Merge conflicts, failing CI (tests, lint) and unanswered review comments get a fresh fixer, on every open factory PR and on every open PR you opened in a project's repo (adopted into that project's Open PRs initiative; archive it to stop). Tickets that need you are skipped. A PR being fixed is marked so the next sweep leaves it alone; the mark expires after ${PR_SWEEP_CLAIM_MINUTES} minutes.`}
               checked={form.sweepOpenPrs}
               onChange={(v) => setForm({ ...form, sweepOpenPrs: v })}
             />
+            <Toggle
+              label="Resume steps interrupted by a restart"
+              hint="When the factory server restarts, a step that was running is queued again once, as long as it was not already interrupted in the same round. Otherwise the ticket waits for you with the reason shown."
+              checked={form.resumeInterruptedRuns ?? true}
+              onChange={(v) => setForm({ ...form, resumeInterruptedRuns: v })}
+            />
             <div className="flex justify-end gap-2">
               <Button variant="outline" loading={sweep.isPending} onClick={() => sweep.mutate()}>
                 Sweep PRs now
               </Button>
-              <Button variant="primary" loading={save.isPending} onClick={() => save.mutate(form)}>
+              <Button variant="primary" loading={save.isPending} onClick={() => save.mutate({ ...form, prNoiseCommentAuthors: logins(noiseAuthors) })}>
                 Save
               </Button>
             </div>
@@ -132,6 +147,8 @@ export function SettingsPage() {
     </div>
   );
 }
+
+const logins = (text: string) => text.split(',').map((l) => l.trim()).filter(Boolean);
 
 function HealthItem({ ok, label, detail }: { ok: boolean; label: string; detail: string }) {
   return (

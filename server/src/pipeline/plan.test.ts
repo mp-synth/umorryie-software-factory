@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { firstLine, section, slugify, topoOrder, validatePlan } from './plan.ts';
+import type { PlanJson } from '@factory/shared';
+import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, section, slugify, topoOrder, validatePlan } from './plan.ts';
 
 const ticket = (key: string, depends_on: string[] = []) => ({
   key,
@@ -63,4 +64,39 @@ test('firstLine, section and slugify', () => {
   assert.equal(slugify('Add Dark Mode — to the App!'), 'add-dark-mode-to-the-app');
   assert.equal(slugify('Priorities and due dates for todos', 32), 'priorities-and-due-dates-for');
   assert.equal(slugify('x'.repeat(50), 10), 'xxxxxxxxxx');
+});
+
+const withGuidance = (...guidance: string[]) => validatePlan(plan([{ ...ticket('a'), guidance }]), 5).plan as PlanJson;
+const tracked = ['src/thing.ts', 'src/lib/util.ts', 'docs/readme.md'];
+const missing = (...guidance: string[]) => missingPlanPaths(withGuidance(...guidance), tracked).map((m) => m.path);
+
+test('missingPlanPaths reports a backticked path that is not tracked and accepts existing ones', () => {
+  assert.deepEqual(missing('Edit `src/thing.ts` and `src/other.ts`'), ['src/other.ts']);
+});
+
+test('missingPlanPaths treats a directory as existing when a tracked file is under it', () => {
+  assert.deepEqual(missing('Look in `src/lib/` and `src/nope/`'), ['src/nope/']);
+});
+
+test('missingPlanPaths strips a line suffix', () => {
+  assert.deepEqual(missing('See `src/thing.ts:42` and `src/gone.ts:3-9`'), ['src/gone.ts']);
+});
+
+test('missingPlanPaths ignores globs, placeholders, URLs, spaces and tokens without a slash', () => {
+  assert.deepEqual(missing('`src/**/*.ts`', '`src/<name>.ts`', '`src/{a,b}.ts`', '`https://example.com/x.html`', '`src/a b.ts`', '`missing.ts`', '`foo/bar`', 'src/unticked.ts'), []);
+});
+
+test('renderPlanPaths names each ticket and path', () => {
+  const md = renderPlanPaths([{ ticket: 'a', path: 'src/x.ts' }]);
+  assert.match(md, /- a: `src\/x\.ts`/);
+  assert.match(md, /creates is fine/);
+});
+
+test('renderPlanContext carries goal, criteria, definition of done and edge cases only when present', () => {
+  const full = renderPlanContext({ ...withGuidance('Touch it'), edge_cases: ['Empty input'] });
+  assert.match(full, /## Goal\nUsers can do the thing end to end\./);
+  assert.match(full, /## Success criteria\n- Thing works/);
+  assert.match(full, /## Definition of done\n- All tickets approved/);
+  assert.match(full, /## Edge cases\n- Empty input/);
+  assert.doesNotMatch(renderPlanContext({ ...withGuidance('Touch it'), edge_cases: [] }), /Edge cases/);
 });

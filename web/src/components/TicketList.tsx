@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react';
 import { toast } from 'sonner';
-import { PR_SWEEP_CLAIM_MINUTES, type InitiativeDetail, type Run, type Ticket } from '@factory/shared';
+import { PR_SWEEP_CLAIM_MINUTES, overSizeBudget, type InitiativeDetail, type Run, type Ticket } from '@factory/shared';
 import { api, type BulkAction, type TicketAction } from '@/lib/api';
 import { useNow } from '@/lib/live';
 import { runKind, isRunInFlight } from '@/lib/status';
@@ -34,7 +34,13 @@ import { ago, cn, copy, money, pad2, runDuration, shortPath } from '@/lib/utils'
 import { Markdown } from './Markdown';
 import { RunPill, TicketPill, VerdictPill } from './StatusPill';
 import { useRunDrawer } from './RunDrawer';
-import { Button, Card, CardHeader, Chip, Dialog, EmptyState, Field, Input, Menu, MenuItem, MenuLabel, MenuSeparator, SegmentedBar, Textarea, Tooltip } from './ui';
+import { Button, Card, CardHeader, Chip, Dialog, EmptyState, Field, Input, Menu, MenuItem, MenuLabel, MenuSeparator, Pill, SegmentedBar, Textarea, Tooltip } from './ui';
+
+const CI_PILLS = {
+  green: { label: 'CI green', tone: 'success' },
+  red: { label: 'CI red', tone: 'danger' },
+  pending: { label: 'CI running', tone: 'active' },
+} as const;
 
 const ACTIVE = new Set(['building', 'checking', 'in_review', 'fixing']);
 
@@ -234,6 +240,13 @@ function TicketRow({
           <div className="flex items-center gap-2">
             <span className="line-clamp-2 text-[13px] font-medium leading-snug text-zinc-100">{t.title}</span>
             {t.size && <span className="shrink-0 rounded border border-line px-1 font-mono text-[10px] text-zinc-500">{t.size}</span>}
+            {t.linesChanged != null && (
+              <Tooltip content="Lines changed outside tests, lockfiles and generated files">
+                <span className={cn('shrink-0 font-mono text-[10px]', overSizeBudget(t.size, t.linesChanged) ? 'text-amber-300' : 'text-zinc-500')}>
+                  {t.linesChanged} lines{overSizeBudget(t.size, t.linesChanged) && ' · over budget'}
+                </span>
+              </Tooltip>
+            )}
           </div>
           <div className="mt-0.5 flex items-center gap-2 text-2xs text-zinc-500">
             {deps.length > 0 && <span>after {deps.map((d) => pad2(d.seq)).join(', ')}</span>}
@@ -243,6 +256,11 @@ function TicketRow({
                 <GitPullRequest className="h-3 w-3" />#{t.prNumber}
                 {t.prState && t.prState !== 'OPEN' && <span className="text-zinc-500">({t.prState.toLowerCase()})</span>}
               </a>
+            )}
+            {(t.ciState === 'green' || t.ciState === 'red' || t.ciState === 'pending') && (
+              <Pill tone={CI_PILLS[t.ciState].tone} live={t.ciState === 'pending'}>
+                {CI_PILLS[t.ciState].label}
+              </Pill>
             )}
             {t.prStack && (
               <Tooltip content={stackedOn ? `Stacked PR on GitHub, on top of #${stackedOn.prNumber}` : 'Bottom of a stacked PR on GitHub'}>

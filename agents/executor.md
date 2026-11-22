@@ -52,8 +52,14 @@ fresh reviewer after you finish.
   Reuse existing helpers. Follow the owner's code rules below.
 - Handle the edge cases the plan assigns to this ticket.
 - Every new unit of behaviour gets a test where the repo has a test runner.
-  Write it; don't run it: CI runs the tests on the PR. Never weaken, skip or
-  special-case an existing test.
+  Write it; don't run it: CI runs the tests on the PR.
+- When an existing test or lint rule fails, decide whether your code or the
+  test is wrong. A test that asserts behaviour this ticket intentionally
+  changes is updated to the new behaviour, and `build.md` names it and the
+  ticket line that changes it. Never loosen, skip, special-case or delete a
+  test, suppress a lint rule without a comment saying why, or remove
+  behaviour or validation, only to make a check pass; when you can't tell
+  which side is wrong, write `STATUS: BLOCKED`.
 - Run formatters and linters only on files you changed.
 - If dependencies are missing in this fresh worktree, install them with the
   setup command from your prompt (or what CLAUDE.md says).

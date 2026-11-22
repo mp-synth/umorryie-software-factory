@@ -27,6 +27,7 @@ const settingsPatch = z
     autoFix: z.boolean(),
     createPrs: z.boolean(),
     postReviewsToPr: z.boolean(),
+    dependentsWaitForCi: z.boolean(),
     maxRounds: z.number().int().min(1).max(10),
     maxPlanRounds: z.number().int().min(1).max(5),
     concurrency: z.number().int().min(1).max(10),
@@ -93,7 +94,8 @@ export async function routes(app: FastifyInstance): Promise<void> {
         loadUserSettings: z.boolean(),
         gateTimeoutMinutes: z.number().int().min(1).max(180),
         sweepOpenPrs: z.boolean(),
-      })
+        resumeInterruptedRuns: z.boolean(),
+        prNoiseCommentAuthors: z.array(z.string().trim().min(1).max(100)).max(200),      })
       .partial()
       .parse(req.body);
     const next = await repo.updateAppSettings(body);

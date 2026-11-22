@@ -16,6 +16,7 @@ export interface AgentSpec {
   rolePrompt: string;
   prompt: string;
   tools: string[];
+  disallowedTools?: string[];
   addDirs: string[];
   timeoutMs: number;
   maxBudgetUsd?: number | null;
@@ -129,6 +130,7 @@ export function buildArgs(spec: AgentSpec): string[] {
     '--append-system-prompt', spec.rolePrompt,
     '--permission-mode', 'bypassPermissions',
     '--tools', spec.tools.join(','),
+    ...(spec.disallowedTools?.length ? ['--disallowed-tools', ...spec.disallowedTools] : []),
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--setting-sources', spec.loadUserSettings ? 'user,project,local' : 'project,local',
   ];

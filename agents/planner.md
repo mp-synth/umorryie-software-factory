@@ -51,7 +51,8 @@ Work out, concretely and grounded in the code:
 - **Vertical slices.** Each ticket delivers one observable outcome through every
   layer it needs (data, API, UI, tests). No "set up the database" or "write the
   tests" tickets; fold foundations into the first slice that needs them.
-- **Small.** One reviewable PR each: XS (< 50 lines), S (< 200), M (< 500).
+- **Small.** One reviewable PR each: XS (< 50 lines), S (< 200), M (< 500),
+  counting changed lines outside tests, lockfiles and generated files.
   Anything bigger is two tickets.
 - **Honest dependencies.** `depends_on` only when a ticket can't be built or
   verified without the other's code. Maximize parallelism. A dependent

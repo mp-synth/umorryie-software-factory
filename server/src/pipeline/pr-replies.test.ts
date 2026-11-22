@@ -30,7 +30,7 @@ const items: PrItems = {
 
 test('parses one reply per item line and ignores the rest', () => {
   assert.deepEqual(
-    parseReplies(fixMd).map((r) => [r.item, r.verdict]),
+    parseReplies(fixMd).replies.map((r) => [r.item, r.verdict]),
     [
       ['T1', 'VALID'],
       ['T2', 'INVALID'],
@@ -41,11 +41,19 @@ test('parses one reply per item line and ignores the rest', () => {
 });
 
 test('rerun ids are deduplicated', () => {
-  assert.deepEqual(parseRerunIds(fixMd), ['1234567890']);
+  assert.deepEqual(parseRerunIds(fixMd), { ids: ['1234567890'], unparsed: 0 });
+});
+
+test('counts non-empty lines that could not be parsed', () => {
+  assert.equal(parseReplies(fixMd).unparsed, 1);
+  assert.equal(parseReplies('## Replies\n\n- T1 [VALID]: ok\nT2 VALID ok\n- C1 (VALID): ok\n').unparsed, 2);
+  assert.deepEqual(parseReplies('no section'), { replies: [], unparsed: 0 });
+  assert.deepEqual(parseRerunIds('## Reruns\n- 1234567890 (flaky)\n- the e2e run\n'), { ids: ['1234567890'], unparsed: 1 });
+  assert.deepEqual(parseRerunIds('no section'), { ids: [], unparsed: 0 });
 });
 
 test('threads get their own reply; fixed threads and settled bot threads are resolved', () => {
-  const planned = planReplies(parseReplies(fixMd), items);
+  const planned = planReplies(parseReplies(fixMd).replies, items);
   assert.deepEqual(
     planned.threadReplies.map((r) => [r.thread.label, r.resolve]),
     [
@@ -57,20 +65,27 @@ test('threads get their own reply; fixed threads and settled bot threads are res
 
 test('a human thread the fixer disputes or only partly fixes stays open for them', () => {
   for (const verdict of ['INVALID', 'PARTIAL', 'UNCONFIRMED', 'NEEDS-HUMAN']) {
-    assert.equal(shouldResolve({ item: 'T1', verdict, body: 'x' }, 'jane'), false, verdict);
+    assert.equal(shouldResolve({ item: 'T1', verdict, body: 'x' }, { rootAuthor: 'jane' }), false, verdict);
   }
-  assert.equal(shouldResolve({ item: 'T1', verdict: 'PARTIAL', body: 'x' }, 'cursor[bot]'), false);
+  assert.equal(shouldResolve({ item: 'T1', verdict: 'PARTIAL', body: 'x' }, { rootAuthor: 'cursor[bot]' }), false);
+});
+
+test('a bot thread rejected with a code pointer resolves with or without the [bot] suffix', () => {
+  const invalid = { item: 'T2', verdict: 'INVALID', body: 'x' };
+  assert.equal(shouldResolve(invalid, { rootAuthor: 'cursor', rootIsBot: true }), true);
+  assert.equal(shouldResolve(invalid, { rootAuthor: 'cursor[bot]' }), true);
+  assert.equal(shouldResolve(invalid, { rootAuthor: 'cursor' }), false);
 });
 
 test('top-level comments are answered in the summary; factory-only items stay off the PR', () => {
-  const planned = planReplies(parseReplies(fixMd), items);
+  const planned = planReplies(parseReplies(fixMd).replies, items);
   assert.deepEqual(planned.commentReplies.map(renderCommentReply), [
     '- Re @bob (https://github.com/o/r/pull/7#issuecomment-1): Whether guests can invite is a product call.',
   ]);
 });
 
 test('without PR items nothing is posted', () => {
-  const planned = planReplies(parseReplies(fixMd), null);
+  const planned = planReplies(parseReplies(fixMd).replies, null);
   assert.equal(planned.threadReplies.length + planned.commentReplies.length, 0);
 });
 
@@ -83,8 +98,8 @@ test('when two fix rounds answer the same thread or comment, only the newest rep
       { label: 'C2', url: 'https://github.com/o/r/pull/7#issuecomment-2', author: 'bob' },
     ],
   };
-  const older = planReplies(parseReplies('## Replies\n- T3 [VALID]: old\n- C1 [VALID]: old\n- C2 [VALID]: kept\n'), olderItems);
-  const newest = planReplies(parseReplies(fixMd), items);
+  const older = planReplies(parseReplies('## Replies\n- T3 [VALID]: old\n- C1 [VALID]: old\n- C2 [VALID]: kept\n').replies, olderItems);
+  const newest = planReplies(parseReplies(fixMd).replies, items);
   const merged = mergeNewestFirst([newest, older]);
   assert.deepEqual(
     merged.threadReplies.map((r) => [r.thread.rootCommentId, r.reply.body.slice(0, 5)]),

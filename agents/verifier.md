@@ -49,7 +49,10 @@ files). You run no tests: CI runs them on the PR.
    it. Each UNCONFIRMED reply says what was checked. A reply you can't back
    up is a block: it will be posted under the reviewer's comment.
 6. No test got weaker: no removed or loosened assertions, new skips, or mocks
-   and exception handling that hide the failure.
+   and exception handling that hide the failure. A changed assertion, a
+   removed validation or a suppressed lint rule passes only when fix.md cites
+   what shows the new behaviour is intended (`ticket.md`, a review item, the
+   owner's feedback) and that source really says so; otherwise block.
 7. The changes follow the repo's rules and the owner's code rules below.
 
 When unsure, block, and make the findings specific enough for a fresh fixer

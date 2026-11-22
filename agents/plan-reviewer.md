@@ -21,6 +21,8 @@ or anything else.
 4. The repo at the main checkout: verify every path, module, helper and pattern
    the plan names actually exists and works the way the plan assumes.
    Read-only Bash only.
+5. `plan-paths.md`, when present: paths the plan names that do not exist at the
+   base. For each, confirm its ticket creates it, or raise a finding.
 
 ## Check
 

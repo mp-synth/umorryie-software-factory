@@ -8,7 +8,6 @@ export function factoryCommentBody(body: string): string {
 }
 
 const CHECKS_ONLY_HUMANS_TURN_GREEN = /^(Code review( gate)?|Meticulous (Tests|Checks))$/;
-const STATUS_ONLY_COMMENT_AUTHORS = /^(github-actions|alwaysmeticulous)\[bot\]$/;
 
 export function isBot(login: string): boolean {
   return login.endsWith('[bot]');
@@ -107,15 +106,57 @@ export async function comment(cwd: string, prNumber: number, body: string): Prom
   await gh(cwd, ['pr', 'comment', String(prNumber), '--body-file', '-'], factoryCommentBody(body));
 }
 
-interface CheckRun {
+export interface CheckRun {
   __typename?: string;
   name?: string;
   context?: string;
+  workflowName?: string;
   conclusion?: string;
   state?: string;
   status?: string;
+  startedAt?: string;
   detailsUrl?: string;
   targetUrl?: string;
+}
+
+const FAILING_OUTCOMES = new Set(['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
+
+const outcomeOf = (c: CheckRun) => (c.conclusion ?? c.state ?? '').toUpperCase();
+const isFailing = (c: CheckRun) => FAILING_OUTCOMES.has(outcomeOf(c));
+const checkName = (c: CheckRun) => c.name ?? c.context ?? 'check';
+const checkUrl = (c: CheckRun) => c.detailsUrl ?? c.targetUrl ?? null;
+const runIdOf = (c: CheckRun) => {
+  const id = actionsRunId(checkUrl(c));
+  return id ? Number(id) : null;
+};
+const runKey = (c: CheckRun) => String(runIdOf(c) ?? c.startedAt ?? '');
+
+function isNewerRun(other: CheckRun, c: CheckRun): boolean {
+  const [a, b] = [runIdOf(other), runIdOf(c)];
+  if (a !== null && b !== null) return a > b;
+  return Date.parse(other.startedAt ?? '') > Date.parse(c.startedAt ?? '');
+}
+
+function isSuperseded(c: CheckRun, all: CheckRun[]): boolean {
+  if (outcomeOf(c) !== 'CANCELLED') return false;
+  if (all.some((o) => o !== c && checkName(o) === checkName(c) && o.workflowName === c.workflowName && !isFailing(o))) return true;
+  if (!c.workflowName) return false;
+  const newer = all.filter((o) => o.workflowName === c.workflowName && isNewerRun(o, c));
+  return [...new Set(newer.map(runKey))].some((key) => newer.filter((o) => runKey(o) === key).every((o) => !isFailing(o)));
+}
+
+export interface PrCheck {
+  name: string;
+  url: string | null;
+}
+
+export function splitFailingChecks(checks: CheckRun[]): { failing: PrCheck[]; superseded: PrCheck[] } {
+  const toCheck = (c: CheckRun) => ({ name: checkName(c), url: checkUrl(c) });
+  const bad = checks.filter(isFailing);
+  return {
+    failing: bad.filter((c) => !isSuperseded(c, checks)).map(toCheck),
+    superseded: bad.filter((c) => isSuperseded(c, checks)).map(toCheck),
+  };
 }
 
 export interface PrSnapshot {
@@ -126,10 +167,20 @@ export interface PrSnapshot {
   mergeable: string;
   baseRefName: string;
   headRefOid: string;
-  failingChecks: { name: string; url: string | null }[];
+  failingChecks: PrCheck[];
+  supersededChecks: PrCheck[];
   pendingChecks: string[];
+  finishedChecks: number;
   comments: { author: string; body: string; createdAt: string; url: string }[];
   reviews: { author: string; state: string; body: string; submittedAt: string }[];
+}
+
+export type CiState = 'green' | 'red' | 'pending' | 'none';
+
+export function ciStateOf(snap: Pick<PrSnapshot, 'failingChecks' | 'pendingChecks' | 'finishedChecks'>): CiState {
+  if (snap.failingChecks.length) return 'red';
+  if (snap.pendingChecks.length) return 'pending';
+  return snap.finishedChecks ? 'green' : 'none';
 }
 
 export async function prSnapshot(cwd: string, prNumber: number): Promise<PrSnapshot | null> {
@@ -140,7 +191,10 @@ export async function prSnapshot(cwd: string, prNumber: number): Promise<PrSnaps
   if (r.code !== 0) return null;
   const d = JSON.parse(r.stdout);
   const checks: CheckRun[] = ((d.statusCheckRollup ?? []) as CheckRun[]).filter((c) => !CHECKS_ONLY_HUMANS_TURN_GREEN.test(c.name ?? c.context ?? ''));
-  const bad = new Set(['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
+  const { failing, superseded } = splitFailingChecks(checks);
+  const pendingChecks = checks
+    .filter((c) => ['IN_PROGRESS', 'QUEUED', 'PENDING', 'WAITING'].includes((c.status ?? c.state ?? '').toUpperCase()))
+    .map((c) => c.name ?? c.context ?? 'check');
   const notMarker = (body: string) => !body.includes(FACTORY_MARKER);
   return {
     number: d.number,
@@ -150,14 +204,12 @@ export async function prSnapshot(cwd: string, prNumber: number): Promise<PrSnaps
     mergeable: d.mergeable,
     baseRefName: d.baseRefName,
     headRefOid: d.headRefOid,
-    failingChecks: checks
-      .filter((c) => bad.has((c.conclusion ?? c.state ?? '').toUpperCase()))
-      .map((c) => ({ name: c.name ?? c.context ?? 'check', url: c.detailsUrl ?? c.targetUrl ?? null })),
-    pendingChecks: checks
-      .filter((c) => ['IN_PROGRESS', 'QUEUED', 'PENDING', 'WAITING'].includes((c.status ?? c.state ?? '').toUpperCase()))
-      .map((c) => c.name ?? c.context ?? 'check'),
+    failingChecks: failing,
+    supersededChecks: superseded,
+    pendingChecks,
+    finishedChecks: checks.length - pendingChecks.length,
     comments: (d.comments ?? [])
-      .filter((c: { body: string; author?: { login: string } }) => notMarker(c.body) && !STATUS_ONLY_COMMENT_AUTHORS.test(c.author?.login ?? ''))
+      .filter((c: { body: string }) => notMarker(c.body))
       .map((c: { author?: { login: string }; body: string; createdAt: string; url: string }) => ({
         author: c.author?.login ?? 'unknown',
         body: c.body,
@@ -179,6 +231,7 @@ export interface ReviewThread {
   id: string;
   rootCommentId: number;
   rootAuthor: string;
+  rootIsBot: boolean;
   path: string;
   line: number | null;
   outdated: boolean;
@@ -192,14 +245,14 @@ interface ThreadNode {
   isOutdated: boolean;
   path: string;
   line: number | null;
-  comments: { nodes: { databaseId: number; author?: { login: string }; body: string }[] };
+  comments: { nodes: { databaseId: number; author?: { login: string; __typename?: string }; body: string }[] };
 }
 
 export async function unresolvedThreads(cwd: string, prNumber: number, me: string | null): Promise<ReviewThread[] | null> {
   const repo = await gh(cwd, ['repo', 'view', '--json', 'owner,name']);
   if (repo.code !== 0) return null;
   const { owner, name } = JSON.parse(repo.stdout) as { owner: { login: string }; name: string };
-  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:50){nodes{databaseId author{login} body}}}}}}}`;
+  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:50){nodes{databaseId author{login __typename} body}}}}}}}`;
   const r = await gh(cwd, [
     'api', 'graphql', '-f', `query=${query}`, '-F', `owner=${owner.login}`, '-F', `name=${name}`, '-F', `number=${prNumber}`,
   ]);
@@ -214,6 +267,7 @@ export async function unresolvedThreads(cwd: string, prNumber: number, me: strin
         id: t.id,
         rootCommentId: all[0].databaseId,
         rootAuthor: all[0].author?.login ?? 'unknown',
+        rootIsBot: all[0].author?.__typename === 'Bot' || isBot(all[0].author?.login ?? ''),
         path: t.path,
         line: t.line,
         outdated: t.isOutdated,

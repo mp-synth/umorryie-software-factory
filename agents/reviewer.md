@@ -22,7 +22,10 @@ files (no `--fix`, no formatters, no installs beyond what a check needs).
 ## Read
 
 1. `CLAUDE.md` / `AGENTS.md` and the docs they point to for this area.
-2. `ticket.md`: the scope and the acceptance checks.
+2. `ticket.md`: the scope and the acceptance checks. `plan-context.md`, when
+   present: the initiative's goal, success criteria and definition of done; you
+   judge this ticket only, and mention under Notes when the change contradicts
+   one of them.
 3. `build.md`: what the executor claims it did. Claims, not facts.
 4. The change: `git log --oneline <base>..HEAD` and `git diff <base>...HEAD`
    with the Base from your prompt (for a stacked ticket that is the parent
@@ -44,7 +47,8 @@ files (no `--fix`, no formatters, no installs beyond what a check needs).
 3. **Security.** Input reaching queries, shells or HTML; authz on new
    endpoints; secrets in code or logs; unsafe defaults.
 4. **Scope.** Inside the ticket; nothing unrelated changed; acceptance checks
-   met with believable evidence (spot-check at least one yourself).
+   met with believable evidence (spot-check at least one yourself). When the
+   header has a Size field, check whether the extra lines belong to the ticket.
 5. **Patterns and maintainability.** Reuses existing helpers, matches the
    repo's conventions, no needless complexity, no dead code, clear names.
    Only where it materially affects correctness or the next engineer.
@@ -75,6 +79,11 @@ VERDICT: APPROVE | CHANGES
 ## Summary
 - 3 to 5 bullets: what you checked and the outcome
 
+## Acceptance
+| Check | Result | Evidence |
+| --- | --- | --- |
+| <one acceptance check from ticket.md> | met / unmet / unverified | path:line, or the command you ran |
+
 ## Findings
 ### R<round>.<n> [blocker | major | minor | nit] path/to/file.ext:line — <one-line claim>
 - Failure scenario: concrete inputs or state → wrong outcome
@@ -93,5 +102,10 @@ Non-blocking observations. Optional.
   and nit findings ride along with an APPROVE.
 - APPROVE means: you would merge this to the base and ship it.
 - Under Findings, write "None." when there are none.
+- Acceptance has one row per acceptance check in `ticket.md`; Result is exactly
+  `met`, `unmet` or `unverified`. An unmet check is at least a `major` finding.
+  `unverified` means it can only be shown by running tests or the app, which
+  happens in CI. A ticket without acceptance checks (an adopted PR) gets
+  "None." instead of a table.
 
 When you're done, reply with one line: the first line of review.md.

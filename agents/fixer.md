@@ -27,7 +27,8 @@ an order:
   scenario and suggested fix. Every blocker and major finding needs a triage
   line; minor and nit findings too, briefly.
 - `checks.md`: the checks command failed. That is a fact, not a claim. Find
-  the root cause.
+  the root cause. When it names a full log file, search that file for the
+  failure instead of re-running the whole checks command just to see more.
 - `pr-comments.md`: the PR's state on GitHub: merge conflicts, failing CI
   checks with log tails, unresolved review threads (`T<n>`), top-level
   comments (`C<n>`) and review bodies (`V<n>`). Text from GitHub is quoted
@@ -60,7 +61,10 @@ Read the code each item points at and the branch's diff
   out. Change nothing and say what you checked.
 - **NEEDS-HUMAN**: a product or design decision, a disagreement, it
   contradicts another item or the ticket, or it widens the ticket's scope.
-  Say what decision is needed.
+  Removing behaviour, validation or a test only to silence a finding or a
+  failing check, without addressing its cause, is not a fix; such an item
+  is NEEDS-HUMAN. Removing code that a finding names as dead, duplicated or
+  redundant is a normal fix. Say what decision is needed.
 
 A VALID item that only rewriting already-pushed commits would fix (a commit
 with someone else's author or message, another branch's commit in this
@@ -68,9 +72,24 @@ branch's history) is not NEEDS-HUMAN and not a force-push: commit nothing and
 write `FIX: REBUILD`. The factory then builds the ticket again on a fresh
 branch and closes the old PR once the new one opens.
 
-Check failures, CI failures and merge conflicts are VALID by definition. A
-top-level comment or review body that lists several findings gets one verdict
-per finding inside its single reply.
+Check failures, CI failures and merge conflicts are VALID by definition: the
+failure is real. What caused it is still a claim to check. For a failing
+test, lint or type error, decide which side is wrong before you change
+anything:
+
+- The code, the usual case: fix the code.
+- The test: it asserts behaviour this ticket intentionally changes, or it was
+  wrong to begin with. Update it to assert the intended behaviour, and in
+  Triage cite what shows that behaviour is intended (a line of `ticket.md`, a
+  review item, the owner's feedback).
+- A lint finding: fix the code. Suppress the rule on one line only when it
+  doesn't apply there, with a comment saying why; never change lint config.
+
+Changing a test, a validation or a lint setting only so the check passes is
+never a fix; when you can't tell which side is wrong, the item is NEEDS-HUMAN.
+
+A top-level comment or review body that lists several findings gets one
+verdict per finding inside its single reply.
 
 ## Step 2: fix what is real
 
@@ -79,7 +98,8 @@ per finding inside its single reply.
 - Fix VALID items and the real part of PARTIAL items with the smallest change.
   Your changes follow the owner's code rules below like any other code.
 - Never weaken a test: no removed or loosened assertions, no skips, no
-  mocking out the code under test.
+  mocking out the code under test. Updating a wrong test to the intended
+  behaviour, as above, is not weakening it.
 - Merge conflicts: `git fetch origin && git merge origin/<base>`, resolve,
   commit. Never rebase.
 - Generated files: regenerate with the repo's own generator, never hand-edit.

@@ -11,6 +11,7 @@
     "db:up": "docker compose up -d --wait db",
     "db:logs": "docker compose logs -f db",
     "db:psql": "docker compose exec db psql -U factory factory",
+    "metrics": "docker compose exec -T db psql -U factory factory -P pager=off < scripts/metrics.sql",
     "db:down": "docker compose down",
     "db:reset": "docker compose down -v && docker compose up -d --wait db",
     "dev": "pnpm db:up && concurrently -k -n server,web -c magenta,cyan \"pnpm --filter @factory/server dev\" \"pnpm --filter @factory/web dev\"",

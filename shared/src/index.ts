@@ -43,6 +43,7 @@ export interface InitiativeSettings {
   autoFix: boolean;
   createPrs: boolean;
   postReviewsToPr: boolean;
+  dependentsWaitForCi: boolean;
   maxRounds: number;
   maxPlanRounds: number;
   concurrency: number;
@@ -57,6 +58,7 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
   autoFix: true,
   createPrs: true,
   postReviewsToPr: true,
+  dependentsWaitForCi: false,
   maxRounds: 5,
   maxPlanRounds: 3,
   concurrency: 4,
@@ -80,6 +82,8 @@ export interface AppSettings {
   loadUserSettings: boolean;
   gateTimeoutMinutes: number;
   sweepOpenPrs: boolean;
+  resumeInterruptedRuns: boolean;
+  prNoiseCommentAuthors: string[];
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -89,6 +93,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   loadUserSettings: false,
   gateTimeoutMinutes: 20,
   sweepOpenPrs: true,
+  resumeInterruptedRuns: true,
+  prNoiseCommentAuthors: ['github-actions', 'alwaysmeticulous', 'codecov', 'codecov-commenter', 'sonarqubecloud', 'sonarcloud', 'vercel', 'netlify', 'linear'],
 };
 
 export const PR_SWEEP_INTERVAL_MINUTES = 15;
@@ -204,6 +210,9 @@ export interface Ticket {
   prState: string | null;
   prHeadRef: string | null;
   prStack: number | null;
+  ciState?: 'green' | 'red' | 'pending' | 'none' | null;
+  ciHeadSha?: string | null;
+  linesChanged?: number | null;
   lastVerdict: string | null;
   gateStatus: 'pass' | 'fail' | 'skipped' | null;
   blockedReason: string | null;
@@ -235,6 +244,11 @@ export interface Run {
   inputTokens: number | null;
   outputTokens: number | null;
   numTurns: number | null;
+  roleSha?: string | null;
+  claudeVersion?: string | null;
+  factorySha?: string | null;
+  baseSha?: string | null;
+  headSha?: string | null;
   error: string | null;
   queuedAt: string;
   startedAt: string | null;
@@ -300,3 +314,11 @@ export interface Health {
 
 export const DONE_TICKET_STATUSES: TicketStatus[] = ['approved', 'merged'];
 export const ACTIVE_TICKET_STATUSES: TicketStatus[] = ['building', 'checking', 'in_review', 'fixing'];
+
+export const SIZE_BUDGETS: Record<string, number> = { XS: 50, S: 200, M: 500 };
+const SIZE_OVERRUN = 1.5;
+
+export function overSizeBudget(size: string | null | undefined, linesChanged: number | null | undefined): boolean {
+  const budget = size ? SIZE_BUDGETS[size] : undefined;
+  return budget !== undefined && linesChanged != null && linesChanged > budget * SIZE_OVERRUN;
+}

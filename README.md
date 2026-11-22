@@ -68,7 +68,7 @@ review → approval → 4 builds (two in parallel, stacked) → checks → 4 rev
 including one fresh executor resolving a merge conflict between two sibling
 tickets and one fix round from owner feedback, for about $2.50 of agent time.
 On a GitHub repo the same flow opens stacked draft PRs, posts each review on
-its PR, leaves every PR in draft for you to mark ready, and **Fix all PRs** turns unresolved review
+its PR (with a short "Factory checks" summary on top: the checks result, the verdict, verified fix rounds and the reviewer's acceptance table counts), leaves every PR in draft for you to mark ready, and **Fix all PRs** turns unresolved review
 threads into a fix round (the factory's own comments are ignored). It skips every ticket with nothing
 left to act on: no new review findings, failing checks or CI, conflicts, unanswered comments or feedback.
 
@@ -103,10 +103,10 @@ repo. Keep **Agents running at once** in Settings at 10 or more for that.
 | Where | What |
 |---|---|
 | Dashboard | Every initiative with segmented progress, what is waiting on you, agents running now, total spend |
-| Initiative → Plan | High-level overview first (goal, summary, success criteria, definition of done), then edge cases, test strategy, risks, assumptions, the plan review and the full plan.md on demand. **Approve & build** or **Request changes** (your words go to a fresh planner as binding feedback). Answer the planner's questions when it is blocked |
-| Initiative → Tickets | One row per ticket: status, verdict, PR, cost. Expand for what/goal/outcome, acceptance checks, guidance, branch/worktree, every agent run, and the latest output. **Run / Review / Fix** per ticket; **Run ready / Review all / Fix all PRs / Sync PRs** in bulk; edit a ticket before it starts; reset a ticket; mark approved/merged |
+| Initiative → Plan | High-level overview first (goal, summary, success criteria, definition of done), then edge cases, test strategy, risks, assumptions, the plan review and the full plan.md on demand. Paths the plan names that do not exist at the base are listed for the plan reviewer (never a rejection). **Approve & build** or **Request changes** (your words go to a fresh planner as binding feedback). Answer the planner's questions when it is blocked |
+| Initiative → Tickets | One row per ticket: status, verdict, PR, cost. Expand for what/goal/outcome, acceptance checks, guidance, branch/worktree, every agent run, and the latest output. **Run / Review / Fix** per ticket; **Run ready / Review all / Fix all PRs / Sync PRs** in bulk; edit a ticket before it starts; reset a ticket; mark approved/merged. The row shows the lines the ticket changed outside tests, lockfiles and files the repo marks `linguist-generated`, flagged when over 1.5 times its size budget (XS 50, S 200, M 500) |
 | Initiative → Activity | The conversation with the agents. **Ask** starts a read-only advisor that answers from the code; **Feedback** re-plans (before approval) or goes to a fresh fixer (per ticket); **Note** just records |
-| Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs; round limits, parallelism and the model per step |
+| Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs, hold dependents until CI is green; round limits, parallelism and the model per step |
 | Sidebar | The theme switcher (system, light or dark) sits next to the live indicator |
 | Run drawer | Live stream of any agent: tool calls with inputs and results, text, thinking, the checks log, cost/tokens/turns. Its output file, the exact prompt header, and a `claude --resume` command to continue that session in your terminal. **Stop** kills it |
 | Agents | Every run across all initiatives, live |
@@ -118,12 +118,12 @@ repo. Keep **Agents running at once** in Settings at 10 or more for that.
 | proposed | In a plan you haven't approved |
 | to do | Approved; starts when its dependencies are approved (or press Run) |
 | building | Executor is working in `~/.software-factory/worktrees/...` on `factory/<initiative>-<id>/<nn>-<key>` |
-| running checks | The project's checks command runs in the worktree. Red → fixer. Green → push + draft PR. If the command can't run at all (exit 126/127) the ticket goes to *needs you* instead of burning a fixer round. **Run checks** re-runs it by hand |
+| running checks | The project's checks command runs in the worktree. Red → fixer, which gets the failing lines and the path of the full log. Green → push + draft PR. If the command can't run at all (exit 126/127) the ticket goes to *needs you* instead of burning a fixer round. **Run checks** re-runs it by hand |
 | built | Checked and waiting for review (when auto-review is off) |
-| in review | A fresh reviewer reads `git diff <base>...HEAD`, verifies each finding, answers APPROVE or CHANGES |
+| in review | A fresh reviewer reads `git diff <base>...HEAD` and the initiative's goal, success criteria and definition of done, verifies each finding, answers APPROVE or CHANGES. An over-budget ticket carries a Size note in the review header |
 | changes requested | Waiting for a fixer (auto-fix runs it unless the round limit is reached) |
 | fixing | A fixer gives every item a verdict before touching code (VALID / PARTIAL / INVALID / UNCONFIRMED / NEEDS-HUMAN): a bug is fixed only after it is traced and gets a test that would fail without the fix (written, not run: CI runs tests, and the fixer re-runs only the tests that failed in the PR's CI, before and after its fix); a claim is rejected only by pointing at the code. Rounds with only failing checks, CI or conflicts get a cheaper mechanical fixer that first checks whether the base branch fails the same way and lists flaky runs for one re-run. Fixes are committed locally; after the checks pass, a fresh **verifier** reads the commits and drafted replies. Approved: the factory pushes, replies in each review thread, answers top-level comments in one summary, and resolves every thread it fixed once the fix is on the PR (bot threads it rejects with a code pointer too; a human's disputed or partly fixed thread stays open for them). Blocked: the branch is reset and a fresh fixer retries once with the findings; a second block pushes nothing and waits for you. When only rewriting pushed commits would fix the branch (someone else's commit in its history), the fixer answers REBUILD: the factory builds the ticket again on a fresh `-vN` branch and closes the old PR once the new one opens, unless another ticket already builds on it or it was built 3 times. When a PR has nothing to act on, no agent is started |
-| approved | Reviewer would merge it. The PR stays a draft until you mark it ready. Dependents start |
+| approved | Reviewer would merge it. The PR stays a draft until you mark it ready. Dependents start (with "Dependents wait for green CI" on, only once the PR's CI is green or has no checks; CI shows on the ticket row) |
 | merged | Seen by Sync PRs (automatic every 5 min) or marked by you. Unblocks dependents. Its local worktree is removed, and its local branch too once no unmerged ticket is stacked on it |
 | needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row |
 
@@ -143,7 +143,15 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
 - **Postgres (Docker, `127.0.0.1:54329`)**: projects, initiatives (brief, plan.md,
   plan.json, settings), tickets, runs (prompt, output, verdict, cost, tokens,
   session id), every streamed agent event, and the conversation. Survives
-  restarts; queued runs resume, runs that were mid-flight are marked interrupted.
+  restarts; queued runs resume, runs that were mid-flight are marked interrupted
+  and, unless **Resume steps interrupted by a restart** in Settings is off, queued
+  again once per round (never an advisor question, nor a sweep's fixer, which the
+  next sweep redoes). Otherwise the ticket waits with the reason "Interrupted when
+  the factory server stopped." Tickets and plans left mid-step with no run are put
+  back the same way at startup.
+  Each run also records a hash of its exact role prompt, the Claude CLI version,
+  the factory commit, and the base and head commits it worked on, so results can
+  be compared across prompt edits, CLI upgrades and factory versions.
 - **`~/.software-factory/initiatives/<slug>/`**: the files agents read and write
   (`brief.md`, `plan/round-N/plan.md|plan.json|plan-review.md`,
   `tickets/<nn>-<key>/ticket.md`, `round-N/build.md|checks.md|review.md|fix.md`).
@@ -162,17 +170,32 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
   if an agent rewrote a commit it didn't make (say, `--amend` after a
   pre-commit hook cancelled its commit), its changes go back on top as a new
   commit before the checks run or anything is pushed.
+- Every agent has the CLI deny rules for `git push`, `git stash` and the `gh`
+  commands that create, edit, comment on, review, merge or close PRs and issues;
+  agents that must not change code also can't `git commit`, `reset` or `rebase`.
+  If a review or verify still changes its worktree (HEAD or a tracked file), the
+  run fails and the ticket is handed to you; nothing is restored for you.
 - Agents start clean: no MCP servers and (by default) no user-level hooks or
   plugins, so nothing pollutes their context. The repo's own CLAUDE.md,
   `.claude/rules`, skills and `.claude/` settings still apply (see below).
+- A step passes only if its output file starts with a known verdict line (for
+  example `VERDICT: APPROVE`) and the agent finished without an error. Anything
+  else fails the run and hands the ticket to you; nothing is retried.
 - Text from GitHub reaches agents only as quoted data in a file, and the
   factory's own PR comments are marked so they never loop back. Every
   comment and thread reply the factory posts starts with
   **Claude Bot Automation**. A review
   thread whose last word is yours or the factory's waits for its reviewer and
   isn't fed to a fixer again; failing CI waits until every check has finished;
-  status bots (GitHub Actions, Meticulous) and human-gated checks (Code review
-  gate, Meticulous) are ignored.
+  human-gated checks (Code review gate, Meticulous) are ignored, and so are
+  cancelled jobs that a later run of the same workflow replaced. Top-level
+  comments from report bots (GitHub Actions, Meticulous, Codecov, Sonar,
+  Vercel, Netlify, Linear) never start a fixer, with or without a `[bot]`
+  suffix (the list is in **Settings**), nor does Bugbot's summary review body,
+  since each of its findings is an inline thread. Every other review body,
+  including a Cursor automation's, is triaged like a comment. When a fixer does start,
+  `pr-comments.md` lists what was dropped and why. After a fix round that
+  commits nothing, an approved branch is not reviewed again.
 - Nothing a fixer did reaches the PR before the checks pass and a verifier
   approves it. Fix rounds count toward the round limit, including retries
   after a block, so a fix that keeps breaking stops and waits for you.
@@ -234,15 +257,51 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
 ## Development
 
 `pnpm dev` runs the server without file watching on purpose: a restart stops
-every running agent (they are marked interrupted and can be re-run). When you
+every running agent (they are marked interrupted and resumed once when the
+server is back, see Settings). When you
 are changing the factory itself, use `pnpm --filter @factory/server dev:watch`.
 
 ```bash
 pnpm typecheck
 pnpm test           # plan validation + DAG ordering
 pnpm db:psql        # poke at the data
+pnpm metrics        # read-only queries over the real runs (scripts/metrics.sql)
 pnpm db:reset       # wipe the database volume
 ```
+
+### Evaluating the judges
+
+Most reviews and verifies approve, which alone says nothing about whether the
+judges are strict enough. When you change `agents/reviewer.md` or
+`agents/verifier.md`, measure them by hand on a small synthetic repo (built in
+the temp directory, never a real project) with known defects: seven review
+cases (one clean control, six defects such as an off-by-one, a missing await, a
+weakened test, a missing authorization check, an out-of-scope edit and broken
+code rules) and five verify cases (one clean fix round, four blocked ones).
+It never touches the database or GitHub and is never part of the pipeline.
+
+```bash
+pnpm --filter @factory/server eval --role review --dry-run   # the cohort and the fixtures, no agent
+pnpm --filter @factory/server eval --role review --role-file /path/to/variant.md --compare agents/reviewer.md
+```
+
+Each task is one fresh agent on one fixture, run one at a time, graded without
+a model: the verdict must match and, for a defect case, the judge's findings
+(the `## Findings` section, plus `## Reason` for a verify) must name the
+defective file or one of the markers the case declares. `--repeats` (default 2) repeats every case, `--cases a,b` picks cases,
+`--model` defaults to the role's factory model, and `--out` defaults to a
+timestamped folder under `~/.software-factory/evals/` that gets `report.md`,
+`report.json` and every task's output. The report gives the catch rate per
+defect kind, the false-alarm rate on the clean control, cost and time per
+arm, and, with two arms, the paired difference over the pairs both arms
+finished. A task that errored, timed out or wrote no verdict is blocked, and a
+task that never ran (an interrupted or crashed run) is missing: the rates are
+then withheld, the blocked and missing tasks listed, and the command exits 1. Cases every run passed
+or that disagree between repeats are flagged, since they show nothing.
+
+A real run costs about $0.28 per review task and $0.26 per verify task at the
+measured averages: roughly $4 for the default review cohort (14 tasks) and
+$2.60 for the verify cohort (10), double with `--compare`.
 
 Layout: `server/` (Fastify + postgres.js, the orchestrator in
 `server/src/pipeline/engine.ts`, the `claude` runner in

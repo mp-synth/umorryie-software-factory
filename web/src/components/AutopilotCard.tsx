@@ -12,6 +12,7 @@ const TOGGLES: { key: keyof InitiativeSettings; label: string }[] = [
   { key: 'autoFix', label: 'Fix findings automatically' },
   { key: 'createPrs', label: 'Push & open draft PRs' },
   { key: 'postReviewsToPr', label: 'Post reviews on PRs' },
+  { key: 'dependentsWaitForCi', label: 'Dependents wait for green CI' },
 ];
 
 const MODELS: { key: keyof InitiativeSettings['models']; label: string }[] = [

@@ -32,7 +32,8 @@ team's conventions there beat your general habits.
   PR's CI, it runs exactly those failing tests, before its fix to reproduce
   the failure and after it to confirm they pass.
 - When you commit, every change is a new commit on top of your branch. Never
-  `--amend`, rebase, reset or squash: the base and the commits of earlier
+  `--amend`, rebase, reset, squash or `git stash`, and never bypass hooks with
+  `--no-verify`: the base and the commits of earlier
   rounds must stay exactly as they are. The repo's pre-commit hooks run on
   `git commit`. When it exits non-zero, or a hook rewrote files, nothing was
   committed: stage what the hook changed, run the same `git commit` again, and

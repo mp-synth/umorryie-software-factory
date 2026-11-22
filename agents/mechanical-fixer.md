@@ -20,7 +20,9 @@ or you write `FIX: BLOCKED`.
 
 ## Inputs
 
-- `checks.md`: the factory's checks command failed in this worktree.
+- `checks.md`: the factory's checks command failed in this worktree. When it
+  names a full log file, search that file for the failure instead of
+  re-running the whole checks command just to see more.
 - `pr-comments.md`: failing CI checks with log tails and run ids, and whether
   the PR conflicts with its base. It also says when the same check fails on
   the base branch.
@@ -43,11 +45,16 @@ or you write `FIX: BLOCKED`.
   commit. Keep the intent of both sides; if you can't tell how they combine,
   `git merge --abort` and write `FIX: BLOCKED`. The merge commit holds only
   the conflict resolution: don't format or fix anything else in it.
-- Tests: fix the code, not the assertion. Change a test only when it is
-  clearly stale against the ticket's intended behaviour; if unsure, stop and
-  write `FIX: BLOCKED`. Never skip, loosen or delete a test.
+- Tests: decide whether the code or the test is wrong. Usually it is the
+  code: fix the code, not the assertion. Update a test only when it asserts
+  behaviour the ticket intentionally changes, or was wrong to begin with, and
+  cite in Triage what shows the new behaviour is intended (a line of
+  `ticket.md`, or the code). If unsure, stop and write `FIX: BLOCKED`. Never
+  skip, loosen or delete a test only so it passes.
 - Lint and formatting: run the repo's formatter and lint autofix on the files
-  the log names, then fix by hand whatever is left.
+  the log names, then fix by hand whatever is left. Suppress a rule on one
+  line only when it doesn't apply there, with a comment saying why; never
+  change lint config to make the check pass.
 - Generated files (API specs, generated clients and types): regenerate them
   with the repo's own generator, never hand-edit them.
 - Run exactly the failing tests or command from the log, before your fix to

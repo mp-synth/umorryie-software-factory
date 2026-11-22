@@ -280,6 +280,79 @@ export async function headSha(worktree: string): Promise<string | null> {
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
+export interface WorktreeState {
+  head: string | null;
+  tracked: string;
+}
+
+export async function worktreeState(cwd: string): Promise<WorktreeState> {
+  const status = await git(cwd, ['status', '--porcelain', '--untracked-files=no']);
+  return { head: await headSha(cwd), tracked: status.stdout.trim() };
+}
+
+export function worktreeChanges(before: WorktreeState, after: WorktreeState): string[] {
+  const changes: string[] = [];
+  if (before.head !== after.head) changes.push(`HEAD moved from ${before.head?.slice(0, 7) ?? 'none'} to ${after.head?.slice(0, 7) ?? 'none'}`);
+  if (before.tracked !== after.tracked) changes.push('tracked files or the index changed');
+  return changes;
+}
+
+export async function revParse(cwd: string, ref: string): Promise<string | null> {
+  const r = await git(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  return r.code === 0 ? r.stdout.trim() : null;
+}
+
+export async function trackedFiles(repo: string, branch: string): Promise<string[] | null> {
+  const ref = (await refExists(repo, `origin/${branch}`)) ? `origin/${branch}` : branch;
+  const r = await exec('git', ['ls-tree', '-r', '--name-only', ref], { cwd: repo, timeoutMs: 30_000, maxOutput: 50_000_000, env: { ...repoShellEnv(), GIT_TERMINAL_PROMPT: '0' } });
+  return r.code === 0 ? r.stdout.split('\n').filter(Boolean) : null;
+}
+
+const LOCKFILES = new Set([
+  'pnpm-lock.yaml',
+  'package-lock.json',
+  'yarn.lock',
+  'bun.lockb',
+  'poetry.lock',
+  'uv.lock',
+  'Pipfile.lock',
+  'Cargo.lock',
+  'go.sum',
+  'Gemfile.lock',
+  'composer.lock',
+]);
+const TEST_PATH = /(^|\/)(tests?|__tests__|__snapshots__|spec)\/|\.(test|spec)\.[^/]+$|(^|\/)test_[^/]+\.py$|_test\.(py|go)$/;
+
+export function countsTowardSize(file: string): boolean {
+  return !LOCKFILES.has(path.posix.basename(file)) && !TEST_PATH.test(file);
+}
+
+export function linesInNumstat(numstat: string, generated: Set<string>): number {
+  let total = 0;
+  for (const line of numstat.split('\n')) {
+    const [added, deleted, file] = line.split('\t');
+    if (!file || added === '-' || generated.has(file) || !countsTowardSize(file)) continue;
+    total += Number(added) + Number(deleted);
+  }
+  return total;
+}
+
+async function generatedFiles(cwd: string, files: string[]): Promise<Set<string>> {
+  if (!files.length) return new Set();
+  const r = await git(cwd, ['check-attr', '-z', 'linguist-generated', '--', ...files]);
+  const fields = r.stdout.split('\0');
+  const generated = new Set<string>();
+  for (let i = 0; i + 2 < fields.length; i += 3) if (['set', 'true'].includes(fields[i + 2])) generated.add(fields[i]);
+  return generated;
+}
+
+export async function diffLines(worktree: string, base: string): Promise<number | null> {
+  const r = await git(worktree, ['diff', '--numstat', '--no-renames', `${base}...HEAD`]);
+  if (r.code !== 0) return null;
+  const files = r.stdout.split('\n').map((line) => line.split('\t')[2]).filter(Boolean);
+  return linesInNumstat(r.stdout, await generatedFiles(worktree, files));
+}
+
 export async function diffStat(worktree: string, base: string): Promise<string> {
   return (await git(worktree, ['diff', '--stat', `${base}...HEAD`])).stdout.trim();
 }

@@ -112,3 +112,59 @@ export function slugify(s: string, max = 40): string {
   const dash = cut.lastIndexOf('-');
   return (dash > max / 2 ? cut.slice(0, dash) : full.slice(0, max)).replace(/-+$/g, '') || 'item';
 }
+
+export interface MissingPath {
+  ticket: string;
+  path: string;
+}
+
+function pathToken(token: string): string | null {
+  const t = token.trim().replace(/:\d+(-\d+)?$/, '');
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /[\s<>{}*?[\]]/.test(t) || /^[/~]/.test(t) || !t.includes('/')) return null;
+  return t.endsWith('/') || /\.[a-z0-9]+$/i.test(t) ? t.replace(/^\.\//, '') : null;
+}
+
+export function missingPlanPaths(plan: PlanJson, tracked: string[]): MissingPath[] {
+  const files = new Set(tracked);
+  const out: MissingPath[] = [];
+  for (const t of plan.tickets) {
+    const seen = new Set<string>();
+    for (const g of t.guidance) {
+      for (const m of g.matchAll(/`([^`\n]+)`/g)) {
+        const p = pathToken(m[1]);
+        if (!p || seen.has(p)) continue;
+        seen.add(p);
+        const dir = p.replace(/\/$/, '');
+        if (!files.has(dir) && !tracked.some((f) => f.startsWith(`${dir}/`))) out.push({ ticket: t.key, path: p });
+      }
+    }
+  }
+  return out;
+}
+
+export function renderPlanPaths(missing: MissingPath[]): string {
+  return [
+    '# Paths the plan names that do not exist at the base',
+    '',
+    ...missing.map((m) => `- ${m.ticket}: \`${m.path}\``),
+    '',
+    'A path the ticket itself creates is fine; anything else is probably a wrong name.',
+  ].join('\n');
+}
+
+export function renderPlanContext(plan: PlanJson): string {
+  const list = (items: string[]) => items.map((b) => `- ${b}`).join('\n');
+  return [
+    '# Initiative context',
+    '',
+    '## Goal',
+    plan.goal,
+    '',
+    '## Success criteria',
+    list(plan.success_criteria),
+    '',
+    '## Definition of done',
+    list(plan.definition_of_done),
+    ...(plan.edge_cases.length ? ['', '## Edge cases', list(plan.edge_cases)] : []),
+  ].join('\n');
+}

@@ -109,6 +109,8 @@ function RunView({ runId, onClose }: { runId: string; onClose: () => void }) {
               <VerdictPill verdict={run.verdict} />
               {run.model && <Chip>{run.model}{run.effort ? ` · ${run.effort}` : ''}</Chip>}
               {run.round > 0 && <Chip>round {run.round}</Chip>}
+              {run.roleSha && <Chip>prompt {run.roleSha.slice(0, 8)}</Chip>}
+              {run.claudeVersion && <Chip>{run.claudeVersion}</Chip>}
               <Chip>{run.trigger === 'auto' ? 'autopilot' : 'manual'}</Chip>
             </div>
           </div>

@@ -9,6 +9,7 @@
     "start": "NODE_ENV=production tsx src/index.ts",
     "typecheck": "tsc --noEmit -p .",
     "probe": "tsx src/probe.ts",
+    "eval": "tsx src/eval.ts",
     "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts"
   },
   "dependencies": {
