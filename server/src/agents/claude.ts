@@ -4,8 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { RunEventType } from '@factory/shared';
+import { redactDeep, type Redact } from '../agent-env.ts';
 import { config } from '../config.ts';
 import { exec, killTree } from '../git.ts';
+import { repoShellEnv } from '../shell-env.ts';
 
 export interface AgentSpec {
   cwd: string;
@@ -19,6 +21,7 @@ export interface AgentSpec {
   maxBudgetUsd?: number | null;
   loadUserSettings: boolean;
   env?: Record<string, string>;
+  redact?: Redact;
 }
 
 export interface AgentResult {
@@ -91,7 +94,7 @@ function belongsToParentClaudeSession(name: string, serverRunsInsideClaudeSessio
 
 export function freshAgentEnv(): NodeJS.ProcessEnv {
   const insideClaudeSession = !!process.env.CLAUDECODE;
-  return Object.fromEntries(Object.entries(process.env).filter(([name]) => !belongsToParentClaudeSession(name, insideClaudeSession)));
+  return Object.fromEntries(Object.entries(repoShellEnv()).filter(([name]) => !belongsToParentClaudeSession(name, insideClaudeSession)));
 }
 
 function truncate(s: string, n: number): string {
@@ -163,6 +166,7 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
   let canceled = false;
   let exited = false;
   let lingeringProcessesTimer: NodeJS.Timeout | null = null;
+  const redact = spec.redact ?? ((text: string) => text);
 
   const timer = setTimeout(() => {
     timedOut = true;
@@ -178,9 +182,9 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
     if (!line.trim()) return;
     let msg: Record<string, any>;
     try {
-      msg = JSON.parse(line);
+      msg = redactDeep(JSON.parse(line), redact);
     } catch {
-      onEvent({ type: 'log', data: { text: truncate(line, 2000) } });
+      onEvent({ type: 'log', data: { text: truncate(redact(line), 2000) } });
       return;
     }
     switch (msg.type) {
@@ -230,7 +234,8 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
   });
 
   const stderrLines = readline.createInterface({ input: child.stderr });
-  stderrLines.on('line', (line) => {
+  stderrLines.on('line', (raw) => {
+    const line = redact(raw);
     stderrTail = `${stderrTail}${line}\n`.slice(-8000);
     if (line.trim()) onEvent({ type: 'stderr', data: { text: truncate(line, 2000) } });
   });

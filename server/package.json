@@ -8,7 +8,8 @@
     "dev:watch": "tsx watch --clear-screen=false src/index.ts",
     "start": "NODE_ENV=production tsx src/index.ts",
     "typecheck": "tsc --noEmit -p .",
-    "test": "node --import tsx --test src/**/*.test.ts"
+    "probe": "tsx src/probe.ts",
+    "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts"
   },
   "dependencies": {
     "@factory/shared": "workspace:*",

@@ -98,8 +98,34 @@ export interface Project {
   setupCommand: string | null;
   notes: string | null;
   remoteUrl: string | null;
+  copyFiles: string[];
+  referenceDirs: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DirEntry {
+  name: string;
+  path: string;
+  git: boolean;
+}
+
+export interface BrowseResult {
+  path: string;
+  parent: string | null;
+  home: string;
+  entries: DirEntry[];
+}
+
+export interface EnvironmentSuggestion {
+  source: 'files' | 'claude';
+  setupCommand: string | null;
+  checksCommand: string | null;
+  copyFiles: string[];
+  referenceDirs: string[];
+  prerequisites: string[];
+  evidence: string[];
+  costUsd?: number | null;
 }
 
 export interface PlanTicket {

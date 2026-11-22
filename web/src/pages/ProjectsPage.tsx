@@ -1,6 +1,6 @@
 import { toastError, toastSuccess } from '@/lib/toasts';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { FolderGit2, Github, GitBranch, MoreHorizontal, Pencil, Plus, ShieldCheck, Trash2, Wrench } from 'lucide-react';
+import { BookOpen, FolderGit2, Github, GitBranch, KeyRound, MoreHorizontal, Pencil, Plus, ShieldCheck, Trash2, Wrench } from 'lucide-react';
 import { useState } from 'react';
 import type { Project } from '@factory/shared';
 import { api } from '@/lib/api';
@@ -103,6 +103,22 @@ export function ProjectsPage() {
                     <dt className="w-14 shrink-0 text-zinc-500">Setup</dt>
                     <dd className="truncate font-mono text-2xs text-zinc-300">{p.setupCommand ?? '—'}</dd>
                   </div>
+                  {p.copyFiles.length > 0 && (
+                    <div className="flex items-center gap-2">
+                      <KeyRound className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                      <dt className="w-14 shrink-0 text-zinc-500">Copies</dt>
+                      <dd className="truncate font-mono text-2xs text-zinc-300">{p.copyFiles.join(', ')}</dd>
+                    </div>
+                  )}
+                  {p.referenceDirs.length > 0 && (
+                    <div className="flex items-center gap-2">
+                      <BookOpen className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                      <dt className="w-14 shrink-0 text-zinc-500">Reads</dt>
+                      <dd className="truncate font-mono text-2xs text-zinc-300" title={p.referenceDirs.join('\n')}>
+                        {p.referenceDirs.map((d) => d.split('/').pop()).join(', ')}
+                      </dd>
+                    </div>
+                  )}
                 </dl>
               </Card>
             );

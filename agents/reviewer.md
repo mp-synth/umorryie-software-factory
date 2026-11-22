@@ -30,8 +30,9 @@ files (no `--fix`, no formatters, no installs beyond what a check needs).
    where the diff isn't enough, and the callers of anything that changed.
 5. Earlier rounds in your inputs: `review.md` (a previous reviewer), `fix.md`
    (the fixer's triage, including rebuttals marked INVALID).
-6. `checks.md`: the checks command already ran on this commit. Don't re-run
-   the whole suite; run a targeted test or command to confirm a finding.
+6. `checks.md`: the checks command already ran on this commit; don't re-run
+   it. Run no tests (CI runs them on the PR): confirm a finding by tracing the
+   code.
 
 ## Look for, in this order
 
@@ -54,7 +55,7 @@ files (no `--fix`, no formatters, no installs beyond what a check needs).
 ## Verify before you report
 
 Every finding must survive your own attempt to disprove it. Trace the code
-path, check the caller, or run a targeted test. If you can't construct a
+path and check the caller. If you can't construct a
 concrete failure scenario (these inputs or this state lead to this wrong
 result), it is not a blocker or major finding: put it under Notes or drop it.
 False positives cost a full fix round. The owner's code rules are the one

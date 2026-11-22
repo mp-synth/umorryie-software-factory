@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Initiative, Project, Run, RunKind, Ticket } from '@factory/shared';
+import type { AppSettings, Initiative, Project, Run, RunKind, Ticket } from '@factory/shared';
+import { agentEnvironment, type AgentEnvironment } from '../agent-env.ts';
 import { config } from '../config.ts';
 import { sql } from '../db.ts';
 import { emitChange } from '../events.ts';
-import { startAgent, type AgentHandle, type AgentResult } from '../agents/claude.ts';
+import { repoShellEnv } from '../shell-env.ts';
+import { startAgent, type AgentHandle, type AgentResult, type AgentSpec } from '../agents/claude.ts';
 import * as gitx from '../git.ts';
 import * as gh from '../github.ts';
 import * as repo from '../repo.ts';
@@ -42,7 +44,7 @@ const ts = (x: unknown): number => (x ? new Date(x as string).getTime() : 0);
 const touchRun = (r: Run) => emitChange({ type: 'run', id: r.id, initiativeId: r.initiativeId });
 const canceling = new Set<string>();
 
-type AgentKind = Exclude<RunKind, 'gate'>;
+export type AgentKind = Exclude<RunKind, 'gate'>;
 
 const ROLE_FILES: Record<AgentKind, string> = {
   plan: 'planner.md',
@@ -56,11 +58,12 @@ const ROLE_FILES: Record<AgentKind, string> = {
 const MECHANICAL_FIXER_FILE = 'mechanical-fixer.md';
 
 const REPO_AWARE_TOOLS = ['Skill', 'Task'];
-const READ_TOOLS = ['Read', 'Grep', 'Glob', 'Bash', 'Write', ...REPO_AWARE_TOOLS];
-const WRITE_TOOLS = [...READ_TOOLS, 'Edit', 'WebFetch', 'WebSearch'];
+const WEB_TOOLS = ['WebFetch', 'WebSearch'];
+const READ_TOOLS = ['Read', 'Grep', 'Glob', 'Bash', 'Write', ...REPO_AWARE_TOOLS, ...WEB_TOOLS];
+const WRITE_TOOLS = [...READ_TOOLS, 'Edit'];
 
 const TOOLS: Record<AgentKind, string[]> = {
-  plan: [...READ_TOOLS, 'WebFetch', 'WebSearch'],
+  plan: READ_TOOLS,
   plan_review: READ_TOOLS,
   execute: WRITE_TOOLS,
   review: READ_TOOLS,
@@ -185,7 +188,7 @@ function factoryEnv(ticket: Ticket, base: string): Record<string, string> {
 }
 
 async function shellEnvFor(project: Project, ticket: Ticket): Promise<NodeJS.ProcessEnv> {
-  return { ...process.env, ...factoryEnv(ticket, await diffBase(project, ticket)) };
+  return { ...repoShellEnv(), ...factoryEnv(ticket, await diffBase(project, ticket)) };
 }
 
 function settledStatus(ticket: Ticket): Ticket['status'] {
@@ -474,6 +477,51 @@ interface StepResult {
   result: AgentResult;
 }
 
+function environmentNote(environment: AgentEnvironment, referenceDirs: string[]): string[] {
+  const lines: string[] = [];
+  if (referenceDirs.length) {
+    lines.push(`Reference checkouts you may read for the source of what this repo integrates with (never edit them): ${referenceDirs.join(', ')}`);
+  }
+  const names = Object.keys(environment.vars);
+  if (names.length) {
+    lines.push(
+      `Your shell already has these variables from the repo's env files: ${names.join(', ')}. Use them as $NAME in commands; never print, echo, log, write or commit their values.`,
+    );
+  }
+  return lines;
+}
+
+export function projectAgentSpec(
+  project: Project,
+  app: AppSettings,
+  opts: { kind: AgentKind; cwd: string; prompt: string; model: string; effort?: string | null; roleFile?: string; addDirs: string[]; env?: Record<string, string> },
+): AgentSpec {
+  const environment = agentEnvironment(project.repoPath, project.copyFiles ?? []);
+  const referenceDirs = (project.referenceDirs ?? []).filter((d) => fs.existsSync(d));
+  return {
+    cwd: opts.cwd,
+    model: opts.model,
+    effort: opts.effort,
+    rolePrompt: rolePrompt(opts.kind, opts.roleFile),
+    prompt: [opts.prompt, ...environmentNote(environment, referenceDirs)].join('\n'),
+    tools: TOOLS[opts.kind],
+    addDirs: [...opts.addDirs, ...referenceDirs],
+    timeoutMs: app.runTimeoutMinutes * 60_000,
+    maxBudgetUsd: app.maxBudgetUsdPerRun,
+    loadUserSettings: app.loadUserSettings,
+    env: { ...environment.vars, ...opts.env },
+    redact: environment.redact,
+  };
+}
+
+function redactWrittenOutput(file: string, since: number, spec: AgentSpec): string | null {
+  const written = readIfWrittenSince(file, since);
+  if (!written || !spec.redact) return written;
+  const redacted = spec.redact(written);
+  if (redacted !== written) fs.writeFileSync(file, redacted);
+  return redacted;
+}
+
 async function runAgent(
   run: Run,
   opts: {
@@ -493,26 +541,24 @@ async function runAgent(
   const executorResumesFromItsEarlierOutput = opts.kind === 'execute';
   if (!executorResumesFromItsEarlierOutput) setAsideEarlierOutput(opts.outputPath);
   const guidance = await writeRepoGuidance(opts.cwd, opts.runDir);
-  const prompt = guidance ? `${opts.prompt}\nRepo guidance (rules Claude Code doesn't load by itself; read it before you start): ${guidance}` : opts.prompt;
-  await repo.updateRun(run.id, { prompt, cwd: opts.cwd, runDir: opts.runDir, outputPath: opts.outputPath, model });
+  const init = await mustInitiative(run.initiativeId);
+  const spec = projectAgentSpec(await mustProject(init.projectId), app, {
+    kind: opts.kind,
+    cwd: opts.cwd,
+    prompt: guidance ? `${opts.prompt}\nRepo guidance (rules Claude Code doesn't load by itself; read it before you start): ${guidance}` : opts.prompt,
+    model,
+    effort: run.effort,
+    roleFile: opts.roleFile,
+    addDirs: [opts.runDir, initiativeDir(init)],
+    env: opts.env,
+  });
+  await repo.updateRun(run.id, { prompt: spec.prompt, cwd: opts.cwd, runDir: opts.runDir, outputPath: opts.outputPath, model });
   await log(run, `Spawning fresh ${opts.kind} agent · model ${model} · cwd ${opts.cwd}`);
 
   let chain = Promise.resolve();
   const startedAt = Date.now();
   const handle = startAgent(
-    {
-      cwd: opts.cwd,
-      model,
-      effort: run.effort,
-      rolePrompt: rolePrompt(opts.kind, opts.roleFile),
-      prompt,
-      tools: TOOLS[opts.kind],
-      addDirs: [opts.runDir, initiativeDir((await repo.getInitiative(run.initiativeId))!)],
-      timeoutMs: app.runTimeoutMinutes * 60_000,
-      maxBudgetUsd: app.maxBudgetUsdPerRun,
-      loadUserSettings: app.loadUserSettings,
-      env: opts.env,
-    },
+    spec,
     (e) => {
       chain = chain.then(async () => {
         await repo.addRunEvent(run.id, e.type, e.data);
@@ -525,7 +571,7 @@ async function runAgent(
   await repo.updateRun(run.id, { pid: handle.pid ?? null });
   const result = await handle.done;
   await chain;
-  const output = readIfWrittenSince(opts.outputPath, startedAt);
+  const output = redactWrittenOutput(opts.outputPath, startedAt, spec);
   await repo.updateRun(run.id, {
     pid: null,
     sessionId: result.sessionId,
@@ -784,6 +830,9 @@ async function prepareWorktree(run: Run, init: Initiative, project: Project, tic
   if (fs.existsSync(marker) || !ticket.worktreePath) return;
   const copied = await gitx.copyWorktreeIncludes(project.repoPath, ticket.worktreePath);
   if (copied.length) await log(run, `Copied from .worktreeinclude: ${copied.join(', ')}`);
+  const local = await gitx.copyLocalFiles(project.repoPath, ticket.worktreePath, project.copyFiles ?? []);
+  if (local.copied.length) await log(run, `Copied local files: ${local.copied.join(', ')}`);
+  if (local.skipped.length) await log(run, `Not copied (missing, tracked or not gitignored): ${local.skipped.join(', ')}`);
   if (project.setupCommand?.trim()) {
     await log(run, `Running setup: ${project.setupCommand}`);
     const r = await gitx.runInNonLoginShell(project.setupCommand, {

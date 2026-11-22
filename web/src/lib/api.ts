@@ -1,5 +1,7 @@
 import type {
   AppSettings,
+  BrowseResult,
+  EnvironmentSuggestion,
   Health,
   Initiative,
   InitiativeDetail,
@@ -51,9 +53,7 @@ export interface InspectResult {
   remoteUrl?: string | null;
   github?: boolean;
   branches?: string[];
-  suggestedChecks?: string | null;
-  suggestedSetup?: string | null;
-  hasClaudeMd?: boolean;
+  suggestion?: EnvironmentSuggestion;
 }
 
 export type BulkAction = 'run-ready' | 'review-all' | 'fix-all' | 'sync-prs';
@@ -67,6 +67,8 @@ export const api = {
 
   projects: () => get<Project[]>('/api/projects'),
   inspect: (path: string) => get<InspectResult>(`/api/fs/inspect?path=${encodeURIComponent(path)}`),
+  browse: (path?: string) => get<BrowseResult>(`/api/fs/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`),
+  discover: (path: string, force = false) => post<EnvironmentSuggestion>('/api/fs/discover', { path, force }),
   createProject: (p: Partial<Project>) => post<Project>('/api/projects', p),
   updateProject: (id: string, p: Partial<Project>) => patch<Project>(`/api/projects/${id}`, p),
   deleteProject: (id: string) => del<{ ok: true }>(`/api/projects/${id}`),

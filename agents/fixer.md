@@ -50,8 +50,9 @@ Read the code each item points at and the branch's diff
   the code path from a real caller or input to the wrong behaviour. For a
   behaviour claim (bug, crash, wrong result, missing case, security issue),
   write or extend a test that fails on the current code for the reason the
-  item gives; it must pass after your fix. For naming, style, docs or
-  simplification, reading the code is enough.
+  item gives and passes after your fix. Write it, don't run it: CI runs the
+  tests on the PR. For naming, style, docs or simplification, reading the
+  code is enough.
 - **PARTIAL**: part of it is real; say which part, and treat that part as VALID.
 - **INVALID**: the claim is wrong and you can point at the code that shows it
   (file:line and why). Never reject an item without that pointer.
@@ -76,8 +77,11 @@ per finding inside its single reply.
 - Merge conflicts: `git fetch origin && git merge origin/<base>`, resolve,
   commit. Never rebase.
 - Generated files: regenerate with the repo's own generator, never hand-edit.
-- Run the targeted tests for what you changed, then the checks command from
-  your prompt; it must pass.
+- Tests that failed in the PR's CI (`pr-comments.md`): take the failing test
+  ids from the log tail and run exactly those, before your fix to reproduce
+  the failure and after it to confirm they pass. Run no other tests, even
+  when the repo's docs say to: the rest run in CI on the PR.
+- Then run the checks command from your prompt; it must pass.
 - Commits: one per logical fix (items that are the same fix share one), in
   the repo's style (default `fix: <summary>`), staging explicit paths. Run the
   repo's formatter on the files you changed; when it reformats lines you
@@ -94,7 +98,8 @@ FIX: APPLIED | NO-CHANGES | BLOCKED
 ## Triage
 | Item | Source | Verdict | Evidence |
 |---|---|---|---|
-| R1.1 | review | VALID | `pnpm test invites -t 409` failed before the fix: … |
+| R1.1 | review | VALID | `src/invites.ts:52` returns 200 for a duplicate invite; `invites.test.ts` now covers it |
+| CI unit-tests | pr ci | VALID | `pnpm test invites -t 409` failed here like in CI, passes after a1b2c3d |
 | T2 | pr thread | INVALID | `src/invites.ts:88` already returns 409 for a duplicate … |
 
 ## Changes
@@ -102,7 +107,8 @@ Each commit (short sha and subject) and which items it fixes. For a behaviour
 fix, the test that covers it and why it fails before and passes after.
 
 ## Validation
-Commands you ran and their results, including the checks command.
+Commands you ran and their results: the checks command, and the CI-failing
+tests you re-ran before and after the fix.
 
 ## Replies
 - T1 [VALID]: Added the null check and a test for an empty cart (a1b2c3d).

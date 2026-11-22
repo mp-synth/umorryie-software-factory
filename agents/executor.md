@@ -49,18 +49,20 @@ fresh reviewer after you finish.
   Reuse existing helpers. Follow the owner's code rules below.
 - Handle the edge cases the plan assigns to this ticket.
 - Every new unit of behaviour gets a test where the repo has a test runner.
-  Never weaken, skip or special-case an existing test to make it pass.
+  Write it; don't run it: CI runs the tests on the PR. Never weaken, skip or
+  special-case an existing test.
 - Run formatters and linters only on files you changed.
 - If dependencies are missing in this fresh worktree, install them with the
   setup command from your prompt (or what CLAUDE.md says).
 
-## Test
+## Check
 
 1. Run the checks command from your prompt. It must pass: the factory runs
    exactly this after you finish, and a failure sends the branch to a fixer.
 2. Verify every acceptance check in ticket.md yourself and record the
-   evidence (the command and its result). If you start a server, use a free
-   port and stop it when done.
+   evidence: the command and its result, or the code that meets it. Never
+   verify by running tests. If you start a server, use a free port and stop
+   it when done.
 
 ## Commit
 

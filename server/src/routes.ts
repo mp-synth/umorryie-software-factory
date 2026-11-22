@@ -7,6 +7,7 @@ import { DEFAULT_INITIATIVE_SETTINGS, type ChangeEvent, type InitiativeDetail, t
 import { claudeVersion, resolveClaudeBin } from './agents/claude.ts';
 import { config } from './config.ts';
 import { sql } from './db.ts';
+import * as discovery from './discovery.ts';
 import { bus } from './events.ts';
 import * as gitx from './git.ts';
 import { ghUser } from './github.ts';
@@ -110,33 +111,28 @@ export async function routes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/projects', async () => repo.listProjects());
 
+  app.get('/api/fs/browse', async (req) => {
+    const { path: p } = z.object({ path: z.string().optional() }).parse(req.query);
+    const dir = p?.trim() ? expandPath(p) : discovery.defaultBrowseRoot();
+    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new engine.PipelineError(`${dir} is not a folder`, 400);
+    try {
+      return discovery.browse(dir);
+    } catch (err) {
+      throw new engine.PipelineError(`cannot open ${dir}: ${(err as Error).message}`, 400);
+    }
+  });
+
   app.get('/api/fs/inspect', async (req) => {
     const { path: p } = z.object({ path: z.string().min(1) }).parse(req.query);
     const dir = expandPath(p);
     if (!fs.existsSync(dir)) return { ok: false, path: dir, error: 'Path does not exist' };
     if (!(await gitx.isGitRepo(dir))) return { ok: false, path: dir, error: 'Not the root of a git repository' };
-    const [defaultBranch, remote, branches] = await Promise.all([
+    const [defaultBranch, remote, branches, suggestion] = await Promise.all([
       gitx.detectDefaultBranch(dir),
       gitx.remoteUrl(dir),
       gitx.listBranches(dir),
+      discovery.suggestFromFiles(dir),
     ]);
-    const has = (f: string) => fs.existsSync(path.join(dir, f));
-    let suggestedChecks: string | null = null;
-    let suggestedSetup: string | null = null;
-    if (has('package.json')) {
-      const pm = has('pnpm-lock.yaml') ? 'pnpm' : has('yarn.lock') ? 'yarn' : has('bun.lockb') ? 'bun' : 'npm';
-      const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
-      const scripts = ['lint', 'typecheck', 'test'].filter((s) => pkg.scripts?.[s]);
-      suggestedChecks = scripts.length ? scripts.map((s) => `${pm} run ${s}`).join(' && ') : null;
-      suggestedSetup = `${pm} install`;
-    } else if (has('pyproject.toml')) {
-      suggestedChecks = has('uv.lock') ? 'uv run pytest -q' : 'pytest -q';
-      suggestedSetup = has('uv.lock') ? 'uv sync' : null;
-    } else if (has('Cargo.toml')) {
-      suggestedChecks = 'cargo test --quiet';
-    } else if (has('go.mod')) {
-      suggestedChecks = 'go test ./...';
-    }
     return {
       ok: true,
       path: dir,
@@ -145,10 +141,15 @@ export async function routes(app: FastifyInstance): Promise<void> {
       remoteUrl: remote,
       github: gitx.isGithubUrl(remote),
       branches,
-      suggestedChecks,
-      suggestedSetup,
-      hasClaudeMd: has('CLAUDE.md') || has('AGENTS.md'),
+      suggestion,
     };
+  });
+
+  app.post('/api/fs/discover', async (req) => {
+    const body = z.object({ path: z.string().min(1), force: z.boolean().default(false) }).parse(req.body);
+    const dir = expandPath(body.path);
+    if (!(await gitx.isGitRepo(dir))) throw new engine.PipelineError(`${dir} is not the root of a git repository`, 400);
+    return discovery.discoverWithClaude(dir, body.force);
   });
 
   const projectBody = z.object({
@@ -158,6 +159,14 @@ export async function routes(app: FastifyInstance): Promise<void> {
     checksCommand: z.string().trim().max(2000).nullable().optional(),
     setupCommand: z.string().trim().max(2000).nullable().optional(),
     notes: z.string().max(20_000).nullable().optional(),
+    copyFiles: z
+      .array(z.string().trim().min(1).refine(gitx.isSafeRelativePath, 'must be a path inside the repository'))
+      .max(20)
+      .optional(),
+    referenceDirs: z
+      .array(z.string().trim().min(1).transform(expandPath).refine((d) => fs.existsSync(d) && fs.statSync(d).isDirectory(), 'folder not found'))
+      .max(10)
+      .optional(),
   });
 
   app.post('/api/projects', async (req, reply) => {
@@ -172,6 +181,8 @@ export async function routes(app: FastifyInstance): Promise<void> {
       setupCommand: body.setupCommand || null,
       notes: body.notes || null,
       remoteUrl: await gitx.remoteUrl(dir),
+      copyFiles: body.copyFiles ?? [],
+      referenceDirs: body.referenceDirs ?? [],
     });
     return reply.status(201).send(project);
   });

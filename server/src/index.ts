@@ -7,6 +7,7 @@ import { config } from './config.ts';
 import { migrate, sql } from './db.ts';
 import { recoverOnStartup, startScheduler, stopAllAgents } from './pipeline/engine.ts';
 import { routes } from './routes.ts';
+import { loadLoginShellPath } from './shell-env.ts';
 
 async function main(): Promise<void> {
   const app = Fastify({
@@ -15,6 +16,7 @@ async function main(): Promise<void> {
   });
 
   await migrate();
+  if (!(await loadLoginShellPath())) console.warn('[shell] could not read your login shell PATH; repo commands use the server PATH');
   await recoverOnStartup();
   await app.register(routes);
 

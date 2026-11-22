@@ -2,8 +2,18 @@ import * as DialogPrimitive from '@radix-ui/react-dialog';
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu';
 import * as SwitchPrimitive from '@radix-ui/react-switch';
 import * as TooltipPrimitive from '@radix-ui/react-tooltip';
-import { ChevronDown, Loader2, X } from 'lucide-react';
-import { forwardRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { Check, ChevronDown, Loader2, X } from 'lucide-react';
+import {
+  forwardRef,
+  useMemo,
+  useState,
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type KeyboardEvent,
+  type ReactNode,
+  type SelectHTMLAttributes,
+  type TextareaHTMLAttributes,
+} from 'react';
 import { cn } from '@/lib/utils';
 import { toneClasses, type Tone } from '@/lib/status';
 
@@ -141,13 +151,136 @@ export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSel
   );
 });
 
-export function Field({ label, hint, children, className }: { label: ReactNode; hint?: ReactNode; children: ReactNode; className?: string }) {
+export function Field({ label, hint, children, className, group }: { label: ReactNode; hint?: ReactNode; children: ReactNode; className?: string; group?: boolean }) {
+  const Wrapper = group ? 'div' : 'label';
   return (
-    <label className={cn('block space-y-1.5', className)}>
+    <Wrapper className={cn('block space-y-1.5', className)}>
       <span className="block text-xs font-medium text-zinc-300">{label}</span>
       {children}
       {hint && <span className="block text-2xs leading-relaxed text-zinc-500">{hint}</span>}
-    </label>
+    </Wrapper>
+  );
+}
+
+const COMBOBOX_LIMIT = 100;
+
+export function Combobox({
+  value,
+  onChange,
+  options,
+  placeholder,
+  disabled,
+  className,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  placeholder?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [active, setActive] = useState(0);
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
+  }, [options, query]);
+  const shown = matches.slice(0, COMBOBOX_LIMIT);
+
+  const pick = (v: string) => {
+    onChange(v);
+    setOpen(false);
+    setQuery('');
+  };
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      setOpen(true);
+      setActive((a) => Math.max(0, Math.min(shown.length - 1, a + (e.key === 'ArrowDown' ? 1 : -1))));
+    } else if (e.key === 'Enter' && open && shown[active]) {
+      e.preventDefault();
+      pick(shown[active]);
+    } else if (e.key === 'Escape' && open) {
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className={cn('relative', className)}>
+      <input
+        role="combobox"
+        aria-expanded={open}
+        disabled={disabled}
+        value={open ? query : value}
+        placeholder={open ? value || placeholder : placeholder}
+        onFocus={() => (setOpen(true), setQuery(''), setActive(0))}
+        onBlur={() => setOpen(false)}
+        onChange={(e) => (setQuery(e.target.value), setActive(0), setOpen(true))}
+        onKeyDown={onKeyDown}
+        className={cn(fieldBase, 'h-9 pr-8')}
+      />
+      <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+      {open && (
+        <ul role="listbox" className="absolute z-30 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-line-strong bg-surface-2 py-1 shadow-2xl">
+          {shown.map((o, i) => (
+            <li key={o} role="option" aria-selected={o === value}>
+              <button
+                type="button"
+                onMouseDown={(e) => (e.preventDefault(), pick(o))}
+                onMouseEnter={() => setActive(i)}
+                className={cn('flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-zinc-300', i === active && 'bg-white/[0.06] text-zinc-100')}
+              >
+                <span className="min-w-0 flex-1 truncate">{o}</span>
+                {o === value && <Check className="h-3.5 w-3.5 shrink-0 text-violet-300" />}
+              </button>
+            </li>
+          ))}
+          {!shown.length && <li className="px-3 py-1.5 text-xs text-zinc-500">No match</li>}
+          {matches.length > shown.length && (
+            <li className="px-3 py-1.5 text-2xs text-zinc-500">{matches.length - shown.length} more · type to narrow</li>
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export function TagInput({ values, onChange, placeholder }: { values: string[]; onChange: (v: string[]) => void; placeholder?: string }) {
+  const [draft, setDraft] = useState('');
+  const add = (raw: string) => {
+    const v = raw.trim();
+    if (v && !values.includes(v)) onChange([...values, v]);
+    setDraft('');
+  };
+  return (
+    <div className="flex min-h-9 w-full flex-wrap items-center gap-1.5 rounded-lg border border-line-strong bg-black/30 px-2 py-1.5 transition-colors focus-within:border-violet-400/60 focus-within:ring-2 focus-within:ring-violet-500/20">
+      {values.map((v) => (
+        <span key={v} className="mono-chip inline-flex max-w-full items-center gap-1">
+          <span className="truncate">{v}</span>
+          <button type="button" aria-label={`Remove ${v}`} onClick={() => onChange(values.filter((x) => x !== v))} className="text-zinc-500 hover:text-zinc-200">
+            <X className="h-3 w-3" />
+          </button>
+        </span>
+      ))}
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => draft && add(draft)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ',') {
+            e.preventDefault();
+            add(draft);
+          } else if (e.key === 'Backspace' && !draft && values.length) {
+            onChange(values.slice(0, -1));
+          }
+        }}
+        placeholder={values.length ? '' : placeholder}
+        className="h-6 min-w-[10rem] flex-1 bg-transparent px-1 font-mono text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+      />
+    </div>
   );
 }
 
@@ -230,6 +363,9 @@ export function Dialog({
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-[2px] data-[state=open]:animate-fade-in" />
         <DialogPrimitive.Content
+          onEscapeKeyDown={(e) => {
+            if (e.target instanceof HTMLElement && e.target.closest('[role="combobox"][aria-expanded="true"]')) e.preventDefault();
+          }}
           className={cn(
             'fixed left-1/2 top-[8vh] z-50 flex max-h-[84vh] w-[calc(100vw-32px)] -translate-x-1/2 flex-col rounded-2xl border border-line-strong bg-surface shadow-2xl data-[state=open]:animate-fade-in',
             wide ? 'max-w-3xl' : 'max-w-lg',

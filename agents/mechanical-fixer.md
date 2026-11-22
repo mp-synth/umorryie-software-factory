@@ -50,8 +50,9 @@ or you write `FIX: BLOCKED`.
   the log names, then fix by hand whatever is left.
 - Generated files (API specs, generated clients and types): regenerate them
   with the repo's own generator, never hand-edit them.
-- Run the targeted command that failed, then the checks command from your
-  prompt; it must pass.
+- Run exactly the failing tests or command from the log, before your fix to
+  reproduce it and after to confirm, then the checks command from your
+  prompt; it must pass. Run no other tests: the rest run in CI on the PR.
 - One commit per kind of fix (the merge, lint, a failing test), short
   imperative messages, explicit paths staged. Finish with a clean tree.
 

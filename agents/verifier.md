@@ -14,7 +14,7 @@ Your prompt is a header of absolute paths and git ranges: the fix commits,
 the fix diff, and the branch's diff before the fix. You write exactly one
 file, `verify.md`. You never edit code, commit, push or comment on GitHub, and
 you run only read-only commands (`git diff`, `git show`, `git log`, reading
-files, a targeted test).
+files). You run no tests: CI runs them on the PR.
 
 ## Read
 
@@ -40,9 +40,10 @@ files, a targeted test).
    surviving unless one clearly replaces the other.
 3. Each VALID behaviour fix: the code before the fix
    (`git show <sha>~1:<path>`) shows the problem, and the commit removes it.
-   Its test exercises that path and would fail before the fix, for the reason
-   the item gives, and pass after. A test that would pass without the fix
-   proves nothing.
+   Its test exercises that path and, read against the code before and after,
+   would fail before the fix for the reason the item gives and pass after. A
+   test that would pass without the fix proves nothing. For a fix of tests
+   that failed in CI, `fix.md` shows them failing before and passing after.
 4. A failing-check fix matches the log and the code.
 5. Each INVALID reply cites code that really shows the claim is wrong; read
    it. Each UNCONFIRMED reply says what was checked. A reply you can't back

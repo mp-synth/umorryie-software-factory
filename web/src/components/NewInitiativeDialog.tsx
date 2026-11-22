@@ -6,7 +6,7 @@ import { toast } from 'sonner';
 import { DEFAULT_INITIATIVE_SETTINGS, type InitiativeSettings } from '@factory/shared';
 import { api } from '@/lib/api';
 import { toastError } from '@/lib/toasts';
-import { Button, Dialog, Field, Input, Select, Switch, Textarea } from './ui';
+import { Button, Combobox, Dialog, Field, Input, Select, Switch, Textarea } from './ui';
 
 const AUTOPILOT: { key: keyof InitiativeSettings; label: string; hint: string }[] = [
   { key: 'autoPlanReview', label: 'Review the plan', hint: 'A fresh reviewer checks the plan against the code before you see it.' },
@@ -96,14 +96,8 @@ export function NewInitiativeDialog({ open, onOpenChange }: { open: boolean; onO
                 ))}
               </Select>
             </Field>
-            <Field label={<span className="flex items-center gap-1.5"><GitBranch className="h-3 w-3" /> Base branch</span>}>
-              <Select value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)}>
-                {(branchData?.branches ?? []).map((b) => (
-                  <option key={b} value={b}>
-                    {b}
-                  </option>
-                ))}
-              </Select>
+            <Field group label={<span className="flex items-center gap-1.5"><GitBranch className="h-3 w-3" /> Base branch</span>}>
+              <Combobox value={baseBranch} onChange={setBaseBranch} options={branchData?.branches ?? []} placeholder="Search branches" />
             </Field>
           </div>
           <Field label="Title">

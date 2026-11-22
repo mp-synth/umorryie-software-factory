@@ -40,8 +40,27 @@ Or build the UI once and serve everything from the API:
 pnpm start      # http://localhost:4317
 ```
 
-Then: **Projects → Add project** (any local git repo; it suggests a checks
-command), **New initiative**, write a brief, and watch the planner work.
+Then: **Projects → Add project**, pick a repo in the folder browser (or paste
+a path) and a base branch, **New initiative**, write a brief, and watch the
+planner work.
+
+Adding a repo discovers how to work in it. A first guess comes from lockfiles
+and package scripts at once; then a read-only Claude agent (Sonnet, about 20
+seconds and $0.10) reads `CLAUDE.md`, `AGENTS.md`, the CI config and the
+scripts, and proposes the setup command, a checks command (formatting, lint
+and type checks scoped to `$FACTORY_BASE`, never tests), the gitignored files to copy into worktrees (`.env`), local
+checkouts agents may read (an SDK and the service it calls), and what must be
+running for the checks (Mongo, a registry login). Every field stays editable,
+and **Re-run** in the edit dialog proposes fresh commands.
+
+To try a project's environment without running an initiative:
+
+```bash
+pnpm --filter @factory/server probe EnactServices --diff-from origin/master~1 --prompt "Call the Lago API with the key from .env and find the endpoint in lago-api"
+```
+
+It makes a throwaway worktree, copies the files, runs setup and checks (diffed
+against `--diff-from`), then starts an agent exactly as the factory would.
 
 What a run looks like (the demo in `~/.software-factory/demo/todo-app`): a
 4-ticket feature ("priorities and due dates" for a todo CLI) went plan → plan
@@ -75,7 +94,7 @@ threads into a fix round (the factory's own comments are ignored).
 | built | Checked and waiting for review (when auto-review is off) |
 | in review | A fresh reviewer reads `git diff <base>...HEAD`, verifies each finding, answers APPROVE or CHANGES |
 | changes requested | Waiting for a fixer (auto-fix runs it unless the round limit is reached) |
-| fixing | A fixer gives every item a verdict before touching code (VALID / PARTIAL / INVALID / UNCONFIRMED / NEEDS-HUMAN): a bug is fixed only after it is traced and gets a test that fails without the fix; a claim is rejected only by pointing at the code. Rounds with only failing checks, CI or conflicts get a cheaper mechanical fixer that first checks whether the base branch fails the same way and lists flaky runs for one re-run. Fixes are committed locally; after the checks pass, a fresh **verifier** reads the commits and drafted replies. Approved: the factory pushes, replies in each review thread, answers top-level comments in one summary, and resolves only bot threads. Blocked: the branch is reset and a fresh fixer retries once with the findings; a second block pushes nothing and waits for you. When a PR has nothing to act on, no agent is started |
+| fixing | A fixer gives every item a verdict before touching code (VALID / PARTIAL / INVALID / UNCONFIRMED / NEEDS-HUMAN): a bug is fixed only after it is traced and gets a test that would fail without the fix (written, not run: CI runs tests, and the fixer re-runs only the tests that failed in the PR's CI, before and after its fix); a claim is rejected only by pointing at the code. Rounds with only failing checks, CI or conflicts get a cheaper mechanical fixer that first checks whether the base branch fails the same way and lists flaky runs for one re-run. Fixes are committed locally; after the checks pass, a fresh **verifier** reads the commits and drafted replies. Approved: the factory pushes, replies in each review thread, answers top-level comments in one summary, and resolves only bot threads. Blocked: the branch is reset and a fresh fixer retries once with the findings; a second block pushes nothing and waits for you. When a PR has nothing to act on, no agent is started |
 | approved | Reviewer would merge it. PR marked ready. Dependents start |
 | merged | Seen by Sync PRs (automatic every 5 min) or marked by you. Unblocks dependents. Its local worktree is removed, and its local branch too once no unmerged ticket is stacked on it |
 | needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row |
@@ -143,15 +162,32 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
   planner names the rules and skills that apply in each ticket's guidance.
 - **Exploring.** Agents get the Task tool, so they can send an Explore
   subagent through a monorepo and keep only its conclusion.
-- **Worktrees.** Ignored files the repo's `.worktreeinclude` names (`.env` and
-  the like, gitignore syntax) are copied into every new worktree, then the
+- **Worktrees.** The project's "files copied into each worktree" (only
+  gitignored ones, so a copy can never be committed) and the ignored files the
+  repo's `.worktreeinclude` names are copied into every new worktree, then the
   setup command runs there once. If setup fails, the ticket waits for you
   instead of burning an agent run, and setup runs again on the next attempt.
+- **Your toolchain.** Setup, checks, git and agents run with your login
+  shell's `PATH`, so asdf, mise or Homebrew pick each repo's own node, pnpm or
+  python versions, whatever the factory itself was started with.
+- **Env and secrets.** Variables from copied env files are in every agent's
+  shell (minus anything that would change how Claude, git or gh
+  authenticate), so an agent can `curl` a dev API with `$LAGO_API_KEY` without
+  ever reading the file. Secret-looking values are replaced by
+  `[redacted NAME]` in run events, agent output files and the probe's log.
+- **Web and reference code.** Every agent can WebFetch and WebSearch docs, and
+  reads the project's reference folders (for example `lago-api` and
+  `lago-python-client` for EnactServices) through `--add-dir`.
 - **Checks on what changed.** The checks command, the setup command and the
   agents get `$FACTORY_BASE` (the ref the branch is diffed against) and
   `$FACTORY_BRANCH`, so the gate can check only what the branch touched, for
-  example `uv run prek run --from-ref "$FACTORY_BASE" --to-ref HEAD && uv run pytest --affected -q`
-  in EnactServices.
+  example `uv run prek run --from-ref "$FACTORY_BASE" --to-ref HEAD` in
+  EnactServices.
+- **A project's tests run in its CI, not in the factory.** No agent runs test
+  files or suites in the repos it works on while building, reviewing or
+  verifying, and discovered gates hold no tests. When tests fail in the PR's
+  CI, the fixer runs exactly those, to reproduce the failure and to confirm
+  its fix. The factory's own tests are separate: `pnpm test` must pass.
 
 ## Development
 

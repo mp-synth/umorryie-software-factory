@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { repoShellEnv } from './shell-env.ts';
 
 export interface ExecResult {
   code: number;
@@ -86,7 +87,7 @@ export function commandCouldNotRun(exitCode: number): boolean {
 }
 
 export async function git(cwd: string, args: string[], timeoutMs = 120_000): Promise<ExecResult> {
-  return exec('git', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  return exec('git', args, { cwd, timeoutMs, env: { ...repoShellEnv(), GIT_TERMINAL_PROMPT: '0' } });
 }
 
 async function gitOut(cwd: string, args: string[]): Promise<string> {
@@ -111,7 +112,7 @@ export function isGithubUrl(url: string | null): boolean {
 }
 
 export async function listBranches(repo: string): Promise<string[]> {
-  const r = await git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes/origin']);
+  const r = await git(repo, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads', 'refs/remotes/origin']);
   if (r.code !== 0) return [];
   const names = new Set<string>();
   for (const line of r.stdout.split('\n')) {
@@ -119,7 +120,7 @@ export async function listBranches(repo: string): Promise<string[]> {
     if (!n || n === 'origin/HEAD' || n === 'origin') continue;
     names.add(n.startsWith('origin/') ? n.slice('origin/'.length) : n);
   }
-  return [...names].filter((n) => !n.startsWith('factory/')).sort();
+  return [...names].filter((n) => !n.startsWith('factory/'));
 }
 
 export async function detectDefaultBranch(repo: string): Promise<string> {
@@ -180,6 +181,29 @@ export async function copyWorktreeIncludes(repo: string, worktree: string): Prom
     fs.copyFileSync(path.join(repo, f), target);
   }
   return files;
+}
+
+export function isSafeRelativePath(file: string): boolean {
+  const normalized = path.normalize(file);
+  return !!file.trim() && !path.isAbsolute(normalized) && normalized !== '..' && !normalized.startsWith(`..${path.sep}`);
+}
+
+export async function ignoredFiles(repo: string, files: string[]): Promise<string[]> {
+  if (!files.length) return [];
+  const r = await git(repo, ['check-ignore', '--', ...files]);
+  return r.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+}
+
+export async function copyLocalFiles(repo: string, worktree: string, files: string[]): Promise<{ copied: string[]; skipped: string[] }> {
+  const present = files.filter((f) => isSafeRelativePath(f) && fs.existsSync(path.join(repo, f)));
+  const ignored = new Set(await ignoredFiles(repo, present));
+  const copied = present.filter((f) => ignored.has(f));
+  for (const f of copied) {
+    const target = path.join(worktree, f);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(repo, f), target);
+  }
+  return { copied, skipped: files.filter((f) => !copied.includes(f)) };
 }
 
 export async function resetHard(worktree: string, ref: string): Promise<void> {
