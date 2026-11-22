@@ -28,7 +28,7 @@ import { toast } from 'sonner';
 import { PR_SWEEP_CLAIM_MINUTES, overSizeBudget, type InitiativeDetail, type Run, type Ticket } from '@factory/shared';
 import { api, type BulkAction, type TicketAction } from '@/lib/api';
 import { useNow } from '@/lib/live';
-import { runKind, isRunInFlight } from '@/lib/status';
+import { runKind, isArbitrating, isRunInFlight } from '@/lib/status';
 import { copyWithToast, toastError } from '@/lib/toasts';
 import { ago, cn, copy, money, pad2, runDuration, shortPath } from '@/lib/utils';
 import { Markdown } from './Markdown';
@@ -83,6 +83,7 @@ export function TicketList({ detail }: { detail: InitiativeDetail }) {
     onError: toastError,
   });
   const counts = (s: string[]) => tickets.filter((t) => s.includes(t.status)).length;
+  const arbitrated = tickets.filter((t) => t.status === 'blocked' && isArbitrating(runs.filter((r) => r.ticketId === t.id))).length;
   const hasPrs = tickets.some((t) => t.prNumber);
   const hasBranches = tickets.some((t) => t.branch);
 
@@ -125,8 +126,9 @@ export function TicketList({ detail }: { detail: InitiativeDetail }) {
               { value: counts(['approved']), tone: 'success', label: 'Approved' },
               { value: counts(['built']), tone: 'info', label: 'Built' },
               { value: counts(['building', 'checking', 'in_review', 'fixing']), tone: 'active', label: 'In flight' },
+              { value: arbitrated, tone: 'active', label: 'Arbiter deciding' },
               { value: counts(['changes_requested']), tone: 'attention', label: 'Changes requested' },
-              { value: counts(['blocked']), tone: 'danger', label: 'Needs you' },
+              { value: counts(['blocked']) - arbitrated, tone: 'danger', label: 'Needs you' },
               { value: counts(['todo', 'proposed']), tone: 'muted', label: 'Not started' },
             ]}
           />
@@ -285,12 +287,12 @@ function TicketRow({
               </span>
             )}
             <span className="md:hidden">
-              <TicketPill status={t.status} />
+              <TicketState ticket={t} activeRun={activeRun} />
             </span>
           </div>
         </div>
         <span className="hidden md:block">
-          <TicketPill status={t.status} />
+          <TicketState ticket={t} activeRun={activeRun} />
         </span>
         <span className="hidden lg:block">{t.lastVerdict ? <VerdictPill verdict={t.lastVerdict} /> : t.gateStatus === 'fail' ? <VerdictPill verdict="GATE: FAIL" /> : <span className="text-2xs text-zinc-700">—</span>}</span>
         <span className="hidden text-right font-mono text-2xs tabular-nums text-zinc-500 lg:block">{cost ? money(cost) : '—'}</span>
@@ -360,16 +362,35 @@ function TicketRow({
   );
 }
 
+function TicketState({ ticket: t, activeRun }: { ticket: Ticket; activeRun: Run | undefined }) {
+  if (t.status === 'blocked' && activeRun?.kind === 'arbitrate') {
+    return (
+      <Pill tone="active" live>
+        Arbiter deciding
+      </Pill>
+    );
+  }
+  return <TicketPill status={t.status} />;
+}
+
 function TicketDetail({ ticket: t, runs, initiativeId }: { ticket: Ticket; runs: Run[]; initiativeId: string }) {
   const latestOutput = runs.find((r) => r.status === 'succeeded' && r.outputMd && r.kind !== 'gate') ?? runs.find((r) => r.outputMd);
+  const arbitrating = isArbitrating(runs);
   return (
     <div className="animate-fade-in space-y-4 border-t border-line/60 px-4 pb-4 pl-[66px] pt-3">
       {t.status === 'blocked' && t.blockedReason && (
-        <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/25 bg-rose-500/[0.06] px-3 py-2.5 text-xs text-rose-100">
-          <AlertOctagon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-300" />
+        <div
+          className={cn(
+            'flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-xs',
+            arbitrating ? 'border-cyan-400/20 bg-cyan-400/[0.05] text-cyan-100' : 'border-rose-500/25 bg-rose-500/[0.06] text-rose-100',
+          )}
+        >
+          <AlertOctagon className={cn('mt-0.5 h-3.5 w-3.5 shrink-0', arbitrating ? 'text-cyan-300' : 'text-rose-300')} />
           <div className="min-w-0">
-            <div className="font-medium">Needs you</div>
-            <Markdown tight className="mt-1 text-rose-100/80">{t.blockedReason}</Markdown>
+            <div className="font-medium">{arbitrating ? 'Stopped; the arbiter is deciding for you' : 'Needs you'}</div>
+            <Markdown tight className={cn('mt-1', arbitrating ? 'text-cyan-100/80' : 'text-rose-100/80')}>
+              {t.blockedReason}
+            </Markdown>
           </div>
         </div>
       )}

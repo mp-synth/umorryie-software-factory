@@ -29,7 +29,8 @@ fresh reviewer after you finish.
    outcome; the guidance and acceptance checks are your test plan.
 3. `plan.md` and `brief.md`: background on the whole feature. The ticket wins
    where they differ.
-4. `feedback.md`, when present: the owner's words for this ticket. Binding.
+4. `feedback.md`, when present: the owner's words for this ticket, or an
+   arbiter's decision made on the owner's behalf. Binding.
 5. `merge-deps.md`, when present: your ticket depends on several tickets
    whose branches conflict. Merge the listed branches first, resolving every
    conflict so all of their behaviour and tests survive, and commit the merge
@@ -126,8 +127,7 @@ A reviewer should understand the PR in ten seconds:
   worth doing, and what it unlocks. Say what was wrong or missing before.
 - **Overview:** 2 to 4 bullets, each one short line (under 100 characters)
   naming a behaviour change at a high level, not how it is implemented.
-- Precise and plain: no filler ("This PR…", "comprehensive", "robust"), no
-  restating the title, no hedging. Cut every word that doesn't inform.
+- Precise and plain, following the writing rules below.
 - No file paths, function or class names, step-by-step changes or test
   summaries: the diff covers that. Nothing besides the three labelled parts.
 - Mention a Linear ticket only when the brief or ticket explicitly gives one.

@@ -1,7 +1,7 @@
 import { Check, type LucideIcon } from 'lucide-react';
 import { BrainCircuit, ClipboardCheck, Hammer, Rocket, ScanSearch, UserCheck, Wrench } from 'lucide-react';
 import type { InitiativeDetail } from '@factory/shared';
-import { findSucceededRun } from '@/lib/status';
+import { findSucceededRun, isArbitrating } from '@/lib/status';
 import { cn } from '@/lib/utils';
 
 type State = 'done' | 'active' | 'attention' | 'pending' | 'skipped' | 'failed';
@@ -14,7 +14,7 @@ interface Stage {
 }
 
 export function stagesFor(d: InitiativeDetail): Stage[] {
-  const { initiative: i, tickets, runs } = d;
+  const { initiative: i, tickets, runs, messages } = d;
   const total = tickets.filter((t) => t.status !== 'canceled').length;
   const count = (pred: (s: string) => boolean) => tickets.filter((t) => pred(t.status)).length;
   const approvedOrMerged = count((s) => s === 'approved' || s === 'merged');
@@ -28,7 +28,15 @@ export function stagesFor(d: InitiativeDetail): Stage[] {
     i.status === 'planning' ? 'active' : i.status === 'failed' ? 'failed' : i.status === 'needs_input' ? 'attention' : i.planJson ? 'done' : 'pending';
   const review: State =
     i.status === 'plan_review' ? 'active' : planReviewRun ? 'done' : i.planJson && !i.settings.autoPlanReview ? 'skipped' : 'pending';
-  const approval: State = approved ? 'done' : ['awaiting_approval', 'needs_input'].includes(i.status) ? 'attention' : 'pending';
+  const arbiterOnPlan = isArbitrating(runs.filter((r) => !r.ticketId));
+  const approvedByArbiter = approved && messages.some((m) => m.kind === 'approval' && m.author === 'agent' && !m.ticketId);
+  const approval: State = approved
+    ? 'done'
+    : arbiterOnPlan
+      ? 'active'
+      : ['awaiting_approval', 'needs_input'].includes(i.status)
+        ? 'attention'
+        : 'pending';
   const build: State = !approved
     ? 'pending'
     : count((s) => s === 'building' || s === 'checking') > 0
@@ -61,7 +69,7 @@ export function stagesFor(d: InitiativeDetail): Stage[] {
   return [
     { label: 'Plan', icon: BrainCircuit, state: plan, sub: i.planRound ? `round ${i.planRound}` : undefined },
     { label: 'Plan review', icon: ClipboardCheck, state: review },
-    { label: 'Your approval', icon: UserCheck, state: approval },
+    { label: 'Approval', icon: UserCheck, state: approval, sub: arbiterOnPlan ? 'arbiter deciding' : approvedByArbiter ? 'by arbiter' : undefined },
     { label: 'Build', icon: Hammer, state: build, sub: approved ? `${built}/${total}` : undefined },
     { label: 'Review', icon: ScanSearch, state: rev, sub: approved ? `${approvedOrMerged}/${total}` : undefined },
     { label: 'Fix', icon: Wrench, state: fix, sub: fixRuns ? `${fixRuns} round${fixRuns > 1 ? 's' : ''}` : undefined },

@@ -5,6 +5,7 @@ import {
   ClipboardCheck,
   Hammer,
   MessageCircleQuestion,
+  Scale,
   ScanSearch,
   ShieldCheck,
   UserCheck,
@@ -70,6 +71,7 @@ export const runKind: Record<RunKind, { label: string; agent: string; icon: Luci
   review: { label: 'Review', agent: 'Reviewer', icon: ScanSearch, color: 'text-sky-300' },
   fix: { label: 'Fix', agent: 'Fixer', icon: Wrench, color: 'text-amber-300' },
   verify: { label: 'Verify fix', agent: 'Fix verifier', icon: UserCheck, color: 'text-lime-300' },
+  arbitrate: { label: 'Decide', agent: 'Arbiter', icon: Scale, color: 'text-orange-300' },
   ask: { label: 'Ask', agent: 'Advisor', icon: MessageCircleQuestion, color: 'text-fuchsia-300' },
 };
 
@@ -79,17 +81,19 @@ export const DoneIcon = CheckCircle2;
 export function verdictTone(v: string | null | undefined): Tone {
   if (!v) return 'muted';
   if (/APPROVE|PASS|READY|APPLIED|SKIPPED/i.test(v)) return /SKIPPED/i.test(v) ? 'neutral' : 'success';
-  if (/CHANGES|REVISE|NO-CHANGES|NOTHING/i.test(v)) return 'attention';
-  if (/BLOCK|FAIL/i.test(v)) return 'danger';
+  if (/CHANGES|REVISE|NO-CHANGES|NOTHING|RETRY/i.test(v)) return 'attention';
+  if (/BLOCK|FAIL|ESCALATE/i.test(v)) return 'danger';
   return 'neutral';
 }
 
 export function shortVerdict(v: string | null | undefined): string | null {
   if (!v) return null;
-  return v.replace(/^(VERDICT|STATUS|PLAN|FIX|GATE):\s*/i, '').split(/\s+·\s+/)[0].slice(0, 28);
+  return v.replace(/^(VERDICT|STATUS|PLAN|FIX|GATE|DECISION):\s*/i, '').split(/\s+·\s+/)[0].slice(0, 28);
 }
 
 export const isRunInFlight = (r: { status: RunStatus }): boolean => r.status === 'running' || r.status === 'queued';
+
+export const isArbitrating = (runs: { kind: RunKind; status: RunStatus }[]): boolean => runs.some((r) => r.kind === 'arbitrate' && isRunInFlight(r));
 
 export const isNotArchived = (i: { status: InitiativeStatus }): boolean => i.status !== 'archived';
 

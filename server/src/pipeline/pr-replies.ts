@@ -54,7 +54,7 @@ export function commentKey(c: PrComment): string {
 }
 
 export function renderCommentReply({ comment, reply }: PlannedReplies['commentReplies'][number]): string {
-  return `- Re @${comment.author} (${comment.url}): ${reply.body}`;
+  return `- [@${comment.author}](${comment.url}): ${reply.body}`;
 }
 
 export function planReplies(replies: Reply[], items: PrItems | null): PlannedReplies {

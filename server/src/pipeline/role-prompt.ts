@@ -13,6 +13,7 @@ export const ROLE_FILES: Record<AgentKind, string> = {
   review: 'reviewer.md',
   fix: 'fixer.md',
   verify: 'verifier.md',
+  arbitrate: 'arbiter.md',
   ask: 'advisor.md',
 };
 export const MECHANICAL_FIXER_FILE = 'mechanical-fixer.md';
@@ -29,6 +30,7 @@ export const TOOLS: Record<AgentKind, string[]> = {
   review: READ_TOOLS,
   fix: WRITE_TOOLS,
   verify: READ_TOOLS,
+  arbitrate: READ_TOOLS,
   ask: READ_TOOLS,
 };
 
@@ -58,6 +60,7 @@ export const DISALLOWED_TOOLS: Record<AgentKind, string[]> = {
   review: READ_ONLY_DENIALS,
   fix: DENIED_FOR_EVERY_AGENT,
   verify: READ_ONLY_DENIALS,
+  arbitrate: READ_ONLY_DENIALS,
   ask: READ_ONLY_DENIALS,
 };
 
@@ -68,10 +71,12 @@ export const EFFORT: Record<AgentKind, string> = {
   review: 'high',
   fix: 'high',
   verify: 'high',
+  arbitrate: 'high',
   ask: 'medium',
 };
 
-const STEPS_THAT_WRITE_OR_JUDGE_CODE: RunKind[] = ['execute', 'fix', 'review', 'verify'];
+const STEPS_THAT_WRITE_OR_JUDGE_CODE: RunKind[] = ['execute', 'fix', 'review', 'verify', 'arbitrate'];
+const STEPS_THAT_WRITE_FOR_PEOPLE: RunKind[] = ['execute', 'fix', 'review', 'arbitrate'];
 
 export function readAgentFile(file: string): string {
   return fs.readFileSync(path.isAbsolute(file) ? file : path.join(config.agentsDir, file), 'utf8').replace(/^---\n[\s\S]*?\n---\n/, '').trim();
@@ -80,6 +85,7 @@ export function readAgentFile(file: string): string {
 export function rolePrompt(kind: AgentKind, roleFile = ROLE_FILES[kind]): string {
   const parts = [readAgentFile(roleFile), readAgentFile('repo-rules.md')];
   if (STEPS_THAT_WRITE_OR_JUDGE_CODE.includes(kind)) parts.push(readAgentFile('code-style.md'));
+  if (STEPS_THAT_WRITE_FOR_PEOPLE.includes(kind)) parts.push(readAgentFile('writing.md'));
   return parts.join('\n\n');
 }
 

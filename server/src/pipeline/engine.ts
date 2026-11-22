@@ -11,12 +11,14 @@ import * as gitx from '../git.ts';
 import * as gh from '../github.ts';
 import * as repo from '../repo.ts';
 import {
+  arbiterDir,
   askDir,
   branchName,
   initiativeDir,
   planRoundDir,
   readIfExists,
   renderConversation,
+  renderOwnerHistory,
   ticketDir,
   ticketRoundDir,
   worktreePath,
@@ -29,7 +31,23 @@ import {
 import { dependencyReady } from './readiness.ts';
 import { mergedTicketCleanups } from './cleanup.ts';
 import { gateBody } from './gate-output.ts';
-import { gateResult, parseAcceptance, renderVerification, verifiedFixRounds } from './verification.ts';
+import { gateResult, parseAcceptance, reviewComment } from './verification.ts';
+import {
+  agentName,
+  arbiterInstructions,
+  decisionText,
+  escalatedReason,
+  escalationQuestion,
+  planApprovalBlocker,
+  readsFeedback,
+  renderPlanSituation,
+  renderTicketSituation,
+  retryStep,
+  ticketApprovalBlocker,
+  waitsForOwner,
+  type Decision,
+  type DecisionText,
+} from './arbiter.ts';
 import { ticketLabel } from './labels.ts';
 import { adoptablePrs, adoptedTicket, remoteBranchOf } from './adopted-prs.ts';
 import { pullRequestText } from './pull-request.ts';
@@ -74,8 +92,8 @@ function cachedFactorySha(): Promise<string | null> {
   return factoryShaOnce;
 }
 
-const TICKET_DIFF_STEPS: AgentKind[] = ['execute', 'review', 'fix', 'verify'];
-const READ_ONLY_WORKTREE_STEPS: AgentKind[] = ['review', 'verify'];
+const TICKET_DIFF_STEPS: AgentKind[] = ['execute', 'review', 'fix', 'verify', 'arbitrate'];
+const READ_ONLY_WORKTREE_STEPS: AgentKind[] = ['review', 'verify', 'arbitrate'];
 
 async function mustInitiative(id: string): Promise<Initiative> {
   const i = await repo.getInitiative(id);
@@ -156,7 +174,7 @@ async function diffBase(project: Project, ticket: Ticket): Promise<string> {
   return base;
 }
 
-const AGENT_KINDS: RunKind[] = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'verify'];
+const AGENT_KINDS: RunKind[] = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'verify', 'arbitrate'];
 
 function factoryEnv(ticket: Ticket, base: string): Record<string, string> {
   return { FACTORY_BASE: base, FACTORY_BRANCH: ticket.branch ?? '' };
@@ -200,6 +218,7 @@ export async function enqueue(opts: {
   let model: string | null = null;
 
   if (opts.kind !== 'ask') {
+    if (opts.trigger === 'manual') await stopArbiterFor(init.id, ticketId);
     const busy = await activeRunFor(init.id, ticketId, AGENT_KINDS);
     if (busy) throw new PipelineError(`an agent is already ${busy.status} for this ${ticketId ? 'ticket' : 'plan'} (${busy.kind})`);
   }
@@ -217,6 +236,9 @@ export async function enqueue(opts: {
       round = init.planRound;
       model = s.models.plan_review;
       await repo.updateInitiative(init.id, { status: 'plan_review' });
+    } else if (opts.kind === 'arbitrate') {
+      round = init.planRound;
+      model = s.models.arbitrate;
     } else if (opts.kind === 'ask') {
       round = 0;
       model = s.models.ask;
@@ -263,6 +285,10 @@ export async function enqueue(opts: {
         round = t.round;
         model = s.models.verify;
         await repo.updateTicket(t.id, { status: 'fixing' });
+        break;
+      case 'arbitrate':
+        round = t.round;
+        model = s.models.arbitrate;
         break;
       case 'ask':
         model = s.models.ask;
@@ -376,6 +402,9 @@ async function startRun(run: Run): Promise<void> {
       case 'verify':
         await runVerify(run);
         break;
+      case 'arbitrate':
+        await runArbitrate(run);
+        break;
       case 'ask':
         await runAsk(run);
         break;
@@ -399,6 +428,7 @@ async function startRun(run: Run): Promise<void> {
     canceling.delete(run.id);
     inFlight.delete(run.id);
     if (run.ticketId) void releaseSweepClaimIfIdle(run.ticketId).catch((err) => console.warn('[pr-sweep]', err.message));
+    void handOverToArbiter(run).catch((err) => console.warn('[arbiter]', err.message));
     kick();
   }
 }
@@ -421,15 +451,21 @@ async function systemMessage(scope: MessageScope, body: string): Promise<void> {
   await repo.addMessage({ initiativeId: scope.initiativeId, ticketId: scope.ticketId ?? null, runId: scope.id ?? null, author: 'system', kind: 'event', body });
 }
 
-async function agentMessage(run: Pick<Run, 'initiativeId' | 'ticketId' | 'id'>, body: string, kind: 'comment' | 'answer' = 'comment'): Promise<void> {
+async function agentMessage(run: Pick<Run, 'initiativeId' | 'ticketId' | 'id'>, body: string, kind: Message['kind'] = 'comment'): Promise<void> {
   await repo.addMessage({ initiativeId: run.initiativeId, ticketId: run.ticketId, runId: run.id, author: 'agent', kind, body });
 }
 
 type StoppedStep = Pick<Run, 'initiativeId' | 'ticketId' | 'kind'> & { id?: string };
 
+const STEPS_THAT_LEAVE_STATUS_ALONE: Partial<Record<RunKind, string>> = {
+  ask: 'The advisor could not answer',
+  arbitrate: 'The arbiter could not decide, so this waits for you',
+};
+
 async function revertAfterStop(run: StoppedStep, reason: string | null, failed = reason !== null): Promise<void> {
-  if (run.kind === 'ask') {
-    if (reason) await systemMessage(run, `The advisor could not answer: ${reason}`);
+  const leavesStatusAlone = STEPS_THAT_LEAVE_STATUS_ALONE[run.kind];
+  if (leavesStatusAlone) {
+    if (reason) await systemMessage(run, `${leavesStatusAlone}: ${reason}`);
     return;
   }
   if (!run.ticketId) {
@@ -519,7 +555,8 @@ async function runAgent(
   if (!executorResumesFromItsEarlierOutput) setAsideEarlierOutput(opts.outputPath);
   const guidance = await writeRepoGuidance(opts.cwd, opts.runDir);
   const init = await mustInitiative(run.initiativeId);
-  const spec = projectAgentSpec(await mustProject(init.projectId), app, {
+  const project = await mustProject(init.projectId);
+  const spec = projectAgentSpec(project, app, {
     kind: opts.kind,
     cwd: opts.cwd,
     prompt: guidance ? `${opts.prompt}\nRepo guidance (rules Claude Code doesn't load by itself; read it before you start): ${guidance}` : opts.prompt,
@@ -530,7 +567,7 @@ async function runAgent(
     env: opts.env,
   });
   const ticket = TICKET_DIFF_STEPS.includes(opts.kind) && run.ticketId ? await repo.getTicket(run.ticketId) : null;
-  const baseSha = ticket ? await gitx.revParse(opts.cwd, await diffBase(await mustProject(init.projectId), ticket)) : null;
+  const baseSha = ticket ? await gitx.revParse(opts.cwd, await diffBase(project, ticket)) : null;
   await repo.updateRun(run.id, {
     prompt: spec.prompt,
     cwd: opts.cwd,
@@ -546,7 +583,8 @@ async function runAgent(
 
   let chain = Promise.resolve();
   const startedAt = Date.now();
-  const worktreeBefore = READ_ONLY_WORKTREE_STEPS.includes(opts.kind) ? await gitx.worktreeState(opts.cwd) : null;
+  const guardsTicketWorktree = READ_ONLY_WORKTREE_STEPS.includes(opts.kind) && opts.cwd !== project.repoPath;
+  const worktreeBefore = guardsTicketWorktree ? await gitx.worktreeState(opts.cwd) : null;
   const handle = startAgent(
     spec,
     (e) => {
@@ -768,21 +806,21 @@ async function runPlanReview(run: Run): Promise<void> {
   }
 }
 
+async function startApprovedPlan(initiativeId: string, approval: Pick<Message, 'author' | 'body'> & { runId?: string }): Promise<void> {
+  await sql`update tickets set status = 'todo', updated_at = now() where initiative_id = ${initiativeId} and status = 'proposed'`;
+  await repo.updateInitiative(initiativeId, { status: 'in_progress', approvedAt: new Date().toISOString() });
+  await repo.addMessage({ initiativeId, kind: 'approval', ...approval });
+  await startReadyTickets(initiativeId);
+}
+
 export async function approvePlan(initiativeId: string, note?: string): Promise<void> {
   const init = await mustInitiative(initiativeId);
   if (!['awaiting_approval', 'needs_input', 'failed'].includes(init.status) || !init.planJson) {
     throw new PipelineError('there is no finished plan waiting for approval');
   }
   if (await activeRunFor(init.id, null, ['plan', 'plan_review'])) throw new PipelineError('a planning agent is still running');
-  await sql`update tickets set status = 'todo', updated_at = now() where initiative_id = ${init.id} and status = 'proposed'`;
-  await repo.updateInitiative(init.id, { status: 'in_progress', approvedAt: new Date().toISOString() });
-  await repo.addMessage({
-    initiativeId: init.id,
-    author: 'human',
-    kind: 'approval',
-    body: note?.trim() ? `Approved the plan. ${note.trim()}` : 'Approved the plan.',
-  });
-  await startReadyTickets(init.id);
+  await stopArbiterFor(init.id, null);
+  await startApprovedPlan(init.id, { author: 'human', body: note?.trim() ? `Approved the plan. ${note.trim()}` : 'Approved the plan.' });
 }
 
 export async function requestPlanChanges(initiativeId: string, feedback: string): Promise<void> {
@@ -1230,7 +1268,7 @@ async function closeSupersededPrs(run: Run, init: Initiative, ticket: Ticket, re
     const old = await gh.findPr(ticket.worktreePath!, branch);
     if (old?.state !== 'OPEN') continue;
     try {
-      await gh.closePr(ticket.worktreePath!, old.number, `Superseded by #${replacement.number}, which builds ${ticketLabel(ticket)} again on a fresh branch.`);
+      await gh.closePr(ticket.worktreePath!, old.number, `Superseded by #${replacement.number}.`);
       await systemMessage(run, `Closed ${old.url}: ${replacement.url} replaces it.`);
     } catch (err) {
       await systemMessage(run, `${ticketLabel(ticket)}: could not close the superseded ${old.url}: ${(err as Error).message}`);
@@ -1283,14 +1321,8 @@ async function runReview(run: Run): Promise<void> {
   await finish(run, 'succeeded');
   const fresh = await mustTicket(ticket.id);
   if (s.postReviewsToPr && fresh.prNumber) {
-    const summary = renderVerification({
-      gate: gate ? { command: gate.prompt, result: gateResult(gate.verdict) } : null,
-      verdict,
-      round: run.round,
-      verifiedFixRounds: verifiedFixRounds(runs),
-      acceptance: parseAcceptance(step.output),
-    });
-    await gh.comment(fresh.worktreePath!, fresh.prNumber, `${summary}\n\n---\n\n${step.output!}`);
+    const body = reviewComment(step.output!, { gate: gateResult(gate?.verdict), verdict, round: run.round, acceptance: parseAcceptance(step.output) });
+    await gh.comment(fresh.worktreePath!, fresh.prNumber, body);
   }
 
   if (verdict === 'APPROVE') {
@@ -1615,15 +1647,10 @@ async function postVerifiedReplies(run: Run, ticket: Ticket, init: Initiative, f
       failures.push(`- Reply to ${thread.label} failed: ${(err as Error).message.slice(0, 300)}`);
     }
   }
-  if (!commits && !summaryLines.length && !failures.length) return;
-  const body = [
-    `**Factory fixer · round ${fixes[0].round}**`,
-    commits ? `\nPushed after the checks passed and a fresh verifier approved:\n${commits}` : '',
-    summaryLines.length ? `\n${summaryLines.join('\n')}` : '',
-    failures.length ? `\n${failures.join('\n')}` : '',
-  ].filter(Boolean).join('\n');
-  await gh.comment(ticket.worktreePath, ticket.prNumber, body).catch((err) => log(run, `Could not post the summary on the PR: ${(err as Error).message}`));
   if (failures.length) await systemMessage(run, `${ticketLabel(ticket)}: some PR replies failed.\n\n${failures.join('\n')}`);
+  if (!commits && !summaryLines.length) return;
+  const body = [`**Fix round ${fixes[0].round}**`, commits, summaryLines.join('\n')].filter(Boolean).join('\n\n');
+  await gh.comment(ticket.worktreePath, ticket.prNumber, body).catch((err) => log(run, `Could not post the summary on the PR: ${(err as Error).message}`));
 }
 
 async function runVerify(run: Run): Promise<void> {
@@ -1675,7 +1702,7 @@ async function runVerify(run: Run): Promise<void> {
   await finish(run, 'succeeded');
 
   if (verdict === 'APPROVE') {
-    const commits = (await gitx.git(wt, ['log', '--reverse', '--format=- %h %s', `${start}..HEAD`])).stdout.trim();
+    const commits = (await gitx.git(wt, ['log', '--reverse', '--format=- `%h` %s', `${start}..HEAD`])).stdout.trim();
     const fresh = await mustTicket(ticket.id);
     const pushed = commits && s.createPrs ? await publish(run, init, project, fresh) : false;
     await postVerifiedReplies(run, await mustTicket(ticket.id), init, fixes, pushed ? commits : '', !commits || !!pushed);
@@ -1750,6 +1777,200 @@ async function runAsk(run: Run): Promise<void> {
   if (await stoppedEarly(run, step, 'answer.md')) return;
   await finish(run, 'succeeded');
   await agentMessage(run, step.output!.trim(), 'answer');
+}
+
+const OWNER_ACTED_FIRST = 'you acted while the arbiter was deciding, so its decision was not applied.';
+const STEPS_AN_ARBITER_READS: RunKind[] = ['execute', 'gate', 'review', 'fix', 'verify'];
+
+interface Arbitration {
+  cwd: string;
+  fields: [string, string | null | undefined][];
+  situation: string;
+  evidence: string[];
+  env?: Record<string, string>;
+  approveBlocker: string | null;
+  stopped: Run | null;
+}
+
+async function stopArbiterFor(initiativeId: string, ticketId: string | null): Promise<void> {
+  const arbiter = await activeRunFor(initiativeId, ticketId, ['arbitrate']);
+  if (!arbiter) return;
+  await cancelRun(arbiter.id);
+  for (let i = 0; i < 40 && inFlight.has(arbiter.id); i++) await new Promise((res) => setTimeout(res, 250));
+}
+
+async function handOverToArbiter(run: Run): Promise<void> {
+  if (run.kind === 'arbitrate' || run.kind === 'ask') return;
+  if ((await repo.getRun(run.id))?.status === 'canceled') return;
+  const init = await repo.getInitiative(run.initiativeId);
+  const ticket = run.ticketId ? await repo.getTicket(run.ticketId) : null;
+  if (!init || (run.ticketId && !ticket) || !waitsForOwner(init, ticket)) return;
+  const s = repo.initiativeSettings(init);
+  if (!s.autoArbiter) return;
+  const decided = await repo.arbiterDecisionsSinceOwner(init.id, ticket?.id ?? null);
+  if (decided >= s.maxArbiterDecisions) {
+    const subject = ticket ? `${ticketLabel(ticket)}: the arbiter` : 'The arbiter';
+    await systemMessage({ initiativeId: init.id, ticketId: ticket?.id }, `${subject} decided ${decided} times since you last stepped in, so this waits for you.`);
+    return;
+  }
+  await enqueue({ kind: 'arbitrate', initiativeId: init.id, ticketId: ticket?.id ?? null, trigger: 'auto' });
+}
+
+function latestStepOutputs(runsNewestFirst: Run[], dir: string): string[] {
+  return STEPS_AN_ARBITER_READS.flatMap((kind) => {
+    const r = runsNewestFirst.find((x) => x.kind === kind && x.outputMd);
+    if (!r) return [];
+    return [r.outputPath && fs.existsSync(r.outputPath) ? r.outputPath : write(path.join(dir, `latest-${kind}.md`), r.outputMd!)];
+  });
+}
+
+async function ownerHistory(init: Initiative, ticket: Ticket | null, dir: string): Promise<string[]> {
+  const ticketId = ticket?.id ?? null;
+  const arbiterRuns = new Set((await sql<{ id: string }[]>`select id from runs where ${repo.ticketScope(init.id, ticketId)} and kind = 'arbitrate'`).map((r) => r.id));
+  const said = (await repo.listMessages(init.id)).filter((m) => m.ticketId === ticketId && (m.author === 'human' || (!!m.runId && arbiterRuns.has(m.runId))));
+  return said.length ? [write(path.join(dir, 'owner-history.md'), renderOwnerHistory(said))] : [];
+}
+
+async function planArbitration(init: Initiative, project: Project, dir: string): Promise<Arbitration> {
+  const s = repo.initiativeSettings(init);
+  const review = await repo.latestRun(init.id, null, 'plan_review');
+  const currentReview = review?.outputMd && review.round === init.planRound ? review : null;
+  const stopped = await repo.lastStoppedStep(init.id, null);
+  const situation = renderPlanSituation({
+    init,
+    maxPlanRounds: s.maxPlanRounds,
+    reviewVerdict: parseVerdict('plan_review', currentReview?.verdict),
+    failure: stopped?.status === 'failed' ? stopped.error : null,
+  });
+  const approvable = init.status === 'awaiting_approval' && init.planJson;
+  return {
+    cwd: project.repoPath,
+    fields: [
+      ['Main checkout (read-only)', project.repoPath],
+      ['Base branch', init.baseBranch],
+      ['Plan round', String(init.planRound)],
+      ['Ticket limit', String(s.maxTickets)],
+    ],
+    situation: write(path.join(dir, 'situation.md'), situation),
+    evidence: [
+      ...(init.planMd ? [write(path.join(dir, 'plan.md'), init.planMd)] : []),
+      ...(approvable ? [write(path.join(dir, 'plan.json'), JSON.stringify(init.planJson, null, 2))] : []),
+      ...(currentReview ? [write(path.join(dir, 'plan-review.md'), currentReview.outputMd!)] : []),
+      ...existing([path.join(planRoundDir(init, init.planRound), 'plan-paths.md'), path.join(planRoundDir(init, init.planRound + 1), 'plan-errors.md')]),
+    ],
+    approveBlocker: planApprovalBlocker(init),
+    stopped,
+  };
+}
+
+async function ticketArbitration(init: Initiative, project: Project, ticket: Ticket, dir: string): Promise<Arbitration> {
+  const s = repo.initiativeSettings(init);
+  const stopped = await repo.lastStoppedStep(init.id, ticket.id);
+  const worktree = ticket.worktreePath && fs.existsSync(ticket.worktreePath) ? ticket.worktreePath : null;
+  const base = await diffBase(project, ticket);
+  const approveBlocker = ticketApprovalBlocker(ticket, {
+    commitsAhead: worktree ? await gitx.commitsAhead(worktree, base) : null,
+    unverifiedFix: !!(await unverifiedFix(ticket.id)),
+  });
+  const outputs = await sql<Run[]>`select * from runs where ticket_id = ${ticket.id} and output_md is not null order by queued_at desc`;
+  return {
+    cwd: worktree ?? project.repoPath,
+    fields: [
+      ['Initiative', init.title],
+      [worktree ? 'Worktree (read-only)' : 'Main checkout (read-only)', worktree ?? project.repoPath],
+      ['Branch', ticket.branch],
+      ['Base', base],
+      ['Diff', worktree ? `git diff ${base}...HEAD` : null],
+      ['PR', ticket.prUrl],
+      ["Ticket folder (every round's files)", ticketDir(init, ticket)],
+    ],
+    situation: write(path.join(dir, 'situation.md'), renderTicketSituation({ ticket, stopped, maxRounds: s.maxRounds, approveBlocker })),
+    evidence: [
+      writeTicket(init, ticket, await repo.listTickets(init.id)),
+      ...(init.planJson ? [write(path.join(dir, 'plan-context.md'), renderPlanContext(init.planJson))] : []),
+      ...latestStepOutputs(outputs, dir),
+    ],
+    env: worktree ? factoryEnv(ticket, base) : undefined,
+    approveBlocker,
+    stopped,
+  };
+}
+
+async function runArbitrate(run: Run): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const project = await mustProject(init.projectId);
+  const ticket = run.ticketId ? await mustTicket(run.ticketId) : null;
+  if (!waitsForOwner(init, ticket)) {
+    await finish(run, 'succeeded', { verdict: 'DECISION: NOTHING-TO-DO', outputMd: 'DECISION: NOTHING-TO-DO\n\nThe owner acted before the arbiter started.' });
+    return;
+  }
+  const dir = arbiterDir(init, ticket, run.id);
+  const arbitration = ticket ? await ticketArbitration(init, project, ticket, dir) : await planArbitration(init, project, dir);
+  const out = path.join(dir, 'decision.md');
+  const prompt = header(
+    `Factory step: arbitrate. Initiative: ${init.title}${ticket ? ` · Ticket: ${ticketLabel(ticket)} (key ${ticket.key})` : ''}`,
+    arbitration.fields,
+    [arbitration.situation, writeBrief(init, project), ...(await ownerHistory(init, ticket, dir)), ...arbitration.evidence],
+    [out],
+    'Reply with one line: the first line of decision.md.',
+  );
+  const step = await runAgent(run, { kind: 'arbitrate', cwd: arbitration.cwd, prompt, runDir: dir, outputPath: out, env: arbitration.env });
+  if (await stoppedEarly(run, step, 'decision.md')) return;
+  const decision = parseVerdict('arbitrate', step.output) as Decision | null;
+  if (!decision) return failMalformedVerdict(run, step.output);
+  await finish(run, 'succeeded');
+  const text = decisionText(step.output!);
+  if (ticket) await applyTicketDecision(run, decision, text, arbitration);
+  else await applyPlanDecision(run, decision, text, arbitration);
+}
+
+async function applyPlanDecision(run: Run, decision: Decision, text: DecisionText, arbitration: Arbitration): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  if (!waitsForOwner(init, null)) return systemMessage(run, `The plan: ${OWNER_ACTED_FIRST}`);
+  if (decision === 'APPROVE' && !arbitration.approveBlocker) {
+    return startApprovedPlan(init.id, { author: 'agent', runId: run.id, body: `**Arbiter approved the plan.** ${text.reason}` });
+  }
+  if (decision === 'RETRY') {
+    await agentMessage(run, arbiterInstructions('Arbiter sent the plan back to a fresh planner', text), 'feedback');
+    await enqueue({ kind: 'plan', initiativeId: init.id, trigger: 'auto' });
+    return;
+  }
+  await agentMessage(run, `**The plan needs you.** ${escalationQuestion(decision, text, arbitration.approveBlocker)}`);
+}
+
+async function applyTicketDecision(run: Run, decision: Decision, text: DecisionText, arbitration: Arbitration): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const ticket = await mustTicket(run.ticketId!);
+  if (!waitsForOwner(init, ticket)) return systemMessage(run, `${ticketLabel(ticket)}: ${OWNER_ACTED_FIRST}`);
+  if (decision === 'APPROVE' && !arbitration.approveBlocker) return approveForOwner(run, init, ticket, text);
+  if (decision === 'RETRY') {
+    const step = retryStep(arbitration.stopped);
+    await agentMessage(run, arbiterInstructions(`Arbiter sent ${ticketLabel(ticket)} back to a fresh ${agentName(step)}`, text), readsFeedback(step) ? 'feedback' : 'comment');
+    try {
+      await enqueue({ kind: step, initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+      return;
+    } catch (err) {
+      return escalateTicket(run, ticket, `The arbiter's retry could not start: ${(err as Error).message}`);
+    }
+  }
+  await escalateTicket(run, ticket, escalationQuestion(decision, text, arbitration.approveBlocker));
+}
+
+async function approveForOwner(run: Run, init: Initiative, ticket: Ticket, text: DecisionText): Promise<void> {
+  await repo.updateTicket(ticket.id, { status: 'approved', lastVerdict: 'APPROVE', blockedReason: null });
+  await agentMessage(run, `**Arbiter approved ${ticketLabel(ticket)}.** ${text.reason}`, 'approval');
+  if (repo.initiativeSettings(init).postReviewsToPr && ticket.prNumber && ticket.worktreePath && ticket.lastVerdict === 'CHANGES') {
+    await gh
+      .comment(ticket.worktreePath, ticket.prNumber, `**Approved over the last review.** ${text.reason}`)
+      .catch((err) => log(run, `Could not post the approval on the PR: ${(err as Error).message}`));
+  }
+  await refreshInitiativeStatus(init.id);
+  await startReadyTickets(init.id);
+}
+
+async function escalateTicket(run: Run, ticket: Ticket, question: string): Promise<void> {
+  await repo.updateTicket(ticket.id, { blockedReason: escalatedReason(question, ticket.blockedReason) });
+  await agentMessage(run, `**${ticketLabel(ticket)} needs you.** ${question}`);
 }
 
 export async function ask(initiativeId: string, ticketId: string | null, body: string): Promise<Run> {
@@ -1837,6 +2058,7 @@ async function cleanUpMergedTickets(initiativeId: string): Promise<void> {
 
 export async function setTicketStatus(ticketId: string, status: 'approved' | 'merged' | 'todo'): Promise<void> {
   const t = await mustTicket(ticketId);
+  await stopArbiterFor(t.initiativeId, t.id);
   await repo.updateTicket(t.id, { status, blockedReason: null, ...(status === 'approved' ? { lastVerdict: 'APPROVE' } : {}) });
   await repo.addMessage({ initiativeId: t.initiativeId, ticketId: t.id, author: 'human', kind: 'event', body: `Marked ${ticketLabel(t)} as ${status}.` });
   if (status === 'merged') await cleanUpMergedTickets(t.initiativeId);

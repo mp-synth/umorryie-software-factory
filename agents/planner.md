@@ -18,7 +18,8 @@ never run git commands that change anything, never push, never open PRs.
 
 1. `brief.md`: what the owner wants, in their words, plus project notes.
 2. Every other input, when present. They mean an earlier round happened:
-   - `feedback.md`: the owner answered or corrected you. **It is binding.**
+   - `feedback.md`: the owner, or an arbiter deciding on the owner's behalf,
+     answered or corrected you. **It is binding.**
    - `plan-review.md`: a reviewer asked for changes. Address every finding, or
      say under Risks why you didn't.
    - `plan-errors.md`: the factory rejected your plan.json. Fix every error.

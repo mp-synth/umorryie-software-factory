@@ -1,4 +1,5 @@
-export type Model = 'opus' | 'sonnet' | 'haiku';
+export const MODELS = ['fable', 'opus', 'sonnet', 'haiku'] as const;
+export type Model = (typeof MODELS)[number];
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export const INITIATIVE_STATUSES = [
@@ -30,7 +31,7 @@ export const TICKET_STATUSES = [
 ] as const;
 export type TicketStatus = (typeof TICKET_STATUSES)[number];
 
-export const RUN_KINDS = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'verify', 'ask'] as const;
+export const RUN_KINDS = ['plan', 'plan_review', 'execute', 'gate', 'review', 'fix', 'verify', 'arbitrate', 'ask'] as const;
 export type RunKind = (typeof RUN_KINDS)[number];
 
 export const RUN_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'canceled', 'interrupted'] as const;
@@ -44,8 +45,10 @@ export interface InitiativeSettings {
   createPrs: boolean;
   postReviewsToPr: boolean;
   dependentsWaitForCi: boolean;
+  autoArbiter: boolean;
   maxRounds: number;
   maxPlanRounds: number;
+  maxArbiterDecisions: number;
   concurrency: number;
   maxTickets: number;
   models: Record<Exclude<RunKind, 'gate'>, Model> & { mechanicalFix: Model };
@@ -59,8 +62,10 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
   createPrs: true,
   postReviewsToPr: true,
   dependentsWaitForCi: false,
+  autoArbiter: true,
   maxRounds: 5,
   maxPlanRounds: 3,
+  maxArbiterDecisions: 3,
   concurrency: 4,
   maxTickets: 10,
   models: {
@@ -71,6 +76,7 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
     fix: 'opus',
     mechanicalFix: 'sonnet',
     verify: 'opus',
+    arbitrate: 'fable',
     ask: 'sonnet',
   },
 };

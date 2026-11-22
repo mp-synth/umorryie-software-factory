@@ -1,17 +1,19 @@
 # Software Factory
 
 A local control room for building features with Claude Code agents. You describe
-an outcome; a planner turns it into a reviewed plan and small tickets; you approve;
-fresh agents build each ticket in its own git worktree, a fresh reviewer judges
-every branch, and a fresh fixer handles findings, failing checks and PR comments,
-with a fresh verifier approving every fix before it is pushed or answered on the PR —
-all tracked in a local Postgres and visible live in a dashboard.
+an outcome; a planner turns it into a reviewed plan and small tickets; a fresh
+arbiter approves it on your behalf; fresh agents build each ticket in its own git
+worktree, a fresh reviewer judges every branch, and a fresh fixer handles findings,
+failing checks and PR comments, with a fresh verifier approving every fix before it
+is pushed or answered on the PR — all tracked in a local Postgres and visible live
+in a dashboard. You review the draft PRs.
 
 ```
- brief ─▶ planner ─▶ plan reviewer ─▶ YOU approve ─▶ ┌ executor ─▶ checks ─▶ reviewer ─┐ ─▶ draft PR ready
-          (opus)      (opus)           or re-plan    │   (opus)    (gate)    (opus)    │
-                                                     └ fixer ─▶ checks ─▶ verifier ◀───┘ CHANGES / red / PR comments
-                                                       (opus · sonnet for CI/lint)  (opus) ─▶ push + replies
+ brief ─▶ planner ─▶ plan reviewer ─▶ arbiter ─▶ ┌ executor ─▶ checks ─▶ reviewer ─┐ ─▶ draft PR for you
+          (opus)      (opus)          (fable)    │   (opus)    (gate)    (opus)    │
+                                     or re-plan  └ fixer ─▶ checks ─▶ verifier ◀───┘ CHANGES / red / PR comments
+                                                   (opus · sonnet for CI/lint)  (opus) ─▶ push + replies
+                                         any step that stops for you ─▶ arbiter (fable) ─▶ approve / retry / you
 ```
 
 Every box is a **separate `claude -p` process with an empty context**. Agents
@@ -68,9 +70,49 @@ review → approval → 4 builds (two in parallel, stacked) → checks → 4 rev
 including one fresh executor resolving a merge conflict between two sibling
 tickets and one fix round from owner feedback, for about $2.50 of agent time.
 On a GitHub repo the same flow opens stacked draft PRs, posts each review on
-its PR (with a short "Factory checks" summary on top: the checks result, the verdict, verified fix rounds and the reviewer's acceptance table counts), leaves every PR in draft for you to mark ready, and **Fix all PRs** turns unresolved review
+its PR, leaves every PR in draft for you to mark ready, and **Fix all PRs** turns unresolved review
 threads into a fix round (the factory's own comments are ignored). It skips every ticket with nothing
 left to act on: no new review findings, failing checks or CI, conflicts, unanswered comments or feedback.
+
+What lands on a PR is written for its reviewer, not for agents. A review is one
+line (`Review round 2: CHANGES · checks passed · acceptance 3/4 met`) and one
+numbered item per finding: severity, `path:line`, the claim, the failure
+scenario and the suggested fix. The reviewer's evidence, summary, acceptance
+table, notes and earlier-round bookkeeping stay in the factory. A verified fix
+round posts `Fix round N`, its commits and one line per answered top-level
+comment; thread replies are one or two sentences that end in a commit sha or a
+`path:line`. Every agent whose text reaches people follows `agents/writing.md`.
+
+## The arbiter: you only review PRs
+
+The pipeline stops for a human in three places: a plan waiting for approval,
+a planner with questions (or planning that failed), and a ticket that needs
+you (an executor or fixer that reported BLOCKED, a review that still asks for
+changes or checks that still fail after the round limit, a verifier that
+blocked a fix twice, a rebuild that can't run, an agent that crashed or timed
+out). With **Arbiter decides for you** on (the default), each of these starts a
+fresh, read-only arbiter (Fable) that never saw the work. It reads why the step
+stopped, the brief, what you said before, the latest output of every step and
+the code, then writes one of three decisions:
+
+- **APPROVE**: the plan is approved and its first wave starts building, or the
+  ticket is marked approved and its dependents start. A ticket is never
+  approved with failing checks, nothing committed or an unverified fix. When
+  the PR's last review asked for changes, the PR gets one line saying why it
+  was approved anyway.
+- **RETRY**: its instructions go to a fresh planner, executor or fixer as
+  binding feedback, labelled as the arbiter's (it answers planner questions by
+  number). A step that crashed runs again.
+- **ESCALATE**: only for what you alone have (credentials, access, money,
+  production data, a costly product call the brief doesn't inform). The ticket
+  keeps waiting with the arbiter's one-line question on top of the reason.
+
+The arbiter decides at most **Arbiter decisions in a row** times (3) per plan or
+ticket since your last message or action there; after that it waits for you.
+Anything you do on that plan or ticket stops a running arbiter, and a decision
+that lands after you acted is not applied. While it decides, the ticket shows
+**Arbiter deciding** instead of **Needs you**, and the dashboard doesn't count
+it as waiting on you.
 
 Every 15 minutes a PR sweep does the same on its own for every open factory PR
 across all initiatives, and for every open PR you opened yourself in a
@@ -106,7 +148,7 @@ repo. Keep **Agents running at once** in Settings at 10 or more for that.
 | Initiative → Plan | High-level overview first (goal, summary, success criteria, definition of done), then edge cases, test strategy, risks, assumptions, the plan review and the full plan.md on demand. Paths the plan names that do not exist at the base are listed for the plan reviewer (never a rejection). **Approve & build** or **Request changes** (your words go to a fresh planner as binding feedback). Answer the planner's questions when it is blocked |
 | Initiative → Tickets | One row per ticket: status, verdict, PR, cost. Expand for what/goal/outcome, acceptance checks, guidance, branch/worktree, every agent run, and the latest output. **Run / Review / Fix** per ticket; **Run ready / Review all / Fix all PRs / Sync PRs** in bulk; edit a ticket before it starts; reset a ticket; mark approved/merged. The row shows the lines the ticket changed outside tests, lockfiles and files the repo marks `linguist-generated`, flagged when over 1.5 times its size budget (XS 50, S 200, M 500) |
 | Initiative → Activity | The conversation with the agents. **Ask** starts a read-only advisor that answers from the code; **Feedback** re-plans (before approval) or goes to a fresh fixer (per ticket); **Note** just records |
-| Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs, hold dependents until CI is green; round limits, parallelism and the model per step |
+| Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs, hold dependents until CI is green, the arbiter deciding for you; round limits, arbiter decisions in a row, parallelism and the model per step (Fable, Opus, Sonnet or Haiku) |
 | Sidebar | The theme switcher (system, light or dark) sits next to the live indicator |
 | Run drawer | Live stream of any agent: tool calls with inputs and results, text, thinking, the checks log, cost/tokens/turns. Its output file, the exact prompt header, and a `claude --resume` command to continue that session in your terminal. **Stop** kills it |
 | Agents | Every run across all initiatives, live |
@@ -123,9 +165,9 @@ repo. Keep **Agents running at once** in Settings at 10 or more for that.
 | in review | A fresh reviewer reads `git diff <base>...HEAD` and the initiative's goal, success criteria and definition of done, verifies each finding, answers APPROVE or CHANGES. An over-budget ticket carries a Size note in the review header |
 | changes requested | Waiting for a fixer (auto-fix runs it unless the round limit is reached) |
 | fixing | A fixer gives every item a verdict before touching code (VALID / PARTIAL / INVALID / UNCONFIRMED / NEEDS-HUMAN): a bug is fixed only after it is traced and gets a test that would fail without the fix (written, not run: CI runs tests, and the fixer re-runs only the tests that failed in the PR's CI, before and after its fix); a claim is rejected only by pointing at the code. Rounds with only failing checks, CI or conflicts get a cheaper mechanical fixer that first checks whether the base branch fails the same way and lists flaky runs for one re-run. Fixes are committed locally; after the checks pass, a fresh **verifier** reads the commits and drafted replies. Approved: the factory pushes, replies in each review thread, answers top-level comments in one summary, and resolves every thread it fixed once the fix is on the PR (bot threads it rejects with a code pointer too; a human's disputed or partly fixed thread stays open for them). Blocked: the branch is reset and a fresh fixer retries once with the findings; a second block pushes nothing and waits for you. When only rewriting pushed commits would fix the branch (someone else's commit in its history), the fixer answers REBUILD: the factory builds the ticket again on a fresh `-vN` branch and closes the old PR once the new one opens, unless another ticket already builds on it or it was built 3 times. When a PR has nothing to act on, no agent is started |
-| approved | Reviewer would merge it. The PR stays a draft until you mark it ready. Dependents start (with "Dependents wait for green CI" on, only once the PR's CI is green or has no checks; CI shows on the ticket row) |
+| approved | The reviewer, or the arbiter over the reviewer's remaining findings, would merge it. The PR stays a draft until you mark it ready. Dependents start (with "Dependents wait for green CI" on, only once the PR's CI is green or has no checks; CI shows on the ticket row) |
 | merged | Seen by Sync PRs (automatic every 5 min) or marked by you. Unblocks dependents. Its local worktree is removed, and its local branch too once no unmerged ticket is stacked on it |
-| needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row |
+| needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row. With the arbiter on, it decides first and the row shows **Arbiter deciding**; it stays **Needs you** only when the arbiter escalates or has used its decisions |
 
 Dependent tickets are **stacked**: a ticket whose dependency isn't merged yet
 branches from the dependency's branch and its PR targets it. On GitHub the
@@ -158,9 +200,10 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
 - **`~/.software-factory/worktrees/`**: one git worktree per ticket, removed
   once the ticket is merged. Your own checkout is never modified.
 - **`agents/*.md`**: the role instructions for planner, plan reviewer, executor,
-  reviewer, fixer, mechanical fixer, fix verifier and advisor, plus the shared
-  `repo-rules.md` (every agent) and `code-style.md` (agents that write or
-  judge code). Edit them to change how the factory thinks.
+  reviewer, fixer, mechanical fixer, fix verifier, arbiter and advisor, plus the
+  shared `repo-rules.md` (every agent), `code-style.md` (agents that write or
+  judge code) and `writing.md` (agents whose text reaches people: executor,
+  reviewer, fixer, arbiter). Edit them to change how the factory thinks.
 
 ## Guardrails
 

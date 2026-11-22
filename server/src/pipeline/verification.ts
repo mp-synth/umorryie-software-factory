@@ -1,4 +1,3 @@
-import { parseVerdict } from './verdict.ts';
 import { section } from './plan.ts';
 
 export interface AcceptanceCounts {
@@ -7,12 +6,19 @@ export interface AcceptanceCounts {
   unverified: number;
 }
 
-export interface VerificationFacts {
-  gate: { command: string | null; result: string | null } | null;
+export interface ReviewFacts {
+  gate: string | null;
   verdict: string;
   round: number;
-  verifiedFixRounds: number;
   acceptance: AcceptanceCounts | null;
+}
+
+interface Finding {
+  severity: string | null;
+  location: string | null;
+  claim: string;
+  scenario: string | null;
+  fix: string | null;
 }
 
 const RESULTS = ['met', 'unmet', 'unverified'] as const;
@@ -48,20 +54,62 @@ export function gateResult(verdict: string | null | undefined): string | null {
   return /^GATE:\s*(PASS|FAIL|SKIPPED)\b/i.exec(verdict ?? '')?.[1].toUpperCase() ?? null;
 }
 
-export function verifiedFixRounds(runs: { kind: string; outputMd: string | null }[]): number {
-  return runs.filter((r) => r.kind === 'verify' && parseVerdict('verify', r.outputMd) === 'APPROVE').length;
+const GATE_TEXT: Record<string, string> = { PASS: 'checks passed', FAIL: 'checks failed', SKIPPED: 'no checks configured' };
+const FINDING_HEADER = /^(?:R[\d.]+\s+)?\[?(blocker|major|minor|nit)\]?\s+(.+)$/i;
+const LOCATED_CLAIM = /^`?([^\s`]*[./:][^\s`]*)`?\s+[—–-]{1,2}\s+(.+)$/;
+const SCENARIO = /^[-*]\s*\*{0,2}failure scenario\*{0,2}:\*{0,2}\s*/i;
+const SUGGESTED_FIX = /^[-*]\s*\*{0,2}suggested fix\*{0,2}:\*{0,2}\s*/i;
+
+function factsLine(f: ReviewFacts): string {
+  const parts = [`**Review round ${f.round}: ${f.verdict}**`];
+  if (f.gate && GATE_TEXT[f.gate]) parts.push(GATE_TEXT[f.gate]);
+  if (f.acceptance) {
+    const { met, unmet, unverified } = f.acceptance;
+    parts.push(`acceptance ${met}/${met + unmet + unverified} met${unverified ? `, ${unverified} unverified` : ''}`);
+  }
+  return parts.join(' · ');
 }
 
-export function renderVerification(f: VerificationFacts): string {
-  const bullets: string[] = [];
-  if (f.gate?.result) {
-    const command = f.gate.command?.replace(/\s+/g, ' ').trim();
-    bullets.push(`Checks command${command ? ` \`${command}\`` : ''}: ${f.gate.result}`);
-  }
-  bullets.push(`Review round ${f.round}: ${f.verdict}`);
-  if (f.verifiedFixRounds > 0) bullets.push(`Fix rounds approved by a verifier: ${f.verifiedFixRounds}`);
-  if (f.acceptance) {
-    bullets.push(`Acceptance checks, as the reviewer read them: ${f.acceptance.met} met, ${f.acceptance.unmet} unmet, ${f.acceptance.unverified} unverified`);
-  }
-  return ['**Factory checks**', '', ...bullets.map((b) => `- ${b}`), '', "Not run here: tests. They run in this PR's CI."].join('\n');
+function field(lines: string[], label: RegExp): string | null {
+  const line = lines.find((l) => label.test(l));
+  return line ? line.replace(label, '').trim() || null : null;
+}
+
+function parseFinding(block: string): Finding {
+  const [header, ...rest] = block.split('\n').map((l) => l.trim());
+  const severity = FINDING_HEADER.exec(header);
+  const claimText = severity ? severity[2] : header;
+  const located = LOCATED_CLAIM.exec(claimText);
+  return {
+    severity: severity ? severity[1].toLowerCase() : null,
+    location: located ? located[1] : null,
+    claim: located ? located[2] : claimText,
+    scenario: field(rest, SCENARIO),
+    fix: field(rest, SUGGESTED_FIX),
+  };
+}
+
+function parseFindings(reviewMd: string): Finding[] | null {
+  const body = section(reviewMd, 'Findings');
+  if (!body || /^none\.?$/i.test(body)) return [];
+  if (!body.startsWith('###')) return null;
+  return body
+    .split(/^###\s+/m)
+    .map((b) => b.trim())
+    .filter(Boolean)
+    .map(parseFinding);
+}
+
+const asSentence = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+function renderFinding(f: Finding, n: number): string {
+  const where = [f.severity && `**${f.severity}**`, f.location && `\`${f.location}\``].filter(Boolean).join(' ');
+  const detail = [f.scenario && asSentence(f.scenario), f.fix && `Fix: ${f.fix}`].filter(Boolean).join(' ');
+  return [`${n}. ${where ? `${where} — ` : ''}${f.claim}`, detail && `   ${detail}`].filter(Boolean).join('\n');
+}
+
+export function reviewComment(reviewMd: string, facts: ReviewFacts): string {
+  const findings = parseFindings(reviewMd);
+  const body = findings ? findings.map((f, n) => renderFinding(f, n + 1)).join('\n') : section(reviewMd, 'Findings');
+  return [factsLine(facts), body].filter(Boolean).join('\n\n');
 }

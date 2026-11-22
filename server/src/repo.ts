@@ -116,26 +116,32 @@ export async function listInitiativeSummaries(): Promise<InitiativeSummary[]> {
     order by (i.status = 'archived'), i.updated_at desc`;
   const counts = await sql<{ initiativeId: string; status: string; n: number }[]>`
     select initiative_id, status, count(*)::int as n from tickets group by initiative_id, status`;
+  const arbitrating = await sql<{ initiativeId: string; ticketId: string | null }[]>`
+    select initiative_id, ticket_id from runs where kind = 'arbitrate' and status in ('queued','running')`;
   return rows.map((r) => {
     const ticketCounts: Record<string, number> = {};
     for (const c of counts) if (c.initiativeId === r.id) ticketCounts[c.status] = c.n;
     const ticketTotal = Object.entries(ticketCounts)
       .filter(([s]) => s !== 'canceled')
       .reduce((a, [, n]) => a + n, 0);
+    const scopes = arbitrating.filter((a) => a.initiativeId === r.id);
     return {
       ...normalizeInitiative(r),
       ticketCounts,
       ticketTotal,
-      attention: attentionFor(r.status, ticketCounts),
+      attention: attentionFor(r.status, ticketCounts, { plan: scopes.some((a) => !a.ticketId), tickets: scopes.filter((a) => a.ticketId).length }),
     } as InitiativeSummary;
   });
 }
 
-export function attentionFor(status: string, counts: Record<string, number>): string | null {
-  if (status === 'awaiting_approval') return 'Plan ready for your review';
-  if (status === 'needs_input') return 'Planner has questions for you';
-  if (status === 'failed') return 'Planning failed';
-  if (counts.blocked) return `${counts.blocked} ticket${counts.blocked > 1 ? 's' : ''} blocked`;
+export function attentionFor(status: string, counts: Record<string, number>, arbitrating: { plan: boolean; tickets: number }): string | null {
+  if (!arbitrating.plan) {
+    if (status === 'awaiting_approval') return 'Plan ready for your review';
+    if (status === 'needs_input') return 'Planner has questions for you';
+    if (status === 'failed') return 'Planning failed';
+  }
+  const blocked = (counts.blocked ?? 0) - arbitrating.tickets;
+  if (blocked > 0) return `${blocked} ticket${blocked > 1 ? 's' : ''} blocked`;
   return null;
 }
 
@@ -243,6 +249,24 @@ export async function listRuns(opts: { initiativeId?: string; ticketId?: string;
 
 export async function listRunsById(id: string): Promise<Run[]> {
   return sql<Run[]>`${runsWithTitles()} where r.id = ${id}`;
+}
+
+export async function arbiterDecisionsSinceOwner(initiativeId: string, ticketId: string | null): Promise<number> {
+  const [{ n }] = await sql<{ n: number }[]>`
+    select count(*)::int as n from runs
+    where ${ticketScope(initiativeId, ticketId)} and kind = 'arbitrate' and status = 'succeeded'
+      and upper(regexp_replace(verdict, '[[:space:]]+', '', 'g')) in ('DECISION:APPROVE', 'DECISION:RETRY')
+      and queued_at > coalesce(
+        (select max(created_at) from messages where ${ticketScope(initiativeId, ticketId)} and author = 'human'),
+        'epoch'::timestamptz)`;
+  return n;
+}
+
+export async function lastStoppedStep(initiativeId: string, ticketId: string | null): Promise<Run | null> {
+  const [r] = await sql<Run[]>`
+    select * from runs where ${ticketScope(initiativeId, ticketId)} and kind not in ('arbitrate', 'ask') and status not in ('queued', 'running')
+    order by queued_at desc limit 1`;
+  return r ?? null;
 }
 
 export async function latestRun(initiativeId: string, ticketId: string | null, kind: string): Promise<Run | null> {

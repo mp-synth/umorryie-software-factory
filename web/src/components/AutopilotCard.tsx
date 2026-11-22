@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query';
 import { Gauge } from 'lucide-react';
-import type { Initiative, InitiativeSettings, Model } from '@factory/shared';
+import { MODELS, type Initiative, type InitiativeSettings, type Model } from '@factory/shared';
 import { api } from '@/lib/api';
 import { toastError } from '@/lib/toasts';
 import { Card, CardHeader, Select, Switch } from './ui';
@@ -13,9 +13,10 @@ const TOGGLES: { key: keyof InitiativeSettings; label: string }[] = [
   { key: 'createPrs', label: 'Push & open draft PRs' },
   { key: 'postReviewsToPr', label: 'Post reviews on PRs' },
   { key: 'dependentsWaitForCi', label: 'Dependents wait for green CI' },
+  { key: 'autoArbiter', label: 'Arbiter decides instead of waiting for you' },
 ];
 
-const MODELS: { key: keyof InitiativeSettings['models']; label: string }[] = [
+const ROLES: { key: keyof InitiativeSettings['models']; label: string }[] = [
   { key: 'plan', label: 'Planner' },
   { key: 'plan_review', label: 'Plan reviewer' },
   { key: 'execute', label: 'Executor' },
@@ -23,8 +24,11 @@ const MODELS: { key: keyof InitiativeSettings['models']; label: string }[] = [
   { key: 'fix', label: 'Fixer' },
   { key: 'mechanicalFix', label: 'Fixer (CI/lint only)' },
   { key: 'verify', label: 'Fix verifier' },
+  { key: 'arbitrate', label: 'Arbiter' },
   { key: 'ask', label: 'Advisor' },
 ];
+
+const MODEL_LABELS: Record<Model, string> = { fable: 'Fable', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
 
 export function AutopilotCard({ initiative: i }: { initiative: Initiative }) {
   const save = useMutation({
@@ -42,21 +46,24 @@ export function AutopilotCard({ initiative: i }: { initiative: Initiative }) {
             <Switch label={t.label} checked={s[t.key] as boolean} onChange={(v) => save.mutate({ [t.key]: v })} />
           </label>
         ))}
-        <div className="grid grid-cols-3 gap-2 px-4 py-3">
+        <div className="grid grid-cols-2 gap-2 px-4 py-3">
           <NumberField label="Rounds" value={s.maxRounds} min={1} max={10} onChange={(v) => save.mutate({ maxRounds: v })} />
           <NumberField label="Parallel" value={s.concurrency} min={1} max={10} onChange={(v) => save.mutate({ concurrency: v })} />
           <NumberField label="Plan rounds" value={s.maxPlanRounds} min={1} max={5} onChange={(v) => save.mutate({ maxPlanRounds: v })} />
+          <NumberField label="Arbiter decisions in a row" value={s.maxArbiterDecisions} min={1} max={10} onChange={(v) => save.mutate({ maxArbiterDecisions: v })} />
         </div>
         <div className="space-y-1.5 px-4 py-3">
           <div className="section-title mb-1">Models</div>
-          {MODELS.map((m) => (
+          {ROLES.map((m) => (
             <div key={m.key} className="flex items-center justify-between gap-3">
               <span className="text-xs text-zinc-400">{m.label}</span>
               <div className="w-[104px]">
                 <Select value={s.models[m.key]} onChange={(e) => save.mutate({ models: { ...s.models, [m.key]: e.target.value as Model } })} className="h-7 text-2xs">
-                  <option value="opus">Opus</option>
-                  <option value="sonnet">Sonnet</option>
-                  <option value="haiku">Haiku</option>
+                  {MODELS.map((model) => (
+                    <option key={model} value={model}>
+                      {MODEL_LABELS[model]}
+                    </option>
+                  ))}
                 </Select>
               </div>
             </div>

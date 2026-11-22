@@ -14,6 +14,11 @@ const AUTOPILOT: { key: keyof InitiativeSettings; label: string; hint: string }[
   { key: 'autoReview', label: 'Review every branch', hint: 'A fresh reviewer runs after each build or fix.' },
   { key: 'autoFix', label: 'Fix review findings', hint: 'A fresh fixer handles CHANGES and failing checks, up to the round limit.' },
   { key: 'createPrs', label: 'Push & open draft PRs', hint: 'Needs a GitHub origin and gh auth. Never force-pushes or merges.' },
+  {
+    key: 'autoArbiter',
+    label: 'Arbiter decides for you',
+    hint: 'When the plan waits for approval, the planner has questions or a ticket needs you, a fresh Fable arbiter approves, answers or sends it back. You get only what it cannot decide.',
+  },
 ];
 
 export function NewInitiativeDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
@@ -60,10 +65,12 @@ export function NewInitiativeDialog({ open, onOpenChange }: { open: boolean; onO
       onOpenChange={onOpenChange}
       wide
       title="New initiative"
-      description="Describe the outcome. A fresh planner reads the repo, plans it, and splits it into tickets for you to approve."
+      description="Describe the outcome. A fresh planner reads the repo, plans it, and splits it into small tickets."
       footer={
         <>
-          <span className="mr-auto text-2xs text-zinc-500">Planning starts immediately · nothing is built until you approve</span>
+          <span className="mr-auto text-2xs text-zinc-500">
+            Planning starts immediately · {settings.autoArbiter ? 'the arbiter approves the plan unless it needs you' : 'nothing is built until you approve'}
+          </span>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
@@ -103,7 +110,10 @@ export function NewInitiativeDialog({ open, onOpenChange }: { open: boolean; onO
           <Field label="Title">
             <Input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Team invites with email verification" maxLength={120} />
           </Field>
-          <Field label="Brief" hint="What should be true when this is done? Constraints, non-goals, links to docs. The planner asks you if something blocks it.">
+          <Field
+            label="Brief"
+            hint={`What should be true when this is done? Constraints, non-goals, links to docs. ${settings.autoArbiter ? "The arbiter answers the planner's questions from this brief, so put your preferences here." : 'The planner asks you if something blocks it.'}`}
+          >
             <Textarea
               value={brief}
               onChange={(e) => setBrief(e.target.value)}

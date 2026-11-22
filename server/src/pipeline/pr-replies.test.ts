@@ -80,7 +80,7 @@ test('a bot thread rejected with a code pointer resolves with or without the [bo
 test('top-level comments are answered in the summary; factory-only items stay off the PR', () => {
   const planned = planReplies(parseReplies(fixMd).replies, items);
   assert.deepEqual(planned.commentReplies.map(renderCommentReply), [
-    '- Re @bob (https://github.com/o/r/pull/7#issuecomment-1): Whether guests can invite is a product call.',
+    '- [@bob](https://github.com/o/r/pull/7#issuecomment-1): Whether guests can invite is a product call.',
   ]);
 });
 

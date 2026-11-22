@@ -29,6 +29,10 @@ export function askDir(i: Initiative, runId: string): string {
   return path.join(initiativeDir(i), 'ask', runId.slice(0, 8));
 }
 
+export function arbiterDir(i: Initiative, t: Ticket | null, runId: string): string {
+  return path.join(t ? ticketDir(i, t) : path.join(initiativeDir(i), 'plan'), 'arbiter', runId.slice(0, 8));
+}
+
 export function worktreePath(p: Project, i: Initiative, t: Ticket): string {
   return path.join(config.home, 'worktrees', slugify(p.name, 30), initiativeFolder(i), `${seqLabel(t.seq)}-${t.key}`);
 }
@@ -95,24 +99,32 @@ export function renderTicket(t: Ticket, all: Ticket[]): string {
   ].join('\n');
 }
 
+const FEEDBACK_SOURCE: Record<Message['author'], string> = { human: 'The owner', agent: "The arbiter, on the owner's behalf", system: 'The factory' };
+const SPEAKER: Record<Message['author'], string> = { human: 'Owner', agent: 'Agent', system: 'System' };
+
 export function renderFeedback(msgs: Message[], title: string): string {
   return [
     `# ${title}`,
     '',
-    'The project owner wrote this. It is binding on product decisions; still check it against the code.',
+    'The project owner wrote this, or an arbiter decided it on their behalf. It is binding on product decisions; still check it against the code.',
     '',
-    ...msgs.map((m) => `## ${new Date(m.createdAt).toISOString()}\n\n${m.body.trim()}\n`),
+    ...msgs.map((m) => `## ${FEEDBACK_SOURCE[m.author]}, ${new Date(m.createdAt).toISOString()}\n\n${m.body.trim()}\n`),
   ].join('\n');
 }
 
+function renderMessages(msgs: Message[]): string[] {
+  return msgs
+    .slice(-30)
+    .filter((m) => m.kind !== 'event')
+    .flatMap((m) => [`### ${SPEAKER[m.author]} (${m.kind})`, '', m.body.trim(), '']);
+}
+
 export function renderConversation(msgs: Message[], question: string): string {
-  const lines = ['# Conversation so far', ''];
-  for (const m of msgs.slice(-30)) {
-    if (m.kind === 'event') continue;
-    lines.push(`### ${m.author === 'human' ? 'Owner' : m.author === 'agent' ? 'Agent' : 'System'} (${m.kind})`, '', m.body.trim(), '');
-  }
-  lines.push('# The question to answer now', '', question.trim());
-  return lines.join('\n');
+  return ['# Conversation so far', '', ...renderMessages(msgs), '# The question to answer now', '', question.trim()].join('\n');
+}
+
+export function renderOwnerHistory(msgs: Message[]): string {
+  return ['# What the owner and earlier arbiter decisions said here', '', ...renderMessages(msgs)].join('\n');
 }
 
 export function writeBrief(i: Initiative, p: Project): string {

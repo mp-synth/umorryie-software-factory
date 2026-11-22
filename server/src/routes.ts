@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DEFAULT_INITIATIVE_SETTINGS, type ChangeEvent, type InitiativeDetail, type RunEvent } from '@factory/shared';
+import { DEFAULT_INITIATIVE_SETTINGS, MODELS, type ChangeEvent, type InitiativeDetail, type RunEvent } from '@factory/shared';
 import { claudeVersion, resolveClaudeBin } from './agents/claude.ts';
 import { config } from './config.ts';
 import { sql } from './db.ts';
@@ -17,7 +17,7 @@ import { renderReport } from './pipeline/report.ts';
 import * as repo from './repo.ts';
 
 const id = z.object({ id: z.string().uuid() });
-const model = z.enum(['opus', 'sonnet', 'haiku']);
+const model = z.enum(MODELS);
 
 const settingsPatch = z
   .object({
@@ -28,12 +28,14 @@ const settingsPatch = z
     createPrs: z.boolean(),
     postReviewsToPr: z.boolean(),
     dependentsWaitForCi: z.boolean(),
+    autoArbiter: z.boolean(),
     maxRounds: z.number().int().min(1).max(10),
     maxPlanRounds: z.number().int().min(1).max(5),
+    maxArbiterDecisions: z.number().int().min(1).max(10),
     concurrency: z.number().int().min(1).max(10),
     maxTickets: z.number().int().min(1).max(30),
     models: z
-      .object({ plan: model, plan_review: model, execute: model, review: model, fix: model, mechanicalFix: model, verify: model, ask: model })
+      .object({ plan: model, plan_review: model, execute: model, review: model, fix: model, mechanicalFix: model, verify: model, arbitrate: model, ask: model })
       .partial(),
   })
   .partial();

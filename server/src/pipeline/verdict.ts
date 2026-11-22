@@ -1,7 +1,7 @@
 import type { AgentResult } from '../agents/claude.ts';
 import { firstLine } from './plan.ts';
 
-export type VerdictKind = 'plan' | 'plan_review' | 'execute' | 'review' | 'fix' | 'verify';
+export type VerdictKind = 'plan' | 'plan_review' | 'execute' | 'review' | 'fix' | 'verify' | 'arbitrate';
 
 interface VerdictSpec {
   prefix: string;
@@ -15,6 +15,7 @@ export const VERDICTS: Record<VerdictKind, VerdictSpec> = {
   review: { prefix: 'VERDICT', tokens: ['APPROVE', 'CHANGES'] },
   fix: { prefix: 'FIX', tokens: ['APPLIED', 'NO-CHANGES', 'NOTHING-TO-DO', 'BLOCKED', 'REBUILD'] },
   verify: { prefix: 'VERDICT', tokens: ['APPROVE', 'BLOCK'] },
+  arbitrate: { prefix: 'DECISION', tokens: ['APPROVE', 'RETRY', 'ESCALATE'] },
 };
 
 export function parseVerdict(kind: VerdictKind, markdown: string | null | undefined): string | null {

@@ -77,7 +77,7 @@ late rounds that you could have raised in round one.
 VERDICT: APPROVE | CHANGES
 
 ## Summary
-- 3 to 5 bullets: what you checked and the outcome
+- 1 to 3 bullets: the outcome, as facts about the branch (not what you checked)
 
 ## Acceptance
 | Check | Result | Evidence |
@@ -85,10 +85,10 @@ VERDICT: APPROVE | CHANGES
 | <one acceptance check from ticket.md> | met / unmet / unverified | path:line, or the command you ran |
 
 ## Findings
-### R<round>.<n> [blocker | major | minor | nit] path/to/file.ext:line — <one-line claim>
-- Failure scenario: concrete inputs or state → wrong outcome
-- Evidence: what you traced or ran
-- Suggested fix: the smallest change that fixes it
+### R<round>.<n> [blocker | major | minor | nit] path/to/file.ext:line — <claim>
+- Failure scenario: one sentence: these inputs or this state → this wrong result
+- Evidence: the `path:line` you traced, or the command you ran
+- Suggested fix: one sentence: the smallest change that fixes it
 
 ## Previous findings
 - R<k>.<n>: fixed | not fixed | rebuttal accepted | rebuttal rejected (why)
@@ -107,5 +107,11 @@ Non-blocking observations. Optional.
   `unverified` means it can only be shown by running tests or the app, which
   happens in CI. A ticket without acceptance checks (an adopted PR) gets
   "None." instead of a table.
+- The claim is what is wrong, stated as a fact in under 120 characters:
+  "Duplicate invite returns 200 instead of 409", not "Consider handling
+  duplicates".
+- The PR gets the verdict and each finding's claim, failure scenario and
+  suggested fix, nothing else. Those three must stand on their own for a
+  reader who never sees the rest of review.md.
 
 When you're done, reply with one line: the first line of review.md.

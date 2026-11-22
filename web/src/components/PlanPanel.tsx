@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
-import type { InitiativeDetail, Run } from '@factory/shared';
+import type { InitiativeDetail, Run, RunKind } from '@factory/shared';
 import { api } from '@/lib/api';
 import { runKind, findSucceededRun, isRunInFlight } from '@/lib/status';
 import { cn, money, pad2, runDuration } from '@/lib/utils';
@@ -29,10 +29,12 @@ import { VerdictPill } from './StatusPill';
 import { useRunDrawer } from './RunDrawer';
 import { Button, Card, CardHeader, Chip, Skeleton, Textarea, LiveDot } from './ui';
 
+const PLAN_STEPS: RunKind[] = ['plan', 'plan_review', 'arbitrate'];
+
 export function PlanPanel({ detail }: { detail: InitiativeDetail }) {
   const { initiative: i, runs, tickets } = detail;
   const drawer = useRunDrawer();
-  const activePlanRun = runs.find((r) => !r.ticketId && (r.kind === 'plan' || r.kind === 'plan_review') && isRunInFlight(r));
+  const activePlanRun = runs.find((r) => !r.ticketId && PLAN_STEPS.includes(r.kind) && isRunInFlight(r));
   const lastReview = findSucceededRun(runs, 'plan_review');
   const lastPlan = findSucceededRun(runs, 'plan');
   const plan = i.planJson;
@@ -100,7 +102,7 @@ export function PlanPanel({ detail }: { detail: InitiativeDetail }) {
             </Button>
           </div>
         )}
-        {i.status === 'needs_input' && <Questions detail={detail} />}
+        {i.status === 'needs_input' && !activePlanRun && <Questions detail={detail} />}
         {plan && (
           <div className="space-y-5">
             {showReplan && canReplan && <ReplanBox initiativeId={i.id} onDone={() => setShowReplan(false)} />}
@@ -110,7 +112,9 @@ export function PlanPanel({ detail }: { detail: InitiativeDetail }) {
         {activePlanRun && plan && (
           <div className="mt-4 flex items-center gap-2 rounded-lg border border-cyan-400/20 bg-cyan-400/[0.05] px-3 py-2 text-xs text-cyan-200">
             <LiveDot />
-            {runKind[activePlanRun.kind].agent} is working on round {activePlanRun.round}. The overview below is the previous round.
+            {activePlanRun.kind === 'arbitrate'
+              ? `The arbiter is deciding on round ${activePlanRun.round} for you.`
+              : `${runKind[activePlanRun.kind].agent} is working on round ${activePlanRun.round}. The overview below is the previous round.`}
           </div>
         )}
       </div>
