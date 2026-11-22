@@ -29,6 +29,7 @@ import {
 import { mergedTicketCleanups } from './cleanup.ts';
 import { ticketLabel } from './labels.ts';
 import { pullRequestText } from './pull-request.ts';
+import { earlierBranches, rebuildBlocker } from './rebuild.ts';
 import { firstLine, section, validatePlan } from './plan.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
@@ -951,7 +952,7 @@ async function runExecute(run: Run): Promise<void> {
   if (feedback.length) inputs.push(writeFeedback(dir, feedback, ticketLabel(ticket)));
   const out = path.join(dir, 'build.md');
   if (fs.existsSync(out)) inputs.push(out);
-  for (const extra of ['merge-deps.md', 'advance-error.md']) {
+  for (const extra of ['merge-deps.md', 'advance-error.md', 'rebuild.md']) {
     const f = path.join(dir, extra);
     if (fs.existsSync(f)) inputs.unshift(f);
   }
@@ -1125,11 +1126,25 @@ async function publish(run: Run, init: Initiative, project: Project, ticket: Tic
   if (pr) {
     await repo.updateTicket(ticket.id, { prNumber: pr.number, prUrl: pr.url, prState: 'OPEN' });
     await systemMessage(run, `Opened draft PR for ${ticketLabel(ticket)}: ${pr.url}`);
+    await closeSupersededPrs(run, init, ticket, pr);
   } else {
     await log(run, `Could not open a PR: ${error}`);
     await systemMessage(run, `${ticketLabel(ticket)}: could not open a PR.\n\n\`\`\`\n${error}\n\`\`\``);
   }
   return true;
+}
+
+async function closeSupersededPrs(run: Run, init: Initiative, ticket: Ticket, replacement: gh.PrRef): Promise<void> {
+  for (const branch of earlierBranches(branchName(init, ticket), ticket.branch!)) {
+    const old = await gh.findPr(ticket.worktreePath!, branch);
+    if (old?.state !== 'OPEN') continue;
+    try {
+      await gh.closePr(ticket.worktreePath!, old.number, `Superseded by #${replacement.number}, which builds ${ticketLabel(ticket)} again on a fresh branch.`);
+      await systemMessage(run, `Closed ${old.url}: ${replacement.url} replaces it.`);
+    } catch (err) {
+      await systemMessage(run, `${ticketLabel(ticket)}: could not close the superseded ${old.url}: ${(err as Error).message}`);
+    }
+  }
 }
 
 async function runReview(run: Run): Promise<void> {
@@ -1371,6 +1386,10 @@ async function runFix(run: Run): Promise<void> {
     await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: why.slice(0, 2000) });
     return;
   }
+  if (/REBUILD/i.test(verdict)) {
+    await rebuildTicket(run, init, ticket, section(step.output!, 'Rebuild') ?? 'The fixer asked for a rebuild.');
+    return;
+  }
   if (/APPLIED/i.test(verdict)) {
     await enqueue({ kind: 'gate', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
     return;
@@ -1382,6 +1401,31 @@ async function runFix(run: Run): Promise<void> {
   }
   if (s.autoReview) await enqueue({ kind: 'review', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
   else await repo.updateTicket(ticket.id, { status: settledStatus(ticket) });
+}
+
+async function rebuildTicket(run: Run, init: Initiative, ticket: Ticket, why: string): Promise<void> {
+  const blocker = rebuildBlocker(ticket, branchName(init, ticket), await repo.listTickets(init.id));
+  if (blocker) {
+    await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: `${why}\n\n${blocker}`.slice(0, 2000) });
+    await systemMessage(run, `${ticketLabel(ticket)} needs a rebuild. ${blocker}`);
+    return;
+  }
+  const review = readIfExists(path.join(roundDirOf(init, ticket, run), 'review.md'));
+  await resetTicket(ticket.id);
+  write(
+    path.join(ticketRoundDir(init, ticket, 1), 'rebuild.md'),
+    [
+      '# Build this ticket again from its base',
+      '',
+      'A fixer found that the previous build could only be repaired by rewriting commits that were already pushed,',
+      'so the factory removed its branch. You start on a fresh branch, and the factory closes the old PR once yours opens.',
+      '',
+      '## Why',
+      why,
+      ...(review ? ['', '## The review of the previous build', '', review] : []),
+    ].join('\n'),
+  );
+  await enqueue({ kind: 'execute', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
 }
 
 async function rerunUnrelatedFailures(run: Run, ticket: Ticket, fixMd: string): Promise<void> {
@@ -1620,7 +1664,7 @@ export async function resetTicket(ticketId: string): Promise<void> {
   });
   await systemMessage(
     { initiativeId: init.id, ticketId: t.id },
-    `Reset ${ticketLabel(t)}: removed its local worktree and branch.${t.prUrl ? ` The old PR (${t.prUrl}) was left as is; close it on GitHub if you don't need it.` : ''}`,
+    `Reset ${ticketLabel(t)}: removed its local worktree and branch.${t.prUrl ? ` The old PR (${t.prUrl}) stays open until the rebuilt ticket opens its own, which closes it.` : ''}`,
   );
   await refreshInitiativeStatus(init.id);
 }

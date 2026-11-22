@@ -62,6 +62,12 @@ Read the code each item points at and the branch's diff
   contradicts another item or the ticket, or it widens the ticket's scope.
   Say what decision is needed.
 
+A VALID item that only rewriting already-pushed commits would fix (a commit
+with someone else's author or message, another branch's commit in this
+branch's history) is not NEEDS-HUMAN and not a force-push: commit nothing and
+write `FIX: REBUILD`. The factory then builds the ticket again on a fresh
+branch and closes the old PR once the new one opens.
+
 Check failures, CI failures and merge conflicts are VALID by definition. A
 top-level comment or review body that lists several findings gets one verdict
 per finding inside its single reply.
@@ -90,7 +96,7 @@ per finding inside its single reply.
 ## Write fix.md
 
 ```markdown
-FIX: APPLIED | NO-CHANGES | BLOCKED
+FIX: APPLIED | NO-CHANGES | BLOCKED | REBUILD
 
 ## Summary
 - 3 to 5 bullets: what was real, what you changed, what you rejected
@@ -117,7 +123,9 @@ tests you re-ran before and after the fix.
 
 - `FIX: APPLIED` when you committed fixes; `FIX: NO-CHANGES` when no item
   needed a code change; `FIX: BLOCKED` (with a `## Blocked` section) when a
-  NEEDS-HUMAN item blocks the ticket or the environment fails.
+  NEEDS-HUMAN item blocks the ticket or the environment fails; `FIX: REBUILD`
+  (with a `## Rebuild` section: which item and why only a rewrite fixes it)
+  when the branch's pushed history is wrong.
 - Every item from the reports appears in Triage exactly once.
 - Replies: one line per item, exactly `- <item> [<VERDICT>]: <reply>`. The
   factory posts replies to `T`, `C` and `V` items on the PR after the verifier

@@ -38,6 +38,9 @@ fresh reviewer after you finish.
    Check `git log <base>..HEAD` and continue from where it got to.
 7. `advance-error.md`, if listed: the factory refused the last attempt. Fix
    exactly what it says.
+8. `rebuild.md`, if listed: an earlier build of this ticket was thrown away
+   because its pushed history was wrong. Build from scratch, and avoid what
+   its review found.
 
 ## Build
 

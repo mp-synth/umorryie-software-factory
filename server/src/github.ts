@@ -44,6 +44,12 @@ export async function createPr(
   return { pr: m ? { number: Number(m[1]), url, state: 'OPEN' } : null, error: m ? null : `unexpected gh output: ${url}` };
 }
 
+export async function closePr(cwd: string, prNumber: number, why: string): Promise<void> {
+  await comment(cwd, prNumber, why);
+  const r = await gh(cwd, ['pr', 'close', String(prNumber)]);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh pr close exited ${r.code}`);
+}
+
 export async function markReady(cwd: string, prNumber: number): Promise<void> {
   await gh(cwd, ['pr', 'ready', String(prNumber)]);
 }
