@@ -55,10 +55,14 @@ Work out, concretely and grounded in the code:
 - **Small.** One reviewable PR each: XS (< 50 lines), S (< 200), M (< 500),
   counting changed lines outside tests, lockfiles and generated files.
   Anything bigger is two tickets.
-- **Honest dependencies.** `depends_on` only when a ticket can't be built or
-  verified without the other's code. Maximize parallelism. A dependent
-  ticket's branch is stacked on its parent's branch, so keep the parent's
-  interfaces stable and name them in guidance.
+- **Dependencies make a stack.** `depends_on` only when a ticket can't be
+  built or verified without the other's code. Tickets connected by
+  dependencies become one stack in the order you list them: each ticket's
+  branch and PR sit on the ticket just before it, and they are reviewed and
+  merged bottom-up. So `depends_on` names that one ticket below it, and the
+  order is the order a reviewer should read them. Keep each ticket's
+  interfaces stable and name them in guidance. Tickets that need nothing from
+  the others stay independent and are built in parallel.
 - **Self-contained.** A fresh agent with only the ticket, plan.md and the repo
   must be able to build it. Name the files, helpers and patterns to use, and
   the repo's rules and skills that apply (e.g. "use the `audit_logs` skill",
@@ -150,7 +154,9 @@ a letter and uses letters, digits, `-`, `_` (max 32); `title` is 8–90
 characters and doesn't start with a digit; `what`/`goal`/`outcome` are 10–400
 characters; `depends_on` names existing keys, never itself, no cycles; `size`
 is XS, S or M; the ticket count is within the limit in your prompt. Order the
-tickets the way you would build them.
+tickets the way you would build them. The factory chains each group of
+connected tickets into a single line in that order, whatever `depends_on`
+says beyond it.
 
 When you're done, reply with one line: the first line of plan.md, then
 ` · <n> tickets`.

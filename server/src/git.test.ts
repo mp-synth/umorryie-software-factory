@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { countsTowardSize, diffLines, git, linesInNumstat, restoreHistoryFrom, worktreeChanges, worktreeState } from './git.ts';
+import { catchUpWith, countsTowardSize, diffLines, git, linesInNumstat, restoreHistoryFrom, worktreeChanges, worktreeState } from './git.ts';
 
 async function run(cwd: string, ...args: string[]): Promise<string> {
   const r = await git(cwd, args);
@@ -27,6 +27,29 @@ async function commitFile(dir: string, file: string, content: string, message: s
 }
 
 const subjects = (dir: string, range: string) => run(dir, 'log', '--format=%s', range);
+
+async function pushedFeature(): Promise<{ dir: string; github: string }> {
+  const { dir } = await repoWithBase();
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-remote-'));
+  await run(remote, 'init', '--quiet', '--bare');
+  await run(dir, 'remote', 'add', 'origin', remote);
+  await run(dir, 'checkout', '--quiet', '-b', 'feature');
+  await commitFile(dir, 'feature.txt', 'feature\n', 'feat: add the feature');
+  await run(dir, 'push', '--quiet', '-u', 'origin', 'main', 'feature');
+  const github = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-github-'));
+  await run(github, 'clone', '--quiet', '--branch', 'feature', remote, '.');
+  await run(github, 'config', 'user.email', 'github@example.com');
+  await run(github, 'config', 'user.name', 'GitHub');
+  return { dir, github };
+}
+
+async function rewriteOnGithub(github: string, dir: string): Promise<void> {
+  await commitFile(github, 'feature.txt', 'feature, rebased\n', 'feat: add the feature', '--amend');
+  await run(github, 'push', '--quiet', '--force', 'origin', 'feature');
+  await run(dir, 'fetch', '--quiet', 'origin');
+}
+
+const head = (dir: string, ref = 'HEAD') => run(dir, 'rev-parse', ref);
 
 test('leaves a branch alone when the agent only added commits', async () => {
   const { dir, base } = await repoWithBase();
@@ -72,6 +95,49 @@ test('restores an earlier round that the agent amended and keeps the new work on
   assert.equal(await run(dir, 'rev-parse', 'HEAD~1'), pushed);
   assert.equal(await subjects(dir, `${pushed}..HEAD`), 'Fix round 2 on the feature');
   assert.equal(fs.readFileSync(path.join(dir, 'feature.txt'), 'utf8'), 'feature, fixed\n');
+});
+
+test('catchUpWith reports a branch that matches its remote', async () => {
+  const { dir } = await pushedFeature();
+  assert.equal(await catchUpWith(dir, 'origin/feature'), 'current');
+});
+
+test('catchUpWith fast-forwards to commits pushed by someone else', async () => {
+  const { dir, github } = await pushedFeature();
+  await commitFile(github, 'more.txt', 'more\n', 'feat: more');
+  await run(github, 'push', '--quiet', 'origin', 'feature');
+  await run(dir, 'fetch', '--quiet', 'origin');
+
+  assert.equal(await catchUpWith(dir, 'origin/feature'), 'fast-forwarded');
+  assert.equal(await head(dir), await head(dir, 'origin/feature'));
+});
+
+test('catchUpWith leaves unpushed local commits alone', async () => {
+  const { dir } = await pushedFeature();
+  await commitFile(dir, 'local.txt', 'local\n', 'feat: not pushed yet');
+  const local = await head(dir);
+
+  assert.equal(await catchUpWith(dir, 'origin/feature'), 'ahead');
+  assert.equal(await head(dir), local);
+});
+
+test('catchUpWith follows a remote rewrite of a head the factory had pushed', async () => {
+  const { dir, github } = await pushedFeature();
+  await rewriteOnGithub(github, dir);
+
+  assert.equal(await catchUpWith(dir, 'origin/feature'), 'followed-rewrite');
+  assert.equal(await head(dir), await head(dir, 'origin/feature'));
+  assert.equal(fs.readFileSync(path.join(dir, 'feature.txt'), 'utf8'), 'feature, rebased\n');
+});
+
+test('catchUpWith does not throw away local work when the remote was rewritten', async () => {
+  const { dir, github } = await pushedFeature();
+  await commitFile(dir, 'local.txt', 'local\n', 'feat: not pushed yet');
+  const local = await head(dir);
+  await rewriteOnGithub(github, dir);
+
+  assert.equal(await catchUpWith(dir, 'origin/feature'), 'diverged');
+  assert.equal(await head(dir), local);
 });
 
 test('sees no change when nothing moved', async () => {

@@ -60,12 +60,31 @@ export function validatePlan(raw: unknown, maxTickets: number): { plan?: PlanJso
   }
   if (errors.length) return { errors };
 
-  const order = topoOrder(plan.tickets.map((t) => ({ key: t.key, dependsOn: t.depends_on })));
-  if (!order) return { errors: ['tickets: depends_on contains a cycle'] };
-  return { plan, order, errors: [] };
+  const stacked = stackDependencies(plan.tickets.map((t) => ({ key: t.key, dependsOn: t.depends_on })));
+  if (!stacked) return { errors: ['tickets: depends_on contains a cycle'] };
+  const tickets = plan.tickets.map((t, i) => ({ ...t, depends_on: stacked[i].dependsOn }));
+  return { plan: { ...plan, tickets }, order: topoOrder(stacked)!, errors: [] };
 }
 
-export function topoOrder(items: { key: string; dependsOn: string[] }[]): OrderedTicket[] | null {
+type Dependent = { key: string; dependsOn: string[] };
+
+export function stackDependencies<T extends Dependent>(items: T[]): T[] | null {
+  const order = topoOrder(items);
+  if (!order) return null;
+  const group = new Map(items.map((t) => [t.key, t.key]));
+  const groupOf = (key: string): string => (group.get(key) === key ? key : groupOf(group.get(key)!));
+  for (const t of items) for (const d of t.dependsOn) group.set(groupOf(t.key), groupOf(d));
+  const top = new Map<string, string>();
+  const below = new Map<string, string[]>();
+  for (const { key } of order) {
+    const previous = top.get(groupOf(key));
+    below.set(key, previous ? [previous] : []);
+    top.set(groupOf(key), key);
+  }
+  return items.map((t) => ({ ...t, dependsOn: below.get(t.key)! }));
+}
+
+export function topoOrder(items: Dependent[]): OrderedTicket[] | null {
   const index = new Map(items.map((t, i) => [t.key, i]));
   const remaining = new Map(items.map((t) => [t.key, new Set(t.dependsOn)]));
   const wave = new Map<string, number>();

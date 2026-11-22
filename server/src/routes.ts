@@ -29,6 +29,7 @@ const settingsPatch = z
     postReviewsToPr: z.boolean(),
     dependentsWaitForCi: z.boolean(),
     autoArbiter: z.boolean(),
+    autoMerge: z.boolean(),
     maxRounds: z.number().int().min(1).max(10),
     maxPlanRounds: z.number().int().min(1).max(5),
     maxArbiterDecisions: z.number().int().min(1).max(10),
@@ -294,6 +295,7 @@ export async function routes(app: FastifyInstance): Promise<void> {
       : undefined;
     const next = await repo.updateInitiative(iid, { title: body.title, brief: body.brief, status, settings });
     if (body.settings) engine.kick();
+    if (body.settings?.autoMerge) void engine.advanceAutoMerge(iid);
     return next;
   });
 

@@ -58,13 +58,13 @@ test('every fixture writes the checks log that checks.md names', async () => {
   }
 });
 
-test('the pull request overview of a review fixture names no function, constant or path', async () => {
+test('the pull request changes of a review fixture name no function, constant or path', async () => {
   for (const c of CASES.filter((x) => x.role === 'review')) {
     const f = await buildFixture(c.name);
     try {
       const build = fs.readFileSync(f.inputs[1], 'utf8');
-      const overview = build.slice(build.indexOf('**Overview**'));
-      assert.doesNotMatch(overview, /[a-z][A-Z]|[A-Z]{2}_|\.js\b/, c.name);
+      const what = build.slice(build.indexOf('### What'));
+      assert.doesNotMatch(what, /[a-z][A-Z]|[A-Z]{2}_|\.js\b/, c.name);
     } finally {
       removeFixture(f);
     }

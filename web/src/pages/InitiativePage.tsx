@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, MoreHorizontal, Pencil, RotateCcw, Trash2, Wrench } from 'lucide-react';
+import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, GitMerge, MoreHorizontal, Pencil, RotateCcw, Trash2, Wrench } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -72,6 +72,11 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
     onSuccess: ({ count }) => toast.success(count ? `Started a fixer on ${count} PR${count > 1 ? 's' : ''}` : 'No open PR has anything to fix right now'),
     onError: toastError,
   });
+  const autoMerge = useMutation({
+    mutationFn: (on: boolean) => api.updateInitiative(i.id, { settings: { autoMerge: on } }),
+    onSuccess: (_r, on) => toast.success(on ? 'Auto-merge on: each approved PR joins the merge queue once the PRs below it merge' : 'Auto-merge off'),
+    onError: toastError,
+  });
   const isFeature = i.kind !== 'open-prs';
   const hasOpenPrs = detail.tickets.some((t) => t.prNumber && t.prState !== 'MERGED' && t.prState !== 'CLOSED');
   const remove = useMutation({
@@ -102,6 +107,11 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
               <Chip>
                 <GitBranch className="h-3 w-3" /> {i.baseBranch}
               </Chip>
+              {i.settings.autoMerge && (
+                <Chip title="Each approved PR joins the merge queue once the PRs below it merge">
+                  <GitMerge className="h-3 w-3" /> auto-merge
+                </Chip>
+              )}
               <Chip>{money(detail.costUsd)} spent</Chip>
               <Chip>created {ago(i.createdAt)}</Chip>
               <button onClick={() => setShowBrief((v) => !v)} className="mono-chip hover:text-zinc-200">
@@ -123,6 +133,10 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
               <MenuItem icon={<Wrench />} disabled={!hasOpenPrs || fixPrs.isPending} onSelect={() => fixPrs.mutate()}>
                 <span className="block">Fix PRs now</span>
                 <span className="block text-2xs text-zinc-500">Review comments, failing CI, conflicts</span>
+              </MenuItem>
+              <MenuItem icon={<GitMerge />} disabled={autoMerge.isPending} hint={i.settings.autoMerge ? 'On' : 'Off'} onSelect={() => autoMerge.mutate(!i.settings.autoMerge)}>
+                <span className="block">Auto-merge PRs</span>
+                <span className="block text-2xs text-zinc-500">Queue each approved PR once the PRs below it merge</span>
               </MenuItem>
               <MenuSeparator />
               <MenuItem icon={<Pencil />} onSelect={() => setEditing(true)}>

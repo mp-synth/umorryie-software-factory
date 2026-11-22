@@ -71,14 +71,14 @@ export interface PrStack {
   pullRequests: number[];
 }
 
-const STACKS_API = ['-H', 'X-GitHub-Api-Version: 2026-03-10'];
+const API_VERSION = ['-H', 'X-GitHub-Api-Version: 2026-03-10'];
 
 function toStack(d: { number: number; pull_requests: { number: number }[] }): PrStack {
   return { number: d.number, pullRequests: d.pull_requests.map((p) => p.number) };
 }
 
 async function stacksApi(cwd: string, args: string[], body?: unknown): Promise<string> {
-  const r = await gh(cwd, ['api', ...STACKS_API, ...args, ...(body ? ['--input', '-'] : [])], body ? JSON.stringify(body) : undefined);
+  const r = await gh(cwd, ['api', ...API_VERSION, ...args, ...(body ? ['--input', '-'] : [])], body ? JSON.stringify(body) : undefined);
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh api exited ${r.code}`);
   return r.stdout;
 }
@@ -94,6 +94,80 @@ export async function createStack(cwd: string, prs: number[]): Promise<PrStack> 
 
 export async function addToStack(cwd: string, stack: number, prs: number[]): Promise<PrStack> {
   return toStack(JSON.parse(await stacksApi(cwd, ['-X', 'POST', `repos/{owner}/{repo}/stacks/${stack}/add`], { pull_requests: prs })));
+}
+
+export interface MergeStatus {
+  state: string;
+  isDraft: boolean;
+  isInMergeQueue: boolean;
+  mergeStateStatus: string;
+  baseRefName: string;
+  headRefOid: string;
+}
+
+export async function mergeStatus(cwd: string, prNumber: number): Promise<MergeStatus | null> {
+  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){state isDraft isInMergeQueue mergeStateStatus baseRefName headRefOid}}}`;
+  const r = await gh(cwd, ['api', 'graphql', '-f', `query=${query}`, '-F', 'owner={owner}', '-F', 'name={repo}', '-F', `number=${prNumber}`, '-q', '.data.repository.pullRequest']);
+  return r.code === 0 && r.stdout.trim() ? (JSON.parse(r.stdout) as MergeStatus) : null;
+}
+
+export async function markReady(cwd: string, prNumber: number): Promise<void> {
+  const r = await gh(cwd, ['pr', 'ready', String(prNumber)]);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh pr ready exited ${r.code}`);
+}
+
+export type MergeQueueOutcome = 'queued' | 'in-queue' | 'merged' | 'pending' | 'failed';
+
+interface AsyncMerge {
+  status: 'pending' | 'merged' | 'enqueued' | 'failed';
+  details?: { message?: string; uuid?: string };
+  message?: string;
+}
+
+const MERGE_POLLS = 10;
+const MERGE_POLL_MS = 3000;
+
+function parseAsyncMerge(stdout: string): AsyncMerge | null {
+  try {
+    return JSON.parse(stdout) as AsyncMerge;
+  } catch {
+    return null;
+  }
+}
+
+export async function addToMergeQueue(cwd: string, prNumber: number, headSha: string): Promise<{ outcome: MergeQueueOutcome; message: string | null }> {
+  const endpoint = `repos/{owner}/{repo}/pulls/${prNumber}/merge-async`;
+  const r = await gh(cwd, ['api', ...API_VERSION, '-X', 'PUT', endpoint, '--input', '-'], JSON.stringify({ sha: headSha, merge_action: 'merge_queue' }));
+  let result = parseAsyncMerge(r.stdout);
+  if (r.code !== 0) {
+    if (/HTTP 409/.test(r.stderr)) return { outcome: 'pending', message: null };
+    return { outcome: 'failed', message: result?.message ?? result?.details?.message ?? (r.stderr.trim() || `gh api exited ${r.code}`) };
+  }
+  if (result?.status === 'enqueued') return { outcome: 'in-queue', message: null };
+  if (result?.status === 'merged') return { outcome: 'merged', message: null };
+  const uuid = result?.details?.uuid;
+  for (let poll = 0; uuid && result?.status === 'pending' && poll < MERGE_POLLS; poll++) {
+    await new Promise((resolve) => setTimeout(resolve, MERGE_POLL_MS));
+    const p = await gh(cwd, ['api', ...API_VERSION, `${endpoint}/${uuid}`]);
+    if (p.code === 0) result = parseAsyncMerge(p.stdout);
+  }
+  switch (result?.status) {
+    case 'enqueued':
+      return { outcome: 'queued', message: null };
+    case 'merged':
+      return { outcome: 'merged', message: null };
+    case 'failed':
+      return { outcome: 'failed', message: result.details?.message ?? null };
+    default:
+      return { outcome: 'pending', message: null };
+  }
+}
+
+export async function retargetPr(cwd: string, prNumber: number, base: string): Promise<void> {
+  const current = await gh(cwd, ['pr', 'view', String(prNumber), '--json', 'baseRefName', '-q', '.baseRefName']);
+  if (current.code === 0 && current.stdout.trim() === base) return;
+  const r = await gh(cwd, ['pr', 'edit', String(prNumber), '--base', base]);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh pr edit exited ${r.code}`);
 }
 
 export async function closePr(cwd: string, prNumber: number, why: string): Promise<void> {

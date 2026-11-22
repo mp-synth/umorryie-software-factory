@@ -169,16 +169,35 @@ repo. Keep **Agents running at once** in Settings at 10 or more for that.
 | merged | Seen by Sync PRs (automatic every 5 min) or marked by you. Unblocks dependents. Its local worktree is removed, and its local branch too once no unmerged ticket is stacked on it |
 | needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row. With the arbiter on, it decides first and the row shows **Arbiter deciding**; it stays **Needs you** only when the arbiter escalates or has used its decisions |
 
-Dependent tickets are **stacked**: a ticket whose dependency isn't merged yet
-branches from the dependency's branch and its PR targets it. On GitHub the
-factory links those PRs into a native stacked PR as soon as the PR opens, and
-Sync PRs links any it missed (your own PRs in Open PRs too, when one targets
-another's branch). A stack is a single line, so when two tickets build on the
-same parent only the first joins its stack; the other still targets the parent's
-branch and the activity feed says why. A stacked ticket's row is marked
-**stacked**. A ticket with
-several unmerged dependencies merges the others in; if their branches conflict,
-the executor gets a `merge-deps.md` and resolves the conflict before building.
+Dependent tickets are **stacked**: every group of tickets connected by
+dependencies becomes one line in plan order, so each ticket branches from the
+one just before it and its PR targets that branch. Tickets that need nothing
+from the others branch from the base branch and build in parallel. On GitHub
+the factory links those PRs into a native stacked PR as soon as the PR opens,
+and Sync PRs links any it missed (your own PRs in Open PRs too, when one targets
+another's branch). A stacked ticket's row is marked **stacked**.
+
+The stack keeps itself in sync. When a PR's branch changes (a verified fix is
+pushed, someone pushes to it, Sync PRs sees a merge), the factory merges it into
+each idle PR above it and pushes, level by level, so every PR builds on the
+latest code below it. A merge that conflicts goes to a fresh fixer with the
+conflict as feedback; with auto-fix off, or when a fixer already tried that same
+merge, the ticket waits for you. Once everything below a PR has merged, the PR
+targets the base branch. When GitHub rewrites a branch itself (**Rebase stack**,
+or the rebase after the bottom PR merges), the factory's copy follows it unless
+it holds unpushed commits. The factory merges rather than rebases, so GitHub may
+ask you to **Rebase stack** before it merges a stack.
+
+**More → Auto-merge PRs** merges an initiative's PRs for you, bottom-up. Every
+5 minutes it marks each approved ticket's draft PR ready for review, and adds
+the lowest open PR of each stack to the merge queue once GitHub says it can
+merge (approved, required checks green, no conflicts). When that PR merges,
+the next one becomes the lowest and follows. A lowest PR that conflicts with
+the base branch or fails CI gets a fresh fixer, then joins the queue once it
+is green. A PR that leaves the queue twice at the same commit is not added
+back until it changes; the activity feed says so. Only tickets the factory's
+review approved are merged, and GitHub's own rules (approvals, required checks)
+still apply.
 
 ## Where things live
 
@@ -208,7 +227,8 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
 ## Guardrails
 
 - Agents never push, merge, rebase shared history or talk to GitHub. The server
-  pushes only `factory/*` branches, never force-pushes, and never merges: you merge.
+  pushes only `factory/*` branches and never force-pushes. It merges a PR only
+  through the merge queue with **Auto-merge PRs** on; otherwise you merge.
 - Agents only add commits. The server notes HEAD before every build and fix;
   if an agent rewrote a commit it didn't make (say, `--amend` after a
   pre-commit hook cancelled its commit), its changes go back on top as a new
@@ -248,12 +268,14 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
   change the checks it is judged by. Checks failures never reach a reviewer.
 - No secrets: Postgres listens on loopback only with trust auth, so there is no
   password to store. Agents use your existing `claude` login.
-- PRs are opened as drafts and the factory never marks them ready; that is
-  always your call. Each has a short imperative title that states the outcome and a
-  description written by the executor: a one-line **What**, a short **Why**
-  with the context, and a 2-4 bullet high-level **Overview**. No headings,
-  checklists, file lists or ticket numbers; if the executor's text breaks those
-  rules the ticket's own what and goal are used instead.
+- PRs are opened as drafts, and the factory marks them ready only with
+  **Auto-merge PRs** on; otherwise that is your call. Each has a short
+  imperative title that states the outcome and a description written by the
+  executor under two headings: **Why**, one to three sentences on what was
+  broken or missing and what it caused, and **What**, one to four bullets on
+  what the code does now. No other headings, checklists, file lists or ticket
+  numbers; if the executor's text breaks those rules the ticket's own goal and
+  what are used instead.
   Dependent tickets open stacked PRs, linked as a stack on GitHub.
 - `agents/code-style.md` holds the owner's code rules (no duplication, no
   comments, no change-comments, no redundant docstrings). The executor, fixer

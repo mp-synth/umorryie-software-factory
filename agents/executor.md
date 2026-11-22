@@ -31,22 +31,19 @@ fresh reviewer after you finish.
    where they differ.
 4. `feedback.md`, when present: the owner's words for this ticket, or an
    arbiter's decision made on the owner's behalf. Binding.
-5. `merge-deps.md`, when present: your ticket depends on several tickets
-   whose branches conflict. Merge the listed branches first, resolving every
-   conflict so all of their behaviour and tests survive, and commit the merge
-   before you build anything.
-6. `build.md`, if it already exists: a previous executor stopped mid-way.
+5. `build.md`, if it already exists: a previous executor stopped mid-way.
    Check `git log <base>..HEAD` and continue from where it got to.
-7. `advance-error.md`, if listed: the factory refused the last attempt. Fix
+6. `advance-error.md`, if listed: the factory refused the last attempt. Fix
    exactly what it says.
-8. `rebuild.md`, if listed: an earlier build of this ticket was thrown away
+7. `rebuild.md`, if listed: an earlier build of this ticket was thrown away
    because its pushed history was wrong. Build from scratch, and avoid what
    its review found.
 
 ## Build
 
-- When the ticket depends on another ticket, your base already contains that
-  work (stacked). Build on its interfaces; don't re-implement them.
+- When the ticket depends on another ticket, your base is that ticket's branch
+  and already contains it and every ticket below it in the stack. Build on
+  their interfaces; don't re-implement them.
 - Make the smallest change that fully meets the ticket. No speculative
   options, fallbacks or extras. No drive-by refactors.
 - Match the surrounding code: idioms, naming, structure, error handling.
@@ -108,28 +105,29 @@ Decisions you made where the ticket was ambiguous, each with a one-line reason.
 ## Pull request
 <title>
 
-**What:** <what changes>
+### Why
+<what was wrong or missing before, and what it caused>
 
-**Why:** <context and reason>
-
-**Overview**
-- <change>
-- <change>
+### What
+- <what the code does now, and the result>
+- <what the code does now, and the result>
 ```
 
 The `## Pull request` section becomes the PR the factory opens for your branch.
+Write its headings with `###`; the factory turns them into the PR's headings.
 A reviewer should understand the PR in ten seconds:
 
 - `<title>`: short, imperative, states the outcome for a user of the code, e.g.
   "Retry failed Lago syncs automatically". No ticket number, no trailing period.
-- **What:** one sentence, at most two: the outcome, as a user of the code sees it.
-- **Why:** one to three sentences: the problem or context that makes this
-  worth doing, and what it unlocks. Say what was wrong or missing before.
-- **Overview:** 2 to 4 bullets, each one short line (under 100 characters)
-  naming a behaviour change at a high level, not how it is implemented.
+- **Why:** one to three sentences. Lead with what was broken or missing and
+  what it caused ("Removing an unlimited add-on left the feature billed at
+  0."), then why it happened when that isn't obvious.
+- **What:** one to four bullets, one sentence each: what the code does now and
+  the result for its users. Name a field, flag, setting or command when the
+  reader needs it.
 - Precise and plain, following the writing rules below.
-- No file paths, function or class names, step-by-step changes or test
-  summaries: the diff covers that. Nothing besides the three labelled parts.
+- No file paths, lists of changed functions or classes, step-by-step changes
+  or test summaries: the diff covers that. Nothing besides the two sections.
 - Mention a Linear ticket only when the brief or ticket explicitly gives one.
   Never infer or invent ticket IDs.
 

@@ -36,7 +36,9 @@ an order:
 - `feedback.md`: the project owner's own words, or an arbiter's decision
   made on the owner's behalf. Authoritative on product decisions; still
   check it against the code. An arbiter decision settles the NEEDS-HUMAN
-  items it answers: act on them instead of blocking again.
+  items it answers: act on them instead of blocking again. A note from the
+  factory says the PR below this one in the stack changed and merging its
+  branch conflicts: that merge is a merge conflict like any other.
 - `verify-block.md`, when present: a verifier rejected your previous attempt
   at these same reports and the branch was reset. Read its reason and
   findings first and don't repeat what it blocked.

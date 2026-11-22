@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { nextStackStep, stackChain, stackStepMessage } from './stacks.ts';
+import type { TicketStatus } from '@factory/shared';
+import { nextStackStep, stackBase, stackChain, stackStepMessage, syncTarget } from './stacks.ts';
 
 const ticket = (branch: string, baseRef: string, prNumber: number | null, prState: string | null = 'OPEN', prHeadRef: string | null = null) => ({
   branch,
@@ -46,6 +47,49 @@ test('leaves a PR that is already in a stack alone', () => {
   const step = nextStackStep([10, 11], { pr: 11, stack: { number: 99, pullRequests: [10, 11] } });
   assert.deepEqual(step, { kind: 'done', stack: 99 });
   assert.equal(stackStepMessage(step, [10, 11]), null);
+});
+
+const member = (key: string, below: string | null, status: TicketStatus, prNumber: number | null, baseRef = below ? `factory/x/${below}` : 'main') => ({
+  key,
+  dependsOn: below ? [below] : [],
+  status,
+  branch: `factory/x/${key}`,
+  prHeadRef: null,
+  baseRef,
+  prNumber,
+  prState: prNumber ? 'OPEN' : null,
+});
+
+test('stackBase is the nearest ticket below that is still open', () => {
+  const one = member('01', null, 'approved', 10);
+  const two = member('02', '01', 'approved', 11);
+  const three = member('03', '02', 'built', 12);
+  assert.equal(stackBase(three, [one, two, three]), two);
+  assert.equal(stackBase(three, [one, { ...two, status: 'merged' as const }, three]), one);
+  assert.equal(stackBase(three, [{ ...one, status: 'merged' as const }, { ...two, status: 'canceled' as const }, three]), null);
+  assert.equal(stackBase(one, [one, two, three]), null);
+});
+
+test('syncTarget points a PR at the branch of the open PR below it', () => {
+  const one = member('01', null, 'approved', 10);
+  const three = member('03', '02', 'built', 12, 'factory/x/01');
+  const two = member('02', '01', 'approved', 11);
+  assert.deepEqual(syncTarget(three, [one, two, three], 'main'), { parent: two, target: 'factory/x/02' });
+});
+
+test('syncTarget leaves the bottom of a stack and a PR whose parent has no open PR alone', () => {
+  const one = member('01', null, 'approved', 10);
+  const two = member('02', '01', 'building', null);
+  const three = member('03', '02', 'built', 12);
+  assert.equal(syncTarget(one, [one, two, three], 'main'), null);
+  assert.equal(syncTarget(three, [one, two, three], 'main'), null);
+});
+
+test('syncTarget moves a PR onto the base branch once everything below it merged', () => {
+  const one = member('01', null, 'merged', 10);
+  const two = member('02', '01', 'approved', 11);
+  assert.deepEqual(syncTarget(two, [one, two], 'main'), { parent: null, target: 'main' });
+  assert.equal(syncTarget({ ...two, baseRef: 'main' }, [one, two], 'main'), null);
 });
 
 test('reports a sibling that cannot join because another PR already sits on its parent', () => {

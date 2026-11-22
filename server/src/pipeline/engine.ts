@@ -48,11 +48,11 @@ import {
   type Decision,
   type DecisionText,
 } from './arbiter.ts';
-import { ticketLabel } from './labels.ts';
+import { seqLabel, ticketLabel } from './labels.ts';
 import { adoptablePrs, adoptedTicket, remoteBranchOf } from './adopted-prs.ts';
 import { pullRequestText } from './pull-request.ts';
 import { earlierBranches, rebuildBlocker } from './rebuild.ts';
-import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, section, slugify, validatePlan } from './plan.ts';
+import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, section, slugify, stackDependencies, topoOrder, validatePlan } from './plan.ts';
 import { sizeNote } from './size.ts';
 import { malformedVerdictReason, outputFailure, parseVerdict } from './verdict.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
@@ -61,7 +61,8 @@ import { writeRepoGuidance } from './repo-guidance.ts';
 import { MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, type AgentKind } from './role-prompt.ts';
 import { INTERRUPTED_REASON, ORPHAN_INITIATIVE_STATUSES, ORPHAN_REASON, orphanRunKind, restingInitiativeStatus, restingTicketStatus, shouldResumeInterrupted } from './recovery.ts';
 import { pickRunsToStart, type SchedulableRun } from './scheduler.ts';
-import { nextStackStep, stackChain, stackStepMessage, type StackStep } from './stacks.ts';
+import { nextStackStep, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
+import { autoMergeStep, MERGE_QUEUE_ATTEMPTS_PER_HEAD } from './auto-merge.ts';
 
 export class PipelineError extends Error {
   constructor(message: string, public status = 409) {
@@ -71,6 +72,7 @@ export class PipelineError extends Error {
 
 const active = new Map<string, AgentHandle>();
 const inFlight = new Map<string, Run>();
+const syncingWorktrees = new Map<string, Promise<void>>();
 const ts = (x: unknown): number => (x ? new Date(x as string).getTime() : 0);
 const touchRun = (r: Run) => emitChange({ type: 'run', id: r.id, initiativeId: r.initiativeId });
 const canceling = new Set<string>();
@@ -380,6 +382,7 @@ export function startScheduler(): void {
 async function startRun(run: Run): Promise<void> {
   inFlight.set(run.id, run);
   try {
+    if (run.ticketId) await syncingWorktrees.get(run.ticketId);
     switch (run.kind) {
       case 'plan':
         await runPlan(run);
@@ -897,7 +900,7 @@ async function prepareWorktree(run: Run, init: Initiative, project: Project, tic
 
 async function fetchPrHead(project: Project, ticket: Ticket): Promise<void> {
   const head = ticket.prHeadRef!;
-  const r = await gitx.fetchOrigin(project.repoPath, { ref: `+refs/heads/${head}:refs/remotes/origin/${head}` });
+  const r = await gitx.fetchOrigin(project.repoPath, { refs: [gitx.trackingRefspec(head)] });
   if (r.code !== 0) throw new Error(`could not fetch ${head} from origin: ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
 }
 
@@ -934,19 +937,9 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
     return checkedOut;
   }
 
-  const all = await repo.listTickets(init.id);
-  const unmerged = ticket.dependsOn
-    .map((k) => all.find((x) => x.key === k)!)
-    .filter((d) => d && d.status !== 'merged' && d.branch);
-  let baseRef: string;
-  let prBase: string;
-  if (!unmerged.length) {
-    baseRef = await gitx.resolveBaseRef(project.repoPath, init.baseBranch);
-    prBase = init.baseBranch;
-  } else {
-    baseRef = unmerged[0].branch!;
-    prBase = unmerged[0].branch!;
-  }
+  const parentBranch = stackBase(ticket, await repo.listTickets(init.id))?.branch;
+  const baseRef = parentBranch ?? (await gitx.resolveBaseRef(project.repoPath, init.baseBranch));
+  const prBase = parentBranch ?? init.baseBranch;
   if (fs.existsSync(path.join(wt, '.git'))) {
     const orphan = (await gitx.git(wt, ['branch', '--show-current'])).stdout.trim();
     await log(run, `Removing a half-created worktree from an earlier attempt (${orphan || 'detached HEAD'})`);
@@ -956,26 +949,6 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
   await log(run, `Creating worktree ${wt} on ${branch} from ${baseRef}`);
   await gitx.ensureWorktree(project.repoPath, wt, branch, baseRef);
   ticket = await repo.updateTicket(ticket.id, { branch, baseRef: prBase, worktreePath: wt, ciState: null, ciHeadSha: null });
-  const conflicts: { branch: string; output: string }[] = [];
-  for (const dep of unmerged.slice(1)) {
-    const m = await gitx.mergeInto(wt, dep.branch!);
-    await log(run, m.ok ? `Merged dependency ${dep.branch}` : `Dependency ${dep.branch} conflicts; the executor will merge it`);
-    if (!m.ok) conflicts.push({ branch: dep.branch!, output: m.output });
-  }
-  if (conflicts.length) {
-    write(
-      path.join(ticketRoundDir(init, ticket, Math.max(ticket.round, 1)), 'merge-deps.md'),
-      [
-        '# Merge your dependency branches first',
-        '',
-        `Your branch starts from \`${baseRef}\`. It must also contain the branches below, which conflict with it.`,
-        'Before building the ticket, for each one: `git merge --no-edit <branch>`, resolve every conflict so both',
-        "tickets' behaviour and tests survive, run the checks, and commit the merge. Never rebase.",
-        '',
-        ...conflicts.map((c) => `## ${c.branch}\n\n\`\`\`\n${c.output.slice(-3000)}\n\`\`\``),
-      ].join('\n'),
-    );
-  }
   fs.rmSync(setupDoneMarker(init, ticket), { force: true });
   await prepareWorktree(run, init, project, ticket);
   return ticket;
@@ -1026,7 +999,7 @@ async function runExecute(run: Run): Promise<void> {
   if (feedback.length) inputs.push(writeFeedback(dir, feedback, ticketLabel(ticket)));
   const out = path.join(dir, 'build.md');
   if (fs.existsSync(out)) inputs.push(out);
-  for (const extra of ['merge-deps.md', 'advance-error.md', 'rebuild.md']) {
+  for (const extra of ['advance-error.md', 'rebuild.md']) {
     const f = path.join(dir, extra);
     if (fs.existsSync(f)) inputs.unshift(f);
   }
@@ -1188,6 +1161,7 @@ async function publish(run: Run, init: Initiative, project: Project, ticket: Tic
     return false;
   }
   await log(run, `Pushed ${remoteBranch} to origin.`);
+  void syncStack(init.id);
   if (ticket.ciHeadSha && ticket.ciHeadSha !== (await gitx.headSha(ticket.worktreePath!))) {
     ticket = await repo.updateTicket(ticket.id, { ciState: null, ciHeadSha: null });
   }
@@ -1702,7 +1676,7 @@ async function runVerify(run: Run): Promise<void> {
   await finish(run, 'succeeded');
 
   if (verdict === 'APPROVE') {
-    const commits = (await gitx.git(wt, ['log', '--reverse', '--format=- `%h` %s', `${start}..HEAD`])).stdout.trim();
+    const commits = (await gitx.git(wt, ['log', '--reverse', '--first-parent', '--format=- `%h` %s', `${start}..HEAD`])).stdout.trim();
     const fresh = await mustTicket(ticket.id);
     const pushed = commits && s.createPrs ? await publish(run, init, project, fresh) : false;
     await postVerifiedReplies(run, await mustTicket(ticket.id), init, fixes, pushed ? commits : '', !commits || !!pushed);
@@ -2149,6 +2123,7 @@ export async function syncPrs(initiativeId: string): Promise<number> {
   await cleanUpMergedTickets(initiativeId);
   await refreshInitiativeStatus(initiativeId);
   await startReadyTickets(initiativeId);
+  void syncStack(initiativeId).then(() => advanceAutoMerge(initiativeId));
   return changed;
 }
 
@@ -2157,6 +2132,189 @@ async function autoSyncPrs(): Promise<void> {
     select distinct i.id from initiatives i join tickets t on t.initiative_id = i.id
     where i.status in ('in_progress','done') and t.pr_number is not null and t.status <> 'merged'`;
   await Promise.all(rows.map((r) => syncPrs(r.id).catch((e) => console.warn('[autoSyncPrs]', e.message))));
+}
+
+const stackSyncRerun = new Map<string, boolean>();
+const conflictsSentToFixer = new Map<string, string | null>();
+
+async function syncStack(initiativeId: string): Promise<void> {
+  if (stackSyncRerun.has(initiativeId)) {
+    stackSyncRerun.set(initiativeId, true);
+    return;
+  }
+  try {
+    do {
+      stackSyncRerun.set(initiativeId, false);
+      await syncStackOnce(initiativeId);
+    } while (stackSyncRerun.get(initiativeId));
+  } catch (err) {
+    console.warn('[stack-sync]', (err as Error).message);
+  } finally {
+    stackSyncRerun.delete(initiativeId);
+  }
+}
+
+async function syncStackOnce(initiativeId: string): Promise<void> {
+  const init = await mustInitiative(initiativeId);
+  if (!['in_progress', 'done'].includes(init.status)) return;
+  const project = await mustProject(init.projectId);
+  const all = await repo.listTickets(init.id);
+  const open = all.filter((t) => t.prNumber && t.prState === 'OPEN' && !['merged', 'canceled'].includes(t.status));
+  const due = open.filter((t) => !t.prHeadRef && SETTLED_STATUSES.includes(t.status) && t.worktreePath && fs.existsSync(path.join(t.worktreePath, '.git')));
+  if (!due.length || !gitx.isGithubUrl(await gitx.remoteUrl(project.repoPath))) return;
+  const fetched = await gitx.fetchOrigin(project.repoPath, { refs: open.map((t) => gitx.trackingRefspec(remoteBranchOf(t)!)) });
+  if (fetched.code !== 0) throw new Error(`could not fetch the stack's branches: ${(fetched.stderr || fetched.stdout).trim().slice(0, 500)}`);
+  for (const t of due) {
+    if (syncingWorktrees.has(t.id)) continue;
+    const work = syncTicket(init, t, all);
+    syncingWorktrees.set(t.id, work.catch(() => undefined));
+    try {
+      await work;
+    } catch (err) {
+      console.warn('[stack-sync]', `${ticketLabel(t)}: ${(err as Error).message}`);
+    } finally {
+      syncingWorktrees.delete(t.id);
+    }
+  }
+}
+
+async function syncTicket(init: Initiative, ticket: Ticket, all: Ticket[]): Promise<void> {
+  const wt = ticket.worktreePath!;
+  if (!(await ticketIdle(ticket.id)) || (await gitx.worktreeState(wt)).tracked) return;
+  const scope = { initiativeId: init.id, ticketId: ticket.id };
+  const own = remoteBranchOf(ticket)!;
+  const caughtUp = await gitx.catchUpWith(wt, `origin/${own}`);
+  if (caughtUp === 'ahead' || caughtUp === 'diverged') throw new Error(`${ticket.branch} is ${caughtUp === 'ahead' ? 'ahead of' : 'diverged from'} origin/${own}, so it is left alone`);
+  if (caughtUp === 'followed-rewrite') await systemMessage(scope, `${ticketLabel(ticket)}: \`${own}\` was rewritten on GitHub (a stack rebase or a force-push), so the factory's copy of the branch now matches it.`);
+  const sync = syncTarget(ticket, all, init.baseBranch);
+  if (!sync) return;
+  const { parent, target } = sync;
+  if (ticket.baseRef !== target) {
+    await gh.retargetPr(wt, ticket.prNumber!, target);
+    ticket = await repo.updateTicket(ticket.id, { baseRef: target });
+    await systemMessage(scope, `${ticketLabel(ticket)}: #${ticket.prNumber} now targets ${parent ? `#${parent.prNumber}, the PR below it` : `\`${target}\``}.`);
+    await stackPr(scope, init, ticket, wt, { background: true });
+  }
+  if (!parent || (await gitx.isAncestor(wt, `origin/${target}`, 'HEAD'))) return;
+  const before = (await gitx.headSha(wt))!;
+  const merged = await gitx.mergeInto(wt, `origin/${target}`);
+  if (!merged.ok) return sendStackConflictToFixer(init, ticket, parent, target, merged.output);
+  const pushed = await gitx.push(wt, ticket.branch!, own);
+  if (pushed.code !== 0) {
+    await gitx.resetHard(wt, before);
+    throw new Error(`could not push the merge of #${parent.prNumber}: ${(pushed.stderr || pushed.stdout).trim().slice(0, 500)}`);
+  }
+  await repo.updateTicket(ticket.id, { ciState: null, ciHeadSha: null });
+  await systemMessage(scope, `${ticketLabel(ticket)}: merged the latest #${parent.prNumber} into its branch and pushed, so it stays in sync with the PR below it.`);
+}
+
+async function sendStackConflictToFixer(init: Initiative, ticket: Ticket, parent: Ticket, target: string, output: string): Promise<void> {
+  const scope = { initiativeId: init.id, ticketId: ticket.id };
+  const targetSha = await gitx.revParse(ticket.worktreePath!, `origin/${target}`);
+  const fixerAlreadyTried = conflictsSentToFixer.get(ticket.id) === targetSha;
+  if (fixerAlreadyTried || !repo.initiativeSettings(init).autoFix) {
+    const why = `Merging #${parent.prNumber} (\`${target}\`), the PR below it, conflicts${fixerAlreadyTried ? ' even after a fixer tried' : ''}. Merge it by hand, or press Fix.`;
+    await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: why });
+    await systemMessage(scope, `${ticketLabel(ticket)}: ${why}`);
+    return;
+  }
+  conflictsSentToFixer.set(ticket.id, targetSha);
+  await repo.addMessage({
+    ...scope,
+    author: 'system',
+    kind: 'feedback',
+    body: [
+      `#${parent.prNumber}, the PR below this one, changed, and merging its branch \`${target}\` into this branch conflicts.`,
+      `Run \`git fetch origin && git merge origin/${target}\`, resolve every conflict so both PRs' behaviour and tests survive, and commit the merge. Never rebase or force-push.`,
+      '',
+      '```',
+      output.slice(-3000),
+      '```',
+    ].join('\n'),
+  });
+  await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+}
+
+const autoMerging = new Set<string>();
+const mergeQueueAttempts = new Map<string, { head: string; times: number }>();
+
+export async function advanceAutoMerge(initiativeId: string): Promise<void> {
+  if (autoMerging.has(initiativeId)) return;
+  autoMerging.add(initiativeId);
+  try {
+    const init = await mustInitiative(initiativeId);
+    if (!repo.initiativeSettings(init).autoMerge || !['in_progress', 'done'].includes(init.status)) return;
+    const project = await mustProject(init.projectId);
+    if (!gitx.isGithubUrl(await gitx.remoteUrl(project.repoPath))) return;
+    const all = await repo.listTickets(init.id);
+    for (const t of all.filter((x) => x.prNumber && x.prState === 'OPEN' && x.status === 'approved')) {
+      await advanceTicketMerge(init, project, t, all).catch((err) => console.warn('[auto-merge]', `${ticketLabel(t)}: ${(err as Error).message}`));
+    }
+  } catch (err) {
+    console.warn('[auto-merge]', (err as Error).message);
+  } finally {
+    autoMerging.delete(initiativeId);
+  }
+}
+
+async function advanceTicketMerge(init: Initiative, project: Project, ticket: Ticket, all: Ticket[]): Promise<void> {
+  const cwd = ticket.worktreePath && fs.existsSync(ticket.worktreePath) ? ticket.worktreePath : project.repoPath;
+  const pr = await gh.mergeStatus(cwd, ticket.prNumber!);
+  if (!pr || pr.state !== 'OPEN') return;
+  const scope = { initiativeId: init.id, ticketId: ticket.id };
+  const label = `${ticketLabel(ticket)}: #${ticket.prNumber}`;
+  const attempts = mergeQueueAttempts.get(ticket.id);
+  const queuedAtHead = attempts?.head === pr.headRefOid ? attempts.times : 0;
+  const isBottom = !stackBase(ticket, all) && pr.baseRefName === init.baseBranch;
+  switch (autoMergeStep({ ...pr, isBottom, queuedAtHead })) {
+    case 'mark-ready':
+      await gh.markReady(cwd, ticket.prNumber!);
+      return systemMessage(scope, `${label} is ready for review, so it can merge once it is approved.`);
+    case 'fix':
+      await sweepTicket(ticket, false);
+      return;
+    case 'queue': {
+      const { outcome, message } = await gh.addToMergeQueue(cwd, ticket.prNumber!, pr.headRefOid);
+      if (outcome === 'in-queue' || outcome === 'merged') return;
+      mergeQueueAttempts.set(ticket.id, { head: pr.headRefOid, times: queuedAtHead + 1 });
+      const said = {
+        queued: `${label} is in the merge queue${queuedAtHead ? ' again' : ''}.`,
+        pending: `${label}: asked GitHub to add it to the merge queue.`,
+        failed: `${label}: GitHub would not add it to the merge queue: ${message ?? 'no reason given'}`,
+      };
+      return systemMessage(scope, said[outcome]);
+    }
+    case 'stop':
+      if (queuedAtHead > MERGE_QUEUE_ATTEMPTS_PER_HEAD) return;
+      mergeQueueAttempts.set(ticket.id, { head: pr.headRefOid, times: queuedAtHead + 1 });
+      return systemMessage(
+        scope,
+        `${label} left the merge queue ${MERGE_QUEUE_ATTEMPTS_PER_HEAD} times at the same commit, so auto-merge stops adding it back until the PR changes. The merge queue's checks show why.`,
+      );
+    case 'wait':
+      return;
+  }
+}
+
+async function stackDependentTickets(): Promise<void> {
+  const rows = await sql<{ id: string }[]>`
+    select distinct i.id from initiatives i join tickets t on t.initiative_id = i.id
+    where i.status <> 'archived' and t.status not in ('merged', 'canceled')`;
+  for (const { id } of rows) {
+    const tickets = await repo.listTickets(id);
+    const stacked = stackDependencies(tickets);
+    if (!stacked) continue;
+    const restacked = stacked.filter((t, i) => t.dependsOn.join() !== tickets[i].dependsOn.join());
+    if (!restacked.length) continue;
+    const waves = new Map(topoOrder(stacked)!.map((o) => [o.key, o.wave]));
+    for (const t of stacked) await repo.updateTicket(t.id, { dependsOn: t.dependsOn, wave: waves.get(t.key)! });
+    const seqOf = (key: string) => seqLabel(tickets.find((t) => t.key === key)!.seq);
+    await systemMessage(
+      { initiativeId: id },
+      `Stacked the dependent tickets into one line (${restacked.map((t) => `${seqLabel(t.seq)} on ${seqOf(t.dependsOn[0])}`).join(', ')}), so each builds on the one before it and their PRs form one GitHub stack.`,
+    );
+    void syncStack(id);
+  }
 }
 
 function ticketInFlight(ticketId: string): boolean {
@@ -2192,8 +2350,8 @@ interface SweepScope {
   manual?: boolean;
 }
 
-const SWEPT_STATUSES: Ticket['status'][] = ['built', 'changes_requested', 'approved'];
-const MANUALLY_SWEPT_STATUSES: Ticket['status'][] = [...SWEPT_STATUSES, 'blocked'];
+const SETTLED_STATUSES: Ticket['status'][] = ['built', 'changes_requested', 'approved'];
+const MANUALLY_SWEPT_STATUSES: Ticket['status'][] = [...SETTLED_STATUSES, 'blocked'];
 
 async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
   if (!(await ticketIdle(t.id))) return false;
@@ -2285,7 +2443,7 @@ async function adoptPrsFor(scope: SweepScope): Promise<void> {
 export async function sweepOpenPrs(scope: SweepScope = {}): Promise<number> {
   await adoptPrsFor(scope);
   await settleSweepClaims();
-  const statuses = scope.manual ? MANUALLY_SWEPT_STATUSES : SWEPT_STATUSES;
+  const statuses = scope.manual ? MANUALLY_SWEPT_STATUSES : SETTLED_STATUSES;
   const candidates = await sql<Ticket[]>`
     select t.* from tickets t join initiatives i on i.id = t.initiative_id
     where i.status in ('in_progress','done') and t.pr_number is not null and t.branch is not null
@@ -2350,4 +2508,5 @@ export async function recoverOnStartup(): Promise<void> {
   const withMergedWorktrees = await sql<{ id: string }[]>`
     select distinct initiative_id as id from tickets where status = 'merged' and worktree_path is not null`;
   for (const r of withMergedWorktrees) await cleanUpMergedTickets(r.id).catch((e) => console.warn('[recover]', e.message));
+  await stackDependentTickets();
 }

@@ -46,6 +46,7 @@ export interface InitiativeSettings {
   postReviewsToPr: boolean;
   dependentsWaitForCi: boolean;
   autoArbiter: boolean;
+  autoMerge: boolean;
   maxRounds: number;
   maxPlanRounds: number;
   maxArbiterDecisions: number;
@@ -63,6 +64,7 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
   postReviewsToPr: true,
   dependentsWaitForCi: false,
   autoArbiter: true,
+  autoMerge: false,
   maxRounds: 5,
   maxPlanRounds: 3,
   maxArbiterDecisions: 3,

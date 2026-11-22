@@ -103,8 +103,12 @@ export function withRepoLock<T>(repo: string, fn: () => Promise<T>): Promise<T> 
   return result;
 }
 
-export function fetchOrigin(repo: string, opts: { cwd?: string; ref?: string } = {}): Promise<ExecResult> {
-  return withRepoLock(repo, () => git(opts.cwd ?? repo, ['fetch', '--quiet', 'origin', ...(opts.ref ? [opts.ref] : [])], 120_000));
+export function fetchOrigin(repo: string, opts: { cwd?: string; refs?: string[] } = {}): Promise<ExecResult> {
+  return withRepoLock(repo, () => git(opts.cwd ?? repo, ['fetch', '--quiet', 'origin', ...(opts.refs ?? [])], 120_000));
+}
+
+export function trackingRefspec(branch: string): string {
+  return `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
 }
 
 async function gitOut(cwd: string, args: string[]): Promise<string> {
@@ -159,7 +163,7 @@ export async function refExists(repo: string, ref: string): Promise<boolean> {
 
 export async function resolveBaseRef(repo: string, branch: string): Promise<string> {
   if (await remoteUrl(repo)) {
-    await fetchOrigin(repo, { ref: branch });
+    await fetchOrigin(repo, { refs: [branch] });
     if (await refExists(repo, `origin/${branch}`)) return `origin/${branch}`;
   }
   if (await refExists(repo, branch)) return branch;
@@ -247,6 +251,31 @@ export async function commitsAhead(worktree: string, base: string): Promise<numb
   return r.code === 0 ? Number(r.stdout.trim()) : 0;
 }
 
+export async function isAncestor(cwd: string, ancestor: string, descendant: string): Promise<boolean> {
+  return (await git(cwd, ['merge-base', '--is-ancestor', ancestor, descendant])).code === 0;
+}
+
+async function everPointedAt(cwd: string, ref: string, sha: string): Promise<boolean> {
+  const r = await git(cwd, ['reflog', 'show', '--format=%H', ref]);
+  return r.code === 0 && r.stdout.split('\n').includes(sha);
+}
+
+export type CatchUp = 'current' | 'fast-forwarded' | 'followed-rewrite' | 'ahead' | 'diverged';
+
+export async function catchUpWith(worktree: string, remoteRef: string): Promise<CatchUp> {
+  const [head, remote] = await Promise.all([headSha(worktree), revParse(worktree, remoteRef)]);
+  if (!head || !remote) return 'diverged';
+  if (head === remote) return 'current';
+  if (await isAncestor(worktree, head, remote)) {
+    await gitOut(worktree, ['merge', '--ff-only', '--quiet', remote]);
+    return 'fast-forwarded';
+  }
+  if (await isAncestor(worktree, remote, head)) return 'ahead';
+  if (!(await everPointedAt(worktree, remoteRef, head))) return 'diverged';
+  await resetHard(worktree, remote);
+  return 'followed-rewrite';
+}
+
 async function lines(cwd: string, args: string[]): Promise<string[]> {
   return (await gitOut(cwd, args)).split('\n').filter(Boolean);
 }
@@ -261,7 +290,7 @@ async function ownCommitMessage(worktree: string, start: string, rewritten: stri
 }
 
 export async function restoreHistoryFrom(worktree: string, start: string, fallbackMessage: string): Promise<string[]> {
-  if ((await git(worktree, ['merge-base', '--is-ancestor', start, 'HEAD'])).code === 0) return [];
+  if (await isAncestor(worktree, start, 'HEAD')) return [];
   const rewritten = await lines(worktree, ['log', '--format=%s', `HEAD..${start}`]);
   const message = await ownCommitMessage(worktree, start, rewritten, fallbackMessage);
   await gitOut(worktree, ['reset', '--soft', '--quiet', start]);

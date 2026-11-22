@@ -1,16 +1,35 @@
-import type { Ticket } from '@factory/shared';
+import type { Ticket, TicketStatus } from '@factory/shared';
 import type { PrStack } from '../github.ts';
 import { remoteBranchOf } from './adopted-prs.ts';
 
+type StackMember = Pick<Ticket, 'key' | 'dependsOn' | 'status'>;
 type StackFields = Pick<Ticket, 'branch' | 'prHeadRef' | 'baseRef' | 'prNumber' | 'prState'>;
+
+const LEFT_THE_STACK: TicketStatus[] = ['merged', 'canceled'];
+const isOpenPr = (t: StackFields) => !!t.prNumber && t.prState === 'OPEN';
+
+export function stackBase<T extends StackMember>(ticket: T, all: T[]): T | null {
+  const seen = new Set<string>();
+  for (let current = ticket; ; ) {
+    seen.add(current.key);
+    const parent = all.find((t) => t.key === current.dependsOn[0]);
+    if (!parent || seen.has(parent.key)) return null;
+    if (!LEFT_THE_STACK.includes(parent.status)) return parent;
+    current = parent;
+  }
+}
+
+export function syncTarget<T extends StackMember & StackFields>(ticket: T, all: T[], baseBranch: string): { parent: T | null; target: string } | null {
+  const parent = stackBase(ticket, all);
+  if (parent) return isOpenPr(parent) ? { parent, target: remoteBranchOf(parent)! } : null;
+  return ticket.baseRef === baseBranch ? null : { parent: null, target: baseBranch };
+}
 
 export type StackStep =
   | { kind: 'create'; prs: number[] }
   | { kind: 'add'; stack: number; prs: number[] }
   | { kind: 'done'; stack: number }
   | { kind: 'taken'; parent: number; top: number };
-
-const isOpenPr = (t: StackFields) => !!t.prNumber && t.prState === 'OPEN';
 
 export function stackChain<T extends StackFields>(ticket: T, all: T[]): number[] | null {
   if (!isOpenPr(ticket)) return null;

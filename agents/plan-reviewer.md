@@ -31,7 +31,9 @@ or anything else.
 - **Slicing.** Vertical slices with an observable outcome, not layers. Each
   fits one reviewable PR; flag any that will clearly exceed its size.
 - **Dependencies.** Missing edges (a ticket needs code another ticket creates)
-  break builds; unneeded edges serialize work. Check both.
+  break builds; unneeded edges pull independent tickets into a stack, where
+  they are built and merged one after another. Check both, and that a stack's
+  order is the order a reviewer should read it.
 - **Edge cases and tests.** The edge cases that really apply are listed and
   owned by a ticket; the test strategy uses test layers that exist in this repo.
 - **Measurability.** Success criteria and outcomes are measurable. Reject

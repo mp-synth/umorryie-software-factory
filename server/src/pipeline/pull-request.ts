@@ -7,9 +7,8 @@ export interface PullRequestText {
 }
 
 interface Description {
-  what: string;
   why: string;
-  overview: string[];
+  what: string[];
 }
 
 type DescriptionPart = keyof Description;
@@ -19,12 +18,10 @@ export const CLAUDE_CODE_ATTRIBUTION = '🤖 Generated with [Claude Code](https:
 const ATTRIBUTION_LINE = /^\s*(🤖\s*)?Generated with \[?Claude Code\]?|^\s*Co-Authored-By/i;
 const MIN_TITLE_LENGTH = 8;
 const MAX_TITLE_LENGTH = 72;
-const MAX_WHAT_SENTENCES = 2;
 const MAX_WHY_SENTENCES = 3;
-const MIN_OVERVIEW_BULLETS = 2;
-const MAX_OVERVIEW_BULLETS = 4;
-const MAX_BULLET_LENGTH = 100;
-const PART_LABEL = /^\*{0,2}(what|why|overview)\b\*{0,2}(:)?\*{0,2}\s*(.*)$/i;
+const MAX_WHAT_BULLETS = 4;
+const MAX_BULLET_LENGTH = 240;
+const HEADING = /^#{2,3}\s+(.+?)\s*:?$/;
 const BULLET = /^[-*+]\s+(.+)$/;
 const STRUCTURED_LINE = /^\s*(#|[-*+]\s|\d+[.)]\s|\||>|```|\[[ x]\])/i;
 const FILE_PATH = /(^|[\s(`])[\w.-]+\/[\w./-]+|\b[\w-]+\.(ts|tsx|js|jsx|py|go|rs|rb|java|kt|sql|json|ya?ml|md)\b/;
@@ -45,44 +42,32 @@ function isOutcomeTitle(title: string): boolean {
   return title.length >= MIN_TITLE_LENGTH && title.length <= MAX_TITLE_LENGTH && !/^[[\d]/.test(title) && !/[.:]$/.test(title);
 }
 
-function isShortProse(lines: string[], maxSentences: number): boolean {
-  return lines.length > 0 && !lines.some((l) => STRUCTURED_LINE.test(l)) && sentenceCount(lines.join(' ')) <= maxSentences;
+function isShortProse(lines: string[]): boolean {
+  return lines.length > 0 && !lines.some((l) => STRUCTURED_LINE.test(l)) && sentenceCount(lines.join(' ')) <= MAX_WHY_SENTENCES;
 }
 
-function overviewBullets(lines: string[]): string[] | null {
+function bulletList(lines: string[]): string[] | null {
   const bullets = lines.map((l) => BULLET.exec(l)?.[1].trim() ?? null);
-  if (bullets.length < MIN_OVERVIEW_BULLETS || bullets.length > MAX_OVERVIEW_BULLETS) return null;
+  if (bullets.length < 1 || bullets.length > MAX_WHAT_BULLETS) return null;
   return bullets.every((b) => b && b.length <= MAX_BULLET_LENGTH && !STRUCTURED_LINE.test(b)) ? (bullets as string[]) : null;
 }
 
 function parseDescription(text: string): Description | null {
   if (FILE_PATH.test(text)) return null;
-  const parts: Record<DescriptionPart, string[]> = { what: [], why: [], overview: [] };
+  const parts: Record<DescriptionPart, string[]> = { why: [], what: [] };
   let current: DescriptionPart | null = null;
   for (const line of text.split('\n').map((l) => l.trim()).filter(Boolean)) {
-    const label = PART_LABEL.exec(line);
-    if (label && (label[2] || !label[3])) {
-      current = label[1].toLowerCase() as DescriptionPart;
-      if (label[3]) parts[current].push(label[3]);
-    } else if (current) {
-      parts[current].push(line);
-    } else {
-      return null;
-    }
+    const heading = HEADING.exec(line)?.[1].toLowerCase();
+    if (heading === 'why' || heading === 'what') current = heading;
+    else if (heading || !current) return null;
+    else parts[current].push(line);
   }
-  const overview = overviewBullets(parts.overview);
-  if (!isShortProse(parts.what, MAX_WHAT_SENTENCES) || !isShortProse(parts.why, MAX_WHY_SENTENCES) || !overview) return null;
-  return { what: parts.what.join(' '), why: parts.why.join(' '), overview };
+  const what = bulletList(parts.what);
+  return isShortProse(parts.why) && what ? { why: parts.why.join(' '), what } : null;
 }
 
-function renderDescription({ what, why, overview }: Description): string {
-  return [
-    `**What:** ${what}`,
-    `**Why:** ${why}`,
-    overview.length ? ['**Overview**', ...overview.map((b) => `- ${b}`)].join('\n') : '',
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+function renderDescription({ why, what }: Description): string {
+  return `## Why\n\n${why}\n\n## What\n\n${what.map((b) => `- ${b}`).join('\n')}`;
 }
 
 export function pullRequestText(buildMd: string | null | undefined, ticket: Pick<Ticket, 'title' | 'what' | 'goal'>): PullRequestText {
@@ -91,6 +76,6 @@ export function pullRequestText(buildMd: string | null | undefined, ticket: Pick
   const description = parseDescription(rest.filter((line) => !ATTRIBUTION_LINE.test(line)).join('\n'));
   return {
     title: isOutcomeTitle(title) ? title : ticket.title,
-    body: `${renderDescription(description ?? { what: ticket.what, why: ticket.goal, overview: [] })}\n\n${CLAUDE_CODE_ATTRIBUTION}`,
+    body: `${renderDescription(description ?? { why: ticket.goal, what: [ticket.what] })}\n\n${CLAUDE_CODE_ATTRIBUTION}`,
   };
 }

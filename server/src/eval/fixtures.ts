@@ -101,7 +101,7 @@ const CHECKS_OUTPUT = 'no syntax errors';
 const checksMd = (cwd: string, logPath: string) =>
   `GATE: PASS\n\n${gateBody({ command: CHECKS_COMMAND, code: 0, timedOut: false, seconds: 1, cwd, output: CHECKS_OUTPUT, logPath })}`;
 
-function buildMd(t: TicketSpec, o: { bullets: string[]; changes: string[]; evidence: string[]; notes: string; what: string; why: string; overview: string[] }): string {
+function buildMd(t: TicketSpec, o: { bullets: string[]; changes: string[]; evidence: string[]; notes: string; why: string; what: string[] }): string {
   return [
     'STATUS: READY',
     '',
@@ -125,12 +125,11 @@ function buildMd(t: TicketSpec, o: { bullets: string[]; changes: string[]; evide
     '## Pull request',
     t.title,
     '',
-    `**What:** ${o.what}`,
+    '### Why',
+    o.why,
     '',
-    `**Why:** ${o.why}`,
-    '',
-    '**Overview**',
-    ...o.overview.map((l) => `- ${l}`),
+    '### What',
+    ...o.what.map((l) => `- ${l}`),
   ].join('\n');
 }
 
@@ -380,9 +379,8 @@ test('unitPrice rejects quantities that are not positive integers', () => {
       changes: ['src/pricing.js: unitPrice with the threshold and rate constants', 'test/pricing.test.js: below, at and above the threshold, rounding and invalid quantities'],
       evidence: ['test/pricing.test.js covers 1 and 9 units', 'test/pricing.test.js covers 10 and 11 units and rounding', 'test/pricing.test.js covers 0 and 1.5'],
       notes: 'None.',
-      what: 'Orders of ten or more units get 10% off each unit.',
       why: 'Bulk buyers were paying the full unit price.',
-      overview: ['Orders of ten or more units get the bulk price', 'Quantities that are not positive integers are rejected'],
+      what: ['Orders of ten or more units get the bulk price', 'Quantities that are not positive integers are rejected'],
     },
   ),
   reviewCase(
@@ -427,9 +425,8 @@ test('large orders qualify', () => {
       changes: ['src/shipping.js: the threshold constant and the predicate', 'test/shipping.test.js: a small and a large order'],
       evidence: ['The predicate compares against FREE_SHIPPING_CENTS', 'test/shipping.test.js small orders'],
       notes: 'None.',
-      what: 'Orders of 50.00 or more ship for free.',
       why: 'Shoppers asked for a free shipping threshold.',
-      overview: ['Free shipping applies from a 50.00 order total', 'Tests a small and a large order'],
+      what: ['Free shipping applies from a 50.00 order total', 'Tests a small and a large order'],
     },
   ),
   reviewCase(
@@ -482,9 +479,8 @@ test('inviting the same email twice throws', async () => {
       changes: ['src/invites.js: createInvite', 'test/invites.test.js: stores a pending invite, rejects a duplicate'],
       evidence: ['test/invites.test.js first test', 'test/invites.test.js second test'],
       notes: 'None.',
-      what: 'Admins can invite a person by email, once.',
       why: 'Invites were created by hand in the store.',
-      overview: ['Admins can invite an email address', 'Inviting an email that was already invited is rejected'],
+      what: ['Admins can invite an email address', 'Inviting an email that was already invited is rejected'],
     },
   ),
   reviewCase(
@@ -527,9 +523,8 @@ test('slugify keeps digits', () => {
       changes: ['src/text.js: slugify pattern allows 0-9', 'test/text.test.js: digits test'],
       evidence: ['test/text.test.js digits test', 'test/text.test.js existing slugify test'],
       notes: 'None.',
-      what: 'Slugs keep the digits of numbered titles.',
       why: 'Titles like "Release 2024" lost their number.',
-      overview: ['Slugs keep the digits of numbered titles', 'Adds a test for numbered titles'],
+      what: ['Slugs keep the digits of numbered titles', 'Adds a test for numbered titles'],
     },
   ),
   reviewCase(
@@ -581,9 +576,8 @@ test('deleteItem removes the item for an admin', async () => {
       changes: ['src/store.js: remove(id)', 'src/handlers.js: deleteItem', 'test/handlers.test.js: admin deletes an item'],
       evidence: ['test/handlers.test.js admin test', 'Handlers follow the pattern of listItems'],
       notes: 'None.',
-      what: 'Admins can delete an item by id.',
       why: 'Items could only be removed by editing the store by hand.',
-      overview: ['Admins can delete an item by id', 'Tests an admin deleting an item'],
+      what: ['Admins can delete an item by id', 'Tests an admin deleting an item'],
     },
   ),
   reviewCase(
@@ -634,9 +628,8 @@ test('truncate cuts long text to the limit with an ellipsis', () => {
       changes: ['src/text.js: truncate', 'test/text.test.js: short and long text'],
       evidence: ['test/text.test.js short text', 'test/text.test.js long text'],
       notes: 'None.',
-      what: 'Long text can be cut to a maximum length.',
       why: 'Long names broke list layouts.',
-      overview: ['Long text can be cut to a maximum length with an ellipsis', 'Tests short and long text'],
+      what: ['Long text can be cut to a maximum length with an ellipsis', 'Tests short and long text'],
     },
   ),
   reviewCase(
@@ -685,9 +678,8 @@ test('formatLine shows two decimals', () => {
       changes: ['src/invoice.js: formatLine', 'test/invoice.test.js: total and decimals'],
       evidence: ['test/invoice.test.js total', 'test/invoice.test.js decimals'],
       notes: 'None.',
-      what: 'Invoices show one readable line per item.',
       why: 'Invoice lines were assembled by hand in callers.',
-      overview: ['Invoices show one line per item with its total', 'Tests the total and the decimals'],
+      what: ['Invoices show one line per item with its total', 'Tests the total and the decimals'],
     },
   ),
   verifyCase('verify-clean-fix', 'APPROVE', null, null, [], {
