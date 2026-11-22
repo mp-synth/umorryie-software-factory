@@ -36,6 +36,24 @@ export async function findPr(cwd: string, branch: string): Promise<PrRef | null>
   return list[0] ?? null;
 }
 
+export interface OpenPr {
+  number: number;
+  title: string;
+  url: string;
+  body: string;
+  headRefName: string;
+  baseRefName: string;
+  isCrossRepository: boolean;
+}
+
+export async function myOpenPrs(cwd: string): Promise<OpenPr[]> {
+  const r = await gh(cwd, [
+    'pr', 'list', '--author', '@me', '--state', 'open', '--limit', '100', '--json', 'number,title,url,body,headRefName,baseRefName,isCrossRepository',
+  ]);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh pr list exited ${r.code}`);
+  return JSON.parse(r.stdout || '[]') as OpenPr[];
+}
+
 export async function createPr(
   cwd: string,
   opts: { base: string; head: string; title: string; body: string },

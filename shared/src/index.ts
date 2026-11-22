@@ -159,9 +159,12 @@ export interface PlanJson {
   tickets: PlanTicket[];
 }
 
+export type InitiativeKind = 'feature' | 'open-prs';
+
 export interface Initiative {
   id: string;
   projectId: string;
+  kind: InitiativeKind;
   slug: string;
   title: string;
   brief: string;
@@ -199,6 +202,7 @@ export interface Ticket {
   prNumber: number | null;
   prUrl: string | null;
   prState: string | null;
+  prHeadRef: string | null;
   lastVerdict: string | null;
   gateStatus: 'pass' | 'fail' | 'skipped' | null;
   blockedReason: string | null;

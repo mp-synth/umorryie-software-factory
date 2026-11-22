@@ -293,6 +293,6 @@ export async function mergeInto(worktree: string, ref: string): Promise<{ ok: bo
   return { ok: true, output: r.stdout.trim() };
 }
 
-export async function push(worktree: string, branch: string): Promise<ExecResult> {
-  return git(worktree, ['push', '--quiet', '-u', 'origin', `${branch}:${branch}`], 180_000);
+export async function push(worktree: string, branch: string, remoteBranch = branch): Promise<ExecResult> {
+  return git(worktree, ['push', '--quiet', '-u', 'origin', `${branch}:${remoteBranch}`], 180_000);
 }

@@ -6,7 +6,7 @@ import { toast } from 'sonner';
 import type { InitiativeDetail } from '@factory/shared';
 import { api, ApiError } from '@/lib/api';
 import { toastError, toastSuccess } from '@/lib/toasts';
-import { ago, copy, money, shortPath } from '@/lib/utils';
+import { ago, cn, copy, money, shortPath } from '@/lib/utils';
 import { AutopilotCard } from '@/components/AutopilotCard';
 import { Conversation } from '@/components/Conversation';
 import { Markdown } from '@/components/Markdown';
@@ -72,6 +72,7 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
     onSuccess: ({ count }) => toast.success(count ? `Started a fixer on ${count} PR${count > 1 ? 's' : ''}` : 'No open PR has anything to fix right now'),
     onError: toastError,
   });
+  const isFeature = i.kind !== 'open-prs';
   const hasOpenPrs = detail.tickets.some((t) => t.prNumber && t.prState !== 'MERGED' && t.prState !== 'CLOSED');
   const remove = useMutation({
     mutationFn: () => api.deleteInitiative(i.id),
@@ -165,11 +166,11 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
         )}
       </div>
 
-      <PipelineStrip detail={detail} />
+      {isFeature && <PipelineStrip detail={detail} />}
 
-      <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
+      <div className={cn('grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]', isFeature && 'mt-5')}>
         <div className="min-w-0 space-y-5">
-          <PlanPanel detail={detail} />
+          {isFeature && <PlanPanel detail={detail} />}
           <TicketList detail={detail} />
         </div>
         <div className="space-y-5 xl:sticky xl:top-5 xl:self-start">

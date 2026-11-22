@@ -13,7 +13,8 @@ export function earlierBranches(wanted: string, branch: string): string[] {
 
 type Dependent = Pick<Ticket, 'key' | 'dependsOn' | 'branch' | 'status'>;
 
-export function rebuildBlocker(ticket: Pick<Ticket, 'key' | 'branch'>, wanted: string, all: Dependent[]): string | null {
+export function rebuildBlocker(ticket: Pick<Ticket, 'key' | 'branch'> & { prHeadRef?: string | null }, wanted: string, all: Dependent[]): string | null {
+  if (ticket.prHeadRef) return 'It is your own PR, so the factory never rebuilds it: rewriting its history is your call.';
   const started = all.filter((t) => t.dependsOn.includes(ticket.key) && t.branch && t.status !== 'canceled');
   if (started.length) return `It is not rebuilt automatically because ${started.map((t) => t.key).join(', ')} already build on its branch.`;
   if (buildNumber(wanted, ticket.branch ?? wanted) >= MAX_BUILDS) return `It is not rebuilt automatically because it was already built ${MAX_BUILDS} times.`;

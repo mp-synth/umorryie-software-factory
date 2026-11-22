@@ -84,7 +84,7 @@ export async function getInitiative(id: string): Promise<Initiative | null> {
 }
 
 export async function insertInitiative(
-  i: Pick<Initiative, 'projectId' | 'slug' | 'title' | 'brief' | 'baseBranch' | 'settings'>,
+  i: Pick<Initiative, 'projectId' | 'slug' | 'title' | 'brief' | 'baseBranch' | 'settings'> & Partial<Pick<Initiative, 'kind'>>,
 ): Promise<Initiative> {
   const [row] = await sql<Initiative[]>`insert into initiatives ${sql(prepare(i))} returning *`;
   emitChange({ type: 'initiative', id: row.id, initiativeId: row.id });
@@ -157,6 +157,28 @@ export async function updateTicket(id: string, patch: Partial<Ticket>): Promise<
 function touchTicket(row: Ticket | undefined): Ticket | null {
   if (row) emitChange({ type: 'ticket', id: row.id, initiativeId: row.initiativeId });
   return row ?? null;
+}
+
+export async function insertTicketIfNew(t: Omit<Ticket, 'id' | 'createdAt' | 'updatedAt'>): Promise<Ticket | null> {
+  const [row] = await sql<Ticket[]>`insert into tickets ${sql(prepare(t))} on conflict (initiative_id, key) do nothing returning *`;
+  return touchTicket(row);
+}
+
+export async function openPrsInitiative(projectId: string): Promise<Initiative | null> {
+  const [i] = await sql<Initiative[]>`select * from initiatives where project_id = ${projectId} and kind = 'open-prs'`;
+  return i ? normalizeInitiative(i) : null;
+}
+
+export async function trackedPrNumbers(projectId: string): Promise<Set<number>> {
+  const rows = await sql<{ prNumber: number }[]>`
+    select t.pr_number from tickets t join initiatives i on i.id = t.initiative_id
+    where i.project_id = ${projectId} and t.pr_number is not null`;
+  return new Set(rows.map((r) => r.prNumber));
+}
+
+export async function nextTicketSeq(initiativeId: string): Promise<number> {
+  const [{ next }] = await sql<{ next: number }[]>`select coalesce(max(seq), 0)::int + 1 as next from tickets where initiative_id = ${initiativeId}`;
+  return next;
 }
 
 export async function claimPrSweep(ticketId: string, fingerprint: string): Promise<Ticket | null> {

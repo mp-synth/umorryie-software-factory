@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings, type Initiative, type Project, type Run, type RunKind, type Ticket } from '@factory/shared';
+import { DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings, type Initiative, type Project, type Run, type RunKind, type Ticket } from '@factory/shared';
 import { agentEnvironment, type AgentEnvironment } from '../agent-env.ts';
 import { config } from '../config.ts';
 import { sql } from '../db.ts';
@@ -28,9 +28,10 @@ import {
 } from './files.ts';
 import { mergedTicketCleanups } from './cleanup.ts';
 import { ticketLabel } from './labels.ts';
+import { adoptablePrs, adoptedTicket, remoteBranchOf } from './adopted-prs.ts';
 import { pullRequestText } from './pull-request.ts';
 import { earlierBranches, rebuildBlocker } from './rebuild.ts';
-import { firstLine, section, validatePlan } from './plan.ts';
+import { firstLine, section, slugify, validatePlan } from './plan.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
 import { describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
@@ -859,6 +860,21 @@ async function prepareWorktree(run: Run, init: Initiative, project: Project, tic
   write(marker, new Date().toISOString());
 }
 
+async function fetchPrHead(project: Project, ticket: Ticket): Promise<void> {
+  const head = ticket.prHeadRef!;
+  const r = await gitx.fetchOrigin(project.repoPath, { ref: `+refs/heads/${head}:refs/remotes/origin/${head}` });
+  if (r.code !== 0) throw new Error(`could not fetch ${head} from origin: ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
+}
+
+async function catchUpWithPrHead(run: Run, project: Project, ticket: Ticket): Promise<void> {
+  await fetchPrHead(project, ticket);
+  const r = await gitx.git(ticket.worktreePath!, ['merge', '--ff-only', '--quiet', `origin/${ticket.prHeadRef}`]);
+  if (r.code !== 0) {
+    throw new Error(`${ticket.branch} has diverged from origin/${ticket.prHeadRef}, so the fix would not push cleanly: ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
+  }
+  await log(run, `Up to date with origin/${ticket.prHeadRef}.`);
+}
+
 async function ensureTicketWorktree(run: Run, init: Initiative, project: Project, ticket: Ticket): Promise<Ticket> {
   if (ticket.branch && ticket.worktreePath && fs.existsSync(path.join(ticket.worktreePath, '.git'))) {
     await prepareWorktree(run, init, project, ticket);
@@ -872,6 +888,15 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
     const restored = await repo.updateTicket(ticket.id, { worktreePath: wt });
     await prepareWorktree(run, init, project, restored);
     return restored;
+  }
+  if (ticket.prHeadRef) {
+    await log(run, `Checking out ${ticket.prHeadRef} from origin as ${ticket.branch}`);
+    await fetchPrHead(project, ticket);
+    await gitx.ensureWorktree(project.repoPath, wt, ticket.branch!, `origin/${ticket.prHeadRef}`);
+    fs.rmSync(setupDoneMarker(init, ticket), { force: true });
+    const checkedOut = await repo.updateTicket(ticket.id, { worktreePath: wt });
+    await prepareWorktree(run, init, project, checkedOut);
+    return checkedOut;
   }
 
   const all = await repo.listTickets(init.id);
@@ -1115,14 +1140,15 @@ async function publish(run: Run, init: Initiative, project: Project, ticket: Tic
     await log(run, 'No origin remote: keeping the branch local (no push, no PR).');
     return false;
   }
-  const pushed = await gitx.push(ticket.worktreePath!, ticket.branch!);
+  const remoteBranch = remoteBranchOf(ticket)!;
+  const pushed = await gitx.push(ticket.worktreePath!, ticket.branch!, remoteBranch);
   if (pushed.code !== 0) {
     const why = (pushed.stderr || pushed.stdout).trim().slice(0, 1000);
     await log(run, `Push failed: ${why}`);
     await systemMessage(run, `${ticketLabel(ticket)}: push failed.\n\n\`\`\`\n${why}\n\`\`\``);
     return false;
   }
-  await log(run, `Pushed ${ticket.branch} to origin.`);
+  await log(run, `Pushed ${remoteBranch} to origin.`);
   if (!gitx.isGithubUrl(remote) || ticket.prNumber) return true;
   const found = await gh.findPr(ticket.worktreePath!, ticket.branch!);
   if (found && found.state === 'OPEN') {
@@ -1334,6 +1360,7 @@ async function runFix(run: Run): Promise<void> {
   const project = await mustProject(init.projectId);
   let ticket = await mustTicket(run.ticketId!);
   ticket = await ensureTicketWorktree(run, init, project, ticket);
+  if (ticket.prHeadRef) await catchUpWithPrHead(run, project, ticket);
   const s = repo.initiativeSettings(init);
   const all = await repo.listTickets(init.id);
   const dir = ticketRoundDir(init, ticket, run.round);
@@ -1451,7 +1478,7 @@ async function rerunUnrelatedFailures(run: Run, ticket: Ticket, fixMd: string): 
 }
 
 async function verifyRangeStart(init: Initiative, ticket: Ticket, fixes: Run[]): Promise<string> {
-  const pushed = `origin/${ticket.branch}`;
+  const pushed = `origin/${remoteBranchOf(ticket)}`;
   if (await gitx.refExists(ticket.worktreePath!, pushed)) return pushed;
   const oldest = fixes[fixes.length - 1];
   const sha = oldest ? readIfExists(path.join(roundDirOf(init, ticket, oldest), 'start-sha'))?.trim() : null;
@@ -1767,21 +1794,20 @@ export async function bulk(initiativeId: string, action: 'run-ready' | 'review-a
 }
 
 export async function syncPrs(initiativeId: string): Promise<number> {
-  const tickets = (await repo.listTickets(initiativeId)).filter((t) => t.prNumber && t.worktreePath);
+  const tickets = (await repo.listTickets(initiativeId)).filter((t) => t.prNumber && !['merged', 'canceled'].includes(t.status));
   let changed = 0;
   for (const t of tickets) {
-    const cwd = fs.existsSync(t.worktreePath!) ? t.worktreePath! : (await mustProject((await mustInitiative(initiativeId)).projectId)).repoPath;
+    const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : (await mustProject((await mustInitiative(initiativeId)).projectId)).repoPath;
     const snap = await gh.prSnapshot(cwd, t.prNumber!);
     if (!snap) continue;
     const patch: Partial<Ticket> = {};
     if (snap.state !== t.prState) patch.prState = snap.state;
-    if (snap.state === 'MERGED' && t.status !== 'merged') patch.status = 'merged';
+    if (snap.state === 'MERGED') patch.status = 'merged';
+    if (snap.state === 'CLOSED' && t.prHeadRef) patch.status = 'canceled';
     if (Object.keys(patch).length) {
       await repo.updateTicket(t.id, patch);
       changed++;
-      if (patch.status === 'merged') {
-        await systemMessage({ initiativeId, ticketId: t.id }, `${ticketLabel(t)} was merged.`);
-      }
+      if (patch.status) await systemMessage({ initiativeId, ticketId: t.id }, `${ticketLabel(t)} was ${patch.status === 'merged' ? 'merged' : 'closed'}.`);
     }
   }
   await cleanUpMergedTickets(initiativeId);
@@ -1874,7 +1900,54 @@ async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: 
   return started;
 }
 
+async function createOpenPrsInitiative(project: Project): Promise<Initiative> {
+  try {
+    const created = await repo.insertInitiative({
+      kind: 'open-prs',
+      projectId: project.id,
+      slug: slugify(`open prs ${project.name}`, 32),
+      title: `Open PRs · ${project.name}`,
+      brief: `PRs you opened in ${project.name} outside the factory. Every sweep adopts new ones, and a fresh fixer answers their review comments and fixes failing CI and conflicts on their own branches. Archive this initiative to stop adopting PRs from this repo.`,
+      baseBranch: project.defaultBranch,
+      settings: DEFAULT_INITIATIVE_SETTINGS,
+    });
+    return await repo.updateInitiative(created.id, { status: 'in_progress', approvedAt: new Date().toISOString() });
+  } catch (err) {
+    const raced = await repo.openPrsInitiative(project.id);
+    if (raced) return raced;
+    throw err;
+  }
+}
+
+async function adoptOpenPrs(project: Project): Promise<void> {
+  if (!gitx.isGithubUrl(project.remoteUrl)) return;
+  const existing = await repo.openPrsInitiative(project.id);
+  if (existing?.status === 'archived') return;
+  const fresh = adoptablePrs(await gh.myOpenPrs(project.repoPath), await repo.trackedPrNumbers(project.id));
+  if (!fresh.length) return;
+  const inbox = existing ?? (await createOpenPrsInitiative(project));
+  let seq = await repo.nextTicketSeq(inbox.id);
+  for (const pr of fresh) {
+    const t = await repo.insertTicketIfNew({ initiativeId: inbox.id, ...adoptedTicket(pr, seq) });
+    if (!t) continue;
+    seq++;
+    await systemMessage(
+      { initiativeId: inbox.id, ticketId: t.id },
+      `Adopted ${pr.url} (\`${pr.headRefName}\`). The PR sweep fixes its review comments, failing CI and conflicts on that branch.`,
+    );
+  }
+  await refreshInitiativeStatus(inbox.id);
+}
+
+async function adoptPrsFor(scope: SweepScope): Promise<void> {
+  const init = scope.initiativeId ? await mustInitiative(scope.initiativeId) : null;
+  if (init && init.kind !== 'open-prs') return;
+  const projects = init ? [await mustProject(init.projectId)] : await repo.listProjects();
+  await Promise.all(projects.map((p) => adoptOpenPrs(p).catch((err) => console.warn('[pr-sweep]', `${p.name}: ${(err as Error).message}`))));
+}
+
 export async function sweepOpenPrs(scope: SweepScope = {}): Promise<number> {
+  await adoptPrsFor(scope);
   await settleSweepClaims();
   const statuses = scope.manual ? MANUALLY_SWEPT_STATUSES : SWEPT_STATUSES;
   const candidates = await sql<Ticket[]>`

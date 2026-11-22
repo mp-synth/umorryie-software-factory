@@ -92,7 +92,7 @@ export function SettingsPage() {
             />
             <Toggle
               label={`Fix open PRs every ${PR_SWEEP_INTERVAL_MINUTES} minutes`}
-              hint={`Merge conflicts, failing CI (tests, lint) and unanswered review comments on every open factory PR get a fresh fixer. Tickets that need you are skipped. A PR being fixed is marked so the next sweep leaves it alone; the mark expires after ${PR_SWEEP_CLAIM_MINUTES} minutes.`}
+              hint={`Merge conflicts, failing CI (tests, lint) and unanswered review comments get a fresh fixer, on every open factory PR and on every open PR you opened in a project's repo (adopted into that project's Open PRs initiative; archive it to stop). Tickets that need you are skipped. A PR being fixed is marked so the next sweep leaves it alone; the mark expires after ${PR_SWEEP_CLAIM_MINUTES} minutes.`}
               checked={form.sweepOpenPrs}
               onChange={(v) => setForm({ ...form, sweepOpenPrs: v })}
             />

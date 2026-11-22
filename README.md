@@ -72,7 +72,13 @@ its PR, leaves every PR in draft for you to mark ready, and **Fix all PRs** turn
 threads into a fix round (the factory's own comments are ignored).
 
 Every 15 minutes a PR sweep does the same on its own for every open factory PR
-across all initiatives: a merge conflict, failing CI that has finished (tests,
+across all initiatives, and for every open PR you opened yourself in a
+project's GitHub repo. Those are adopted into the project's **Open PRs**
+initiative: the fixer works on a local `factory/pr-<n>` worktree that tracks
+the PR's branch, pushes verified fixes to that branch (never force), and never
+rebuilds your PR. Like any initiative, it reviews each fixed branch and posts
+the review on the PR unless you switch that off in its Autopilot card. Archive a project's Open PRs initiative to stop
+adopting from that repo. For each PR, a merge conflict, failing CI that has finished (tests,
 lint) or unanswered review comments start a fresh fixer, which goes through
 checks and the verifier like any other fix. A PR being fixed carries a
 "sweep fixing" mark on its ticket row, so the next sweep leaves it alone; the

@@ -34,6 +34,11 @@ test('ignores canceled dependents', () => {
   assert.equal(rebuildBlocker(all[0], wanted, all), null);
 });
 
+test('never rebuilds a PR the owner opened outside the factory', () => {
+  const adopted = { ...ticket('pr-7', 'factory/pr-7'), prHeadRef: 'feature/x' };
+  assert.match(rebuildBlocker(adopted, 'factory/pr-7', [adopted]) ?? '', /your own PR/);
+});
+
 test('stops rebuilding after the third build', () => {
   const third = ticket('per-video', `${wanted}-v3`);
   assert.match(rebuildBlocker(third, wanted, [third]) ?? '', /already built 3 times/);
