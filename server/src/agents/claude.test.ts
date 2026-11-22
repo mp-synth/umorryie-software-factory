@@ -9,7 +9,7 @@ import type { SpoolOffsets } from './spool.ts';
 
 process.env.CLAUDE_BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fake-claude.mjs');
 
-const { attachAgent, startAgent, startDetachedAgent } = await import('./claude.ts');
+const { attachAgent, buildArgs, startAgent, startDetachedAgent } = await import('./claude.ts');
 const { LeftRunning, readExit, removeSpool } = await import('./spool.ts');
 
 const spec = (scenario: string, timeoutMs = 10_000): AgentSpec => ({
@@ -32,6 +32,18 @@ async function run(scenario: string, timeoutMs?: number) {
 }
 
 const types = (events: AgentEvent[]) => events.map((e) => e.type);
+
+test('runs each factory model on its pinned version with the 1M context window', () => {
+  const modelArg = (model: string) => {
+    const args = buildArgs({ ...spec('success'), model });
+    return args[args.indexOf('--model') + 1];
+  };
+  assert.equal(modelArg('fable'), 'claude-fable-5-2[1m]');
+  assert.equal(modelArg('opus'), 'claude-opus-5-5[1m]');
+  assert.equal(modelArg('sonnet'), 'claude-sonnet-5-5[1m]');
+  assert.equal(modelArg('haiku'), 'claude-haiku-5-5[1m]');
+  assert.equal(modelArg('fake-model'), 'fake-model');
+});
 
 test('maps a successful run to events and result fields', async () => {
   const { events, result } = await run('success');

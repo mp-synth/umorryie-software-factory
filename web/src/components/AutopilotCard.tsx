@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query';
 import { Gauge } from 'lucide-react';
-import { DEFAULT_INITIATIVE_SETTINGS, MODELS, type Initiative, type InitiativeSettings, type Model } from '@factory/shared';
+import { DEFAULT_INITIATIVE_SETTINGS, MODEL_VERSIONS, MODELS, type Initiative, type InitiativeSettings, type Model } from '@factory/shared';
 import { api } from '@/lib/api';
 import { toastError } from '@/lib/toasts';
 import { Card, CardHeader, Select, Switch } from './ui';
@@ -30,8 +30,6 @@ const ROLES: { key: keyof InitiativeSettings['models']; label: string }[] = [
   { key: 'steer', label: 'Feedback router' },
   { key: 'retro', label: 'Retro' },
 ];
-
-const MODEL_LABELS: Record<Model, string> = { fable: 'Fable', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
 
 export function AutopilotCard({ initiative: i }: { initiative: Initiative }) {
   const save = useMutation({
@@ -64,7 +62,7 @@ export function AutopilotCard({ initiative: i }: { initiative: Initiative }) {
                 <Select value={s.models[m.key]} onChange={(e) => save.mutate({ models: { ...s.models, [m.key]: e.target.value as Model } })} className="h-7 text-2xs">
                   {MODELS.map((model) => (
                     <option key={model} value={model}>
-                      {MODEL_LABELS[model]}
+                      {MODEL_VERSIONS[model].label}
                     </option>
                   ))}
                 </Select>

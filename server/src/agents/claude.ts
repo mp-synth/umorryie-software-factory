@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
-import type { RunEventType } from '@factory/shared';
+import { MODEL_VERSIONS, MODELS, type Model, type RunEventType } from '@factory/shared';
 import { redactDeep, type Redact } from '../agent-env.ts';
 import { config } from '../config.ts';
 import { exec, killTree } from '../git.ts';
@@ -141,12 +141,17 @@ function toolResultText(content: unknown): string {
   return '';
 }
 
+/** A factory model name runs its pinned version with the 1M context window, whatever the CLI's aliases point at. Any other name passes through. */
+export function cliModel(model: string): string {
+  return (MODELS as readonly string[]).includes(model) ? `${MODEL_VERSIONS[model as Model].id}[1m]` : model;
+}
+
 export function buildArgs(spec: AgentSpec): string[] {
   const args = [
     '-p', spec.prompt,
     '--output-format', 'stream-json',
     '--verbose',
-    '--model', spec.model,
+    '--model', cliModel(spec.model),
     '--append-system-prompt', spec.rolePrompt,
     '--permission-mode', 'bypassPermissions',
     '--tools', spec.tools.join(','),

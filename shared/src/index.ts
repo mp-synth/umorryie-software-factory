@@ -1,5 +1,12 @@
 export const MODELS = ['fable', 'opus', 'sonnet', 'haiku'] as const;
 export type Model = (typeof MODELS)[number];
+/** The exact Claude version each model name runs. Agents always get the 1M context window on top. */
+export const MODEL_VERSIONS: Record<Model, { id: string; label: string }> = {
+  fable: { id: 'claude-fable-5-2', label: 'Fable 5.2' },
+  opus: { id: 'claude-opus-5-5', label: 'Opus 5.5' },
+  sonnet: { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+  haiku: { id: 'claude-haiku-5-5', label: 'Haiku 5.5' },
+};
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export const INITIATIVE_STATUSES = [
