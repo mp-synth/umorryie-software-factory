@@ -23,8 +23,8 @@ type Size = 'xs' | 'sm' | 'md';
 
 const variants: Record<Variant, string> = {
   primary:
-    'bg-gradient-to-b from-violet-500 to-indigo-600 text-white shadow-[0_1px_0_0_rgba(255,255,255,0.2)_inset,0_6px_20px_-8px_rgba(124,108,255,0.7)] hover:from-violet-400 hover:to-indigo-500 border border-violet-400/30',
-  secondary: 'bg-surface-3 text-zinc-200 border border-line-strong hover:bg-[#23232d] hover:text-white',
+    'bg-gradient-to-b from-violet-500 to-indigo-600 text-on-accent shadow-[0_1px_0_0_rgba(255,255,255,0.2)_inset,0_6px_20px_-8px_rgba(124,108,255,0.7)] hover:from-violet-400 hover:to-indigo-500 border border-violet-400/30',
+  secondary: 'bg-surface-3 text-zinc-200 border border-line-strong hover:bg-surface-4 hover:text-white',
   outline: 'border border-line-strong text-zinc-300 hover:bg-white/[0.04] hover:text-white',
   ghost: 'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100',
   danger: 'bg-rose-500/10 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20',
@@ -293,7 +293,7 @@ export function Switch({ checked, onChange, disabled, label }: { checked: boolea
       disabled={disabled}
       className="relative h-[18px] w-8 shrink-0 rounded-full border border-line-strong bg-surface-3 transition-colors data-[state=checked]:border-violet-400/50 data-[state=checked]:bg-violet-500/70 disabled:opacity-50"
     >
-      <SwitchPrimitive.Thumb className="block h-3 w-3 translate-x-[2px] rounded-full bg-zinc-300 shadow transition-transform data-[state=checked]:translate-x-[15px] data-[state=checked]:bg-white" />
+      <SwitchPrimitive.Thumb className="block h-3 w-3 translate-x-[2px] rounded-full bg-zinc-300 shadow transition-transform data-[state=checked]:translate-x-[15px] data-[state=checked]:bg-on-accent" />
     </SwitchPrimitive.Root>
   );
 }
@@ -329,7 +329,7 @@ export function Tooltip({ content, children, side = 'top' }: { content: ReactNod
         <TooltipPrimitive.Content
           side={side}
           sideOffset={6}
-          className="z-[100] max-w-xs animate-fade-in rounded-md border border-line-strong bg-[#1d1d26] px-2 py-1 text-2xs text-zinc-200 shadow-xl"
+          className="z-[100] max-w-xs animate-fade-in rounded-md border border-line-strong bg-tooltip px-2 py-1 text-2xs text-zinc-200 shadow-xl"
         >
           {content}
         </TooltipPrimitive.Content>
@@ -397,7 +397,7 @@ export function Menu({ trigger, children, align = 'end' }: { trigger: ReactNode;
         <DropdownPrimitive.Content
           align={align}
           sideOffset={6}
-          className="z-[90] min-w-[200px] animate-fade-in rounded-xl border border-line-strong bg-[#17171e] p-1 shadow-2xl"
+          className="z-[90] min-w-[200px] animate-fade-in rounded-xl border border-line-strong bg-popover p-1 shadow-2xl"
         >
           {children}
         </DropdownPrimitive.Content>

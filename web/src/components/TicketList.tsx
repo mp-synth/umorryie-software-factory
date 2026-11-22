@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react';
 import { toast } from 'sonner';
-import type { InitiativeDetail, Run, Ticket } from '@factory/shared';
+import { PR_SWEEP_CLAIM_MINUTES, type InitiativeDetail, type Run, type Ticket } from '@factory/shared';
 import { api, type BulkAction, type TicketAction } from '@/lib/api';
 import { useNow } from '@/lib/live';
 import { runKind, isRunInFlight } from '@/lib/status';
@@ -241,6 +241,14 @@ function TicketRow({
                 <GitPullRequest className="h-3 w-3" />#{t.prNumber}
                 {t.prState && t.prState !== 'OPEN' && <span className="text-zinc-500">({t.prState.toLowerCase()})</span>}
               </a>
+            )}
+            {t.prSweepClaimedAt && (
+              <Tooltip content={`The PR sweep started fixing this PR ${ago(t.prSweepClaimedAt)}. The mark clears when the fix finishes, or after ${PR_SWEEP_CLAIM_MINUTES} minutes.`}>
+                <span className="inline-flex items-center gap-1 text-cyan-300">
+                  <RefreshCw className="h-3 w-3 animate-spin [animation-duration:2.5s]" />
+                  sweep fixing
+                </span>
+              </Tooltip>
             )}
             {t.branch && !t.prUrl && (
               <span className="inline-flex min-w-0 items-center gap-1 font-mono">

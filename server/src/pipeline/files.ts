@@ -5,8 +5,12 @@ import { config } from '../config.ts';
 import { seqLabel, ticketLabel } from './labels.ts';
 import { slugify } from './plan.ts';
 
+function initiativeFolder(i: Initiative): string {
+  return `${i.slug}-${i.id.slice(0, 8)}`;
+}
+
 export function initiativeDir(i: Initiative): string {
-  return path.join(config.home, 'initiatives', `${i.slug}-${i.id.slice(0, 8)}`);
+  return path.join(config.home, 'initiatives', initiativeFolder(i));
 }
 
 export function planRoundDir(i: Initiative, round: number): string {
@@ -26,11 +30,11 @@ export function askDir(i: Initiative, runId: string): string {
 }
 
 export function worktreePath(p: Project, i: Initiative, t: Ticket): string {
-  return path.join(config.home, 'worktrees', slugify(p.name, 30), `${i.slug}-${i.id.slice(0, 8)}`, `${seqLabel(t.seq)}-${t.key}`);
+  return path.join(config.home, 'worktrees', slugify(p.name, 30), initiativeFolder(i), `${seqLabel(t.seq)}-${t.key}`);
 }
 
 export function branchName(i: Initiative, t: Ticket): string {
-  return `factory/${i.slug}/${seqLabel(t.seq)}-${t.key}`;
+  return `factory/${initiativeFolder(i)}/${seqLabel(t.seq)}-${t.key}`;
 }
 
 export function write(file: string, content: string): string {

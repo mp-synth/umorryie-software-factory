@@ -1,7 +1,8 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Cpu, HardDrive, Settings2, XCircle } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
-import type { AppSettings } from '@factory/shared';
+import { toast } from 'sonner';
+import { PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings } from '@factory/shared';
 import { api } from '@/lib/api';
 import { toastError, toastSuccess } from '@/lib/toasts';
 import { shortPath } from '@/lib/utils';
@@ -17,6 +18,11 @@ export function SettingsPage() {
   const save = useMutation({
     mutationFn: (s: Partial<AppSettings>) => api.updateSettings(s),
     onSuccess: toastSuccess('Settings saved'),
+    onError: toastError,
+  });
+  const sweep = useMutation({
+    mutationFn: api.sweepPrs,
+    onSuccess: ({ count }) => toast.success(count ? `Started a fixer on ${count} PR${count > 1 ? 's' : ''}` : 'No open PR needs a fix'),
     onError: toastError,
   });
 
@@ -58,8 +64,8 @@ export function SettingsPage() {
         ) : (
           <div className="space-y-5 p-4">
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Agents running at once" hint="Across every initiative. Gates (checks) count too.">
-                <Input type="number" min={1} max={20} value={form.maxConcurrentAgents} onChange={(e) => setForm({ ...form, maxConcurrentAgents: Number(e.target.value) })} />
+              <Field label="Agents running at once" hint="Across every initiative, shared fairly: each initiative gets an agent before any gets a second. Gates (checks) count too.">
+                <Input type="number" min={1} max={40} value={form.maxConcurrentAgents} onChange={(e) => setForm({ ...form, maxConcurrentAgents: Number(e.target.value) })} />
               </Field>
               <Field label="Agent timeout (minutes)" hint="A run that exceeds this is stopped and marked failed.">
                 <Input type="number" min={5} max={600} value={form.runTimeoutMinutes} onChange={(e) => setForm({ ...form, runTimeoutMinutes: Number(e.target.value) })} />
@@ -84,7 +90,16 @@ export function SettingsPage() {
               checked={form.loadUserSettings}
               onChange={(v) => setForm({ ...form, loadUserSettings: v })}
             />
-            <div className="flex justify-end">
+            <Toggle
+              label={`Fix open PRs every ${PR_SWEEP_INTERVAL_MINUTES} minutes`}
+              hint={`Merge conflicts, failing CI (tests, lint) and unanswered review comments on every open factory PR get a fresh fixer. Tickets that need you are skipped. A PR being fixed is marked so the next sweep leaves it alone; the mark expires after ${PR_SWEEP_CLAIM_MINUTES} minutes.`}
+              checked={form.sweepOpenPrs}
+              onChange={(v) => setForm({ ...form, sweepOpenPrs: v })}
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" loading={sweep.isPending} onClick={() => sweep.mutate()}>
+                Sweep PRs now
+              </Button>
               <Button variant="primary" loading={save.isPending} onClick={() => save.mutate(form)}>
                 Save
               </Button>

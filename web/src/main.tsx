@@ -8,6 +8,7 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import { Toaster } from 'sonner';
 import { Layout } from './components/Layout';
 import { TooltipProvider } from './components/ui';
+import { useTheme } from './lib/theme';
 import { AgentsPage } from './pages/AgentsPage';
 import { Dashboard } from './pages/Dashboard';
 import { InitiativePage } from './pages/InitiativePage';
@@ -38,12 +39,13 @@ createRoot(document.getElementById('root')!).render(
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <RouterProvider router={router} />
-        <Toaster
-          theme="dark"
-          position="bottom-right"
-          toastOptions={{ classNames: { toast: '!bg-[#17171e] !border-[#30303c] !text-zinc-200 !text-xs' } }}
-        />
+        <ThemedToaster />
       </TooltipProvider>
     </QueryClientProvider>
   </StrictMode>,
 );
+
+function ThemedToaster() {
+  const { theme } = useTheme();
+  return <Toaster theme={theme} position="bottom-right" toastOptions={{ classNames: { toast: '!bg-popover !border-line-strong !text-zinc-200 !text-xs' } }} />;
+}

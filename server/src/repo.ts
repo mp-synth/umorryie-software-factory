@@ -1,6 +1,7 @@
 import {
   DEFAULT_APP_SETTINGS,
   DEFAULT_INITIATIVE_SETTINGS,
+  PR_SWEEP_CLAIM_MINUTES,
   type AppSettings,
   type Initiative,
   type InitiativeSettings,
@@ -151,6 +152,32 @@ export async function updateTicket(id: string, patch: Partial<Ticket>): Promise<
   const [row] = await sql<Ticket[]>`update tickets set ${sql(prepare(patch))}, updated_at = now() where id = ${id} returning *`;
   emitChange({ type: 'ticket', id, initiativeId: row.initiativeId });
   return row;
+}
+
+function touchTicket(row: Ticket | undefined): Ticket | null {
+  if (row) emitChange({ type: 'ticket', id: row.id, initiativeId: row.initiativeId });
+  return row ?? null;
+}
+
+export async function claimPrSweep(ticketId: string, fingerprint: string): Promise<Ticket | null> {
+  const [row] = await sql<Ticket[]>`
+    update tickets set pr_sweep_claimed_at = now(), pr_sweep_fingerprint = ${fingerprint}, updated_at = now()
+    where id = ${ticketId}
+      and (pr_sweep_claimed_at is null or pr_sweep_claimed_at < now() - make_interval(mins => ${PR_SWEEP_CLAIM_MINUTES}))
+    returning *`;
+  return touchTicket(row);
+}
+
+export async function releasePrSweepClaim(ticketId: string, opts: { forgetState: boolean }): Promise<boolean> {
+  const [row] = await sql<Ticket[]>`
+    update tickets set pr_sweep_claimed_at = null, ${opts.forgetState ? sql`pr_sweep_fingerprint = null,` : sql``} updated_at = now()
+    where id = ${ticketId} and pr_sweep_claimed_at is not null
+    returning *`;
+  return !!touchTicket(row);
+}
+
+export async function listPrSweepClaims(): Promise<Ticket[]> {
+  return sql<Ticket[]>`select * from tickets where pr_sweep_claimed_at is not null`;
 }
 
 export async function getRun(id: string): Promise<Run | null> {

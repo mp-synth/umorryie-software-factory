@@ -8,6 +8,7 @@ import { isNotArchived } from '@/lib/status';
 import { cn } from '@/lib/utils';
 import { NewInitiativeDialog } from './NewInitiativeDialog';
 import { RunDrawer } from './RunDrawer';
+import { ThemeMenu } from './ThemeMenu';
 import { Button, Kbd, Tooltip } from './ui';
 
 export function Layout() {
@@ -27,7 +28,7 @@ export function Layout() {
 
   return (
     <div className="flex h-full">
-      <aside className="flex w-[232px] shrink-0 flex-col border-r border-line bg-[#0b0b0f]">
+      <aside className="flex w-[232px] shrink-0 flex-col border-r border-line bg-sidebar">
         <div className="flex h-14 items-center gap-2.5 px-4">
           <div className="grid h-8 w-8 place-items-center rounded-lg border border-violet-400/25 bg-gradient-to-br from-violet-500/25 to-cyan-400/10 shadow-glow">
             <Factory className="h-4 w-4 text-violet-200" />
@@ -91,9 +92,9 @@ export function Layout() {
           </div>
         </div>
 
-        <div className="border-t border-line px-4 py-3 text-2xs text-zinc-500">
+        <div className="flex items-center gap-2 border-t border-line py-2.5 pl-4 pr-2 text-2xs text-zinc-500">
           <Tooltip content={connected ? 'Live updates connected' : 'Reconnecting to the server…'}>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-1 items-center gap-2">
               <span className={cn('h-1.5 w-1.5 rounded-full', connected ? 'bg-emerald-400' : 'animate-pulse bg-amber-400')} />
               {connected ? 'Live' : 'Reconnecting'}
               <span className="ml-auto flex items-center gap-1">
@@ -101,6 +102,7 @@ export function Layout() {
               </span>
             </div>
           </Tooltip>
+          <ThemeMenu />
         </div>
       </aside>
 

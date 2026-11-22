@@ -32,7 +32,7 @@ const settingsPatch = z
     concurrency: z.number().int().min(1).max(10),
     maxTickets: z.number().int().min(1).max(30),
     models: z
-      .object({ plan: model, plan_review: model, execute: model, review: model, fix: model, mechanicalFix: model, ask: model })
+      .object({ plan: model, plan_review: model, execute: model, review: model, fix: model, mechanicalFix: model, verify: model, ask: model })
       .partial(),
   })
   .partial();
@@ -87,11 +87,12 @@ export async function routes(app: FastifyInstance): Promise<void> {
   app.patch('/api/settings', async (req) => {
     const body = z
       .object({
-        maxConcurrentAgents: z.number().int().min(1).max(20),
+        maxConcurrentAgents: z.number().int().min(1).max(40),
         runTimeoutMinutes: z.number().int().min(5).max(600),
         maxBudgetUsdPerRun: z.number().positive().max(1000).nullable(),
         loadUserSettings: z.boolean(),
         gateTimeoutMinutes: z.number().int().min(1).max(180),
+        sweepOpenPrs: z.boolean(),
       })
       .partial()
       .parse(req.body);
@@ -99,6 +100,8 @@ export async function routes(app: FastifyInstance): Promise<void> {
     engine.kick();
     return next;
   });
+
+  app.post('/api/pr-sweep', async () => ({ ok: true, count: await engine.sweepOpenPrs() }));
 
   app.get('/api/defaults', async () => ({ initiativeSettings: DEFAULT_INITIATIVE_SETTINGS }));
 
@@ -323,7 +326,7 @@ export async function routes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/initiatives/:id/actions/:action', async (req) => {
     const { id: iid, action } = z
-      .object({ id: z.string().uuid(), action: z.enum(['run-ready', 'review-all', 'fix-all', 'sync-prs']) })
+      .object({ id: z.string().uuid(), action: z.enum(['run-ready', 'review-all', 'fix-all', 'fix-prs', 'sync-prs']) })
       .parse(req.params);
     const n = await engine.bulk(iid, action);
     return { ok: true, count: n };

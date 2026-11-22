@@ -56,10 +56,10 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
   autoReview: true,
   autoFix: true,
   createPrs: true,
-  postReviewsToPr: false,
-  maxRounds: 3,
-  maxPlanRounds: 2,
-  concurrency: 2,
+  postReviewsToPr: true,
+  maxRounds: 5,
+  maxPlanRounds: 3,
+  concurrency: 4,
   maxTickets: 10,
   models: {
     plan: 'opus',
@@ -79,15 +79,20 @@ export interface AppSettings {
   maxBudgetUsdPerRun: number | null;
   loadUserSettings: boolean;
   gateTimeoutMinutes: number;
+  sweepOpenPrs: boolean;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  maxConcurrentAgents: 4,
+  maxConcurrentAgents: 12,
   runTimeoutMinutes: 60,
   maxBudgetUsdPerRun: null,
   loadUserSettings: false,
   gateTimeoutMinutes: 20,
+  sweepOpenPrs: true,
 };
+
+export const PR_SWEEP_INTERVAL_MINUTES = 15;
+export const PR_SWEEP_CLAIM_MINUTES = 45;
 
 export interface Project {
   id: string;
@@ -197,6 +202,8 @@ export interface Ticket {
   lastVerdict: string | null;
   gateStatus: 'pass' | 'fail' | 'skipped' | null;
   blockedReason: string | null;
+  prSweepClaimedAt: string | null;
+  prSweepFingerprint: string | null;
   createdAt: string;
   updatedAt: string;
 }

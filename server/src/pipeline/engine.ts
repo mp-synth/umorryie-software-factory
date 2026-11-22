@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AppSettings, Initiative, Project, Run, RunKind, Ticket } from '@factory/shared';
+import { PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings, type Initiative, type Project, type Run, type RunKind, type Ticket } from '@factory/shared';
 import { agentEnvironment, type AgentEnvironment } from '../agent-env.ts';
 import { config } from '../config.ts';
 import { sql } from '../db.ts';
@@ -32,7 +32,9 @@ import { pullRequestText } from './pull-request.ts';
 import { earlierBranches, rebuildBlocker } from './rebuild.ts';
 import { firstLine, section, validatePlan } from './plan.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
+import { describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
+import { pickRunsToStart, type SchedulableRun } from './scheduler.ts';
 
 export class PipelineError extends Error {
   constructor(message: string, public status = 409) {
@@ -41,6 +43,7 @@ export class PipelineError extends Error {
 }
 
 const active = new Map<string, AgentHandle>();
+const inFlight = new Map<string, Run>();
 const ts = (x: unknown): number => (x ? new Date(x as string).getTime() : 0);
 const touchRun = (r: Run) => emitChange({ type: 'run', id: r.id, initiativeId: r.initiativeId });
 const canceling = new Set<string>();
@@ -298,19 +301,28 @@ export async function enqueue(opts: {
     }
   }
 
-  const run = await repo.insertRun({
-    initiativeId: init.id,
-    ticketId,
-    kind: opts.kind,
-    round,
-    trigger: opts.trigger,
-    model,
-    effort: opts.kind === 'gate' ? null : EFFORT[opts.kind as Exclude<RunKind, 'gate'>],
-    prompt: opts.question ?? null,
-  });
+  const run = await repo
+    .insertRun({
+      initiativeId: init.id,
+      ticketId,
+      kind: opts.kind,
+      round,
+      trigger: opts.trigger,
+      model,
+      effort: opts.kind === 'gate' ? null : EFFORT[opts.kind as Exclude<RunKind, 'gate'>],
+      prompt: opts.question ?? null,
+    })
+    .catch((err) => {
+      if (isSecondActiveAgent(err)) throw new PipelineError(`another agent is already active for this ${ticketId ? 'ticket' : 'plan'}`);
+      throw err;
+    });
   if (ticketId && opts.kind !== 'ask') await refreshInitiativeStatus(init.id);
   kick();
   return run;
+}
+
+function isSecondActiveAgent(err: unknown): boolean {
+  return (err as { constraint_name?: string } | null)?.constraint_name === 'runs_one_active_agent_per_scope';
 }
 
 let ticking = false;
@@ -328,32 +340,17 @@ async function tick(): Promise<void> {
   ticking = true;
   try {
     const app = await repo.getAppSettings();
-    const running = await sql<{ initiativeId: string; ticketId: string | null }[]>`
-      select initiative_id, ticket_id from runs where status = 'running'`;
-    let slots = app.maxConcurrentAgents - running.length;
+    const running = await sql<SchedulableRun[]>`select id, initiative_id, ticket_id, kind from runs where status = 'running'`;
+    const slots = app.maxConcurrentAgents - running.length;
     if (slots <= 0) return;
-    const busyTickets = new Map<string, Set<string>>();
-    for (const r of running) {
-      if (!r.ticketId) continue;
-      if (!busyTickets.has(r.initiativeId)) busyTickets.set(r.initiativeId, new Set());
-      busyTickets.get(r.initiativeId)!.add(r.ticketId);
-    }
     const queued = await sql<(Run & { settings: Initiative['settings'] })[]>`
       select r.*, i.settings from runs r join initiatives i on i.id = r.initiative_id
       where r.status = 'queued' order by r.queued_at`;
-    for (const q of queued) {
-      if (slots <= 0) break;
-      if (q.ticketId && q.kind !== 'ask') {
-        const limit = repo.initiativeSettings({ settings: q.settings }).concurrency;
-        const set = busyTickets.get(q.initiativeId) ?? new Set<string>();
-        if (!set.has(q.ticketId) && set.size >= limit) continue;
-        set.add(q.ticketId);
-        busyTickets.set(q.initiativeId, set);
-      }
+    const candidates = queued.map((q) => ({ ...q, concurrency: repo.initiativeSettings({ settings: q.settings }).concurrency }));
+    for (const q of pickRunsToStart(candidates, running, slots)) {
       const [claimed] = await sql<Run[]>`
         update runs set status = 'running', started_at = now() where id = ${q.id} and status = 'queued' returning *`;
       if (!claimed) continue;
-      slots--;
       touchRun(claimed);
       void startRun(claimed);
     }
@@ -371,10 +368,20 @@ async function tick(): Promise<void> {
 export function startScheduler(): void {
   setInterval(() => void tick(), 1500).unref();
   setInterval(() => void autoSyncPrs(), 5 * 60_000).unref();
+  const sweepInBackground = async () => {
+    try {
+      if ((await repo.getAppSettings()).sweepOpenPrs) await sweepOpenPrs();
+    } catch (err) {
+      console.error('[pr-sweep]', err);
+    }
+  };
+  setInterval(sweepInBackground, PR_SWEEP_INTERVAL_MINUTES * 60_000).unref();
+  setTimeout(sweepInBackground, 60_000).unref();
   kick();
 }
 
 async function startRun(run: Run): Promise<void> {
+  inFlight.set(run.id, run);
   try {
     switch (run.kind) {
       case 'plan':
@@ -419,6 +426,8 @@ async function startRun(run: Run): Promise<void> {
   } finally {
     active.delete(run.id);
     canceling.delete(run.id);
+    inFlight.delete(run.id);
+    if (run.ticketId) void releaseSweepClaimIfIdle(run.ticketId).catch((err) => console.warn('[pr-sweep]', err.message));
     kick();
   }
 }
@@ -1234,7 +1243,19 @@ async function failingCheckSection(cwd: string, base: string, c: { name: string;
   ].filter(Boolean).join('\n');
 }
 
-async function collectFixInputs(run: Run, init: Initiative, ticket: Ticket, dir: string) {
+function fixedAt(fix: Run | undefined): number | null {
+  return fix ? ts(fix.queuedAt) : null;
+}
+
+async function pendingPrWork(cwd: string, prNumber: number, lastFixAt: number | null): Promise<PrWork | null> {
+  const snap = await gh.prSnapshot(cwd, prNumber);
+  if (!snap || snap.state !== 'OPEN') return null;
+  const me = await ghUserOnce();
+  const threads = (await gh.unresolvedThreads(cwd, prNumber, me)) ?? [];
+  return prWorkFrom(snap, threads, { me, lastFixAt });
+}
+
+async function collectFixInputs(run: Run, init: Initiative, project: Project, ticket: Ticket, dir: string) {
   const blocked = path.join(dir, 'verify-block.md');
   if (fs.existsSync(blocked)) {
     const carried = existing(CARRIED_REPORTS.map((f) => path.join(dir, f)));
@@ -1260,40 +1281,32 @@ async function collectFixInputs(run: Run, init: Initiative, ticket: Ticket, dir:
   }
   if (ticket.prNumber && ticket.worktreePath) {
     const wt = ticket.worktreePath;
-    const snap = await gh.prSnapshot(wt, ticket.prNumber);
-    if (snap && snap.state === 'OPEN') {
-      const me = await ghUserOnce();
-      const threads = (await gh.unresolvedThreads(wt, ticket.prNumber, me)) ?? [];
-      const liveThreads = threads.filter((t) => !t.outdated && !t.awaitingReviewer);
-      const lastOwnComment = Math.max(0, ...snap.comments.filter((c) => c.author === me).map((c) => ts(c.createdAt)));
-      const comments = snap.comments.filter((c) => c.author !== me && ts(c.createdAt) > Math.max(since, lastOwnComment));
-      const reviews = lastFix == null ? snap.reviews.filter((r) => r.body.trim() && r.author !== me) : [];
+    const work = await pendingPrWork(wt, ticket.prNumber, fixedAt(lastFix));
+    if (work) {
+      const { snap } = work;
       const items: PrItems = { prNumber: snap.number, threads: [], comments: [] };
       const parts: string[] = [];
-      if (snap.mergeable === 'CONFLICTING') {
+      if (work.conflicting) {
         parts.push(`## Merge conflict\nThe PR conflicts with \`${snap.baseRefName}\`. Run \`git fetch origin && git merge origin/${snap.baseRefName}\`, resolve, commit. Never rebase or force-push.`);
       }
-      const ciStillRunning = snap.failingChecks.length > 0 && snap.pendingChecks.length > 0;
-      if (!ciStillRunning) {
-        for (const c of snap.failingChecks) parts.push(await failingCheckSection(wt, snap.baseRefName, c));
-      }
-      liveThreads.forEach((t, n) => {
+      for (const c of work.failingChecks) parts.push(await failingCheckSection(wt, snap.baseRefName, c));
+      work.threads.forEach((t, n) => {
         const label = `T${n + 1}`;
         items.threads.push({ label, id: t.id, rootCommentId: t.rootCommentId, rootAuthor: t.rootAuthor });
         parts.push(`## Review thread ${label}: ${t.path}${t.line ? `:${t.line}` : ''}\n${t.comments.map((c) => `> **${c.author}:** ${c.body.replace(/\n/g, '\n> ')}`).join('\n>\n')}`);
       });
-      comments.forEach((c, n) => {
+      work.comments.forEach((c, n) => {
         const label = `C${n + 1}`;
         items.comments.push({ label, url: c.url, author: c.author });
         parts.push(`## PR comment ${label} by ${c.author}\n${quote(c.body)}`);
       });
-      reviews.forEach((r, n) => {
+      work.reviews.forEach((r, n) => {
         const label = `V${n + 1}`;
         items.comments.push({ label, url: snap.url, author: r.author });
         parts.push(`## PR review ${label} by ${r.author} (${r.state})\n${quote(r.body)}`);
       });
       if (hasHumanItems(items)) mechanicalOnly = false;
-      if (parts.length && ciStillRunning) {
+      if (parts.length && work.ciStillRunning) {
         parts.push(`## CI is still running\nFailing checks (${snap.failingChecks.map((c) => c.name).join(', ')}) wait until every check has finished. Don't act on them this round.`);
       }
       if (parts.length) {
@@ -1304,7 +1317,7 @@ async function collectFixInputs(run: Run, init: Initiative, ticket: Ticket, dir:
           ),
         );
         write(path.join(dir, 'pr-items.json'), JSON.stringify(items, null, 2));
-        if (snap.mergeable === 'CONFLICTING') await gitx.git(wt, ['fetch', '--quiet', 'origin'], 120_000);
+        if (work.conflicting) await gitx.fetchOrigin(project.repoPath, { cwd: wt });
       }
     }
   }
@@ -1325,7 +1338,7 @@ async function runFix(run: Run): Promise<void> {
   const all = await repo.listTickets(init.id);
   const dir = ticketRoundDir(init, ticket, run.round);
   await log(run, 'Collecting reports: review, checks, PR state, owner feedback…');
-  const collected = await collectFixInputs(run, init, ticket, dir);
+  const collected = await collectFixInputs(run, init, project, ticket, dir);
   if (!collected) {
     await finish(run, 'succeeded', { verdict: 'FIX: NOTHING-TO-DO', outputMd: 'FIX: NOTHING-TO-DO\n\nNo failing checks, review findings, PR comments or feedback to act on.' });
     await repo.updateTicket(ticket.id, { status: settledStatus(ticket) });
@@ -1728,13 +1741,14 @@ export async function refreshInitiativeStatus(initiativeId: string): Promise<voi
   }
 }
 
-export async function bulk(initiativeId: string, action: 'run-ready' | 'review-all' | 'fix-all' | 'sync-prs'): Promise<number> {
+export async function bulk(initiativeId: string, action: 'run-ready' | 'review-all' | 'fix-all' | 'fix-prs' | 'sync-prs'): Promise<number> {
   const init = await mustInitiative(initiativeId);
   if (action === 'run-ready') {
     if (init.status !== 'in_progress') throw new PipelineError('approve the plan first');
     return startReadyTickets(init.id, true);
   }
   if (action === 'sync-prs') return syncPrs(init.id);
+  if (action === 'fix-prs') return sweepOpenPrs({ initiativeId: init.id, manual: true });
   const tickets = await repo.listTickets(init.id);
   let n = 0;
   for (const t of tickets) {
@@ -1780,10 +1794,103 @@ async function autoSyncPrs(): Promise<void> {
   const rows = await sql<{ id: string }[]>`
     select distinct i.id from initiatives i join tickets t on t.initiative_id = i.id
     where i.status in ('in_progress','done') and t.pr_number is not null and t.status <> 'merged'`;
-  for (const r of rows) await syncPrs(r.id).catch((e) => console.warn('[autoSyncPrs]', e.message));
+  await Promise.all(rows.map((r) => syncPrs(r.id).catch((e) => console.warn('[autoSyncPrs]', e.message))));
+}
+
+function ticketInFlight(ticketId: string): boolean {
+  return [...inFlight.values()].some((r) => r.ticketId === ticketId && r.kind !== 'ask');
+}
+
+async function ticketIdle(ticketId: string): Promise<boolean> {
+  if (ticketInFlight(ticketId)) return false;
+  const [busy] = await sql`select 1 from runs where ticket_id = ${ticketId} and status in ('queued','running') and kind <> 'ask' limit 1`;
+  return !busy;
+}
+
+async function releaseSweepClaimIfIdle(ticketId: string): Promise<void> {
+  if (await ticketIdle(ticketId)) await repo.releasePrSweepClaim(ticketId, { forgetState: false });
+}
+
+async function settleSweepClaims(): Promise<void> {
+  for (const t of await repo.listPrSweepClaims()) {
+    if (Date.now() - ts(t.prSweepClaimedAt) > PR_SWEEP_CLAIM_MINUTES * 60_000) {
+      if (!(await repo.releasePrSweepClaim(t.id, { forgetState: true }))) continue;
+      await systemMessage(
+        { initiativeId: t.initiativeId, ticketId: t.id },
+        `${ticketLabel(t)}: the PR sweep's fixing mark expired after ${PR_SWEEP_CLAIM_MINUTES} minutes; the next sweep looks at the PR again.`,
+      );
+    } else {
+      await releaseSweepClaimIfIdle(t.id);
+    }
+  }
+}
+
+interface SweepScope {
+  initiativeId?: string;
+  manual?: boolean;
+}
+
+const SWEPT_STATUSES: Ticket['status'][] = ['built', 'changes_requested', 'approved'];
+const MANUALLY_SWEPT_STATUSES: Ticket['status'][] = [...SWEPT_STATUSES, 'blocked'];
+
+async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
+  if (!(await ticketIdle(t.id))) return false;
+  const init = await mustInitiative(t.initiativeId);
+  const project = await mustProject(init.projectId);
+  const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;
+  const lastFix = (await lastRuns(t.id)).find((r) => r.kind === 'fix');
+  const work = await pendingPrWork(cwd, t.prNumber!, fixedAt(lastFix));
+  if (!work || !hasPrWork(work)) return false;
+  const fingerprint = prWorkFingerprint(work);
+  if (!manual && fingerprint === t.prSweepFingerprint) return false;
+  if (!(await repo.claimPrSweep(t.id, fingerprint))) return false;
+  try {
+    await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: t.id, trigger: manual ? 'manual' : 'auto' });
+  } catch (err) {
+    await repo.releasePrSweepClaim(t.id, { forgetState: true });
+    throw err;
+  }
+  await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: the PR sweep found ${describePrWork(work)} on ${work.snap.url}; a fresh fixer is on it.`);
+  return true;
+}
+
+const sweepingInitiatives = new Set<string>();
+
+async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: boolean): Promise<number> {
+  if (sweepingInitiatives.has(initiativeId)) return 0;
+  sweepingInitiatives.add(initiativeId);
+  let started = 0;
+  try {
+    for (const t of tickets) {
+      try {
+        if (await sweepTicket(t, manual)) started++;
+      } catch (err) {
+        console.warn('[pr-sweep]', `${ticketLabel(t)}: ${(err as Error).message}`);
+      }
+    }
+  } finally {
+    sweepingInitiatives.delete(initiativeId);
+  }
+  return started;
+}
+
+export async function sweepOpenPrs(scope: SweepScope = {}): Promise<number> {
+  await settleSweepClaims();
+  const statuses = scope.manual ? MANUALLY_SWEPT_STATUSES : SWEPT_STATUSES;
+  const candidates = await sql<Ticket[]>`
+    select t.* from tickets t join initiatives i on i.id = t.initiative_id
+    where i.status in ('in_progress','done') and t.pr_number is not null and t.branch is not null
+      and t.status in ${sql(statuses)} and t.pr_sweep_claimed_at is null
+      ${scope.initiativeId ? sql`and t.initiative_id = ${scope.initiativeId}` : sql``}
+    order by t.initiative_id, t.seq`;
+  const perInitiative = new Map<string, Ticket[]>();
+  for (const t of candidates) perInitiative.set(t.initiativeId, [...(perInitiative.get(t.initiativeId) ?? []), t]);
+  const started = await Promise.all([...perInitiative].map(([id, tickets]) => sweepInitiative(id, tickets, !!scope.manual)));
+  return started.reduce((a, n) => a + n, 0);
 }
 
 export async function recoverOnStartup(): Promise<void> {
+  for (const t of await repo.listPrSweepClaims()) await repo.releasePrSweepClaim(t.id, { forgetState: true });
   const stale = await sql<(Run & { pid: number | null })[]>`select * from runs where status = 'running'`;
   for (const r of stale) {
     if (r.pid) gitx.killTree(r.pid);

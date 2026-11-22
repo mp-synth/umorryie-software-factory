@@ -3,9 +3,6 @@
 @tailwind utilities;
 
 @layer base {
-  :root {
-    color-scheme: dark;
-  }
   html,
   body,
   #root {
@@ -20,7 +17,7 @@
   }
   * {
     scrollbar-width: thin;
-    scrollbar-color: #2e2e38 transparent;
+    scrollbar-color: theme(colors.line.strong) transparent;
   }
   :focus-visible {
     outline: 2px solid rgba(139, 124, 255, 0.7);
@@ -47,12 +44,15 @@
     @apply text-2xs font-semibold uppercase tracking-[0.08em] text-zinc-500;
   }
   .grid-bg {
-    background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.045) 1px, transparent 0);
+    background-image: radial-gradient(circle at 1px 1px, theme(colors.white / 4.5%) 1px, transparent 0);
     background-size: 22px 22px;
   }
   .glow-top {
     background: radial-gradient(1200px 380px at 50% -120px, rgba(124, 108, 255, 0.16), transparent 70%),
       radial-gradient(700px 260px at 85% -80px, rgba(34, 211, 238, 0.08), transparent 70%);
+  }
+  .light .glow-top {
+    background: radial-gradient(1200px 320px at 50% -140px, rgba(124, 108, 255, 0.05), transparent 70%);
   }
   .text-gradient {
     @apply bg-gradient-to-r from-violet-300 via-indigo-200 to-cyan-200 bg-clip-text text-transparent;
@@ -60,12 +60,18 @@
 }
 
 .md {
-  @apply prose prose-invert prose-sm max-w-none;
+  @apply prose prose-sm max-w-none;
   --tw-prose-body: theme(colors.zinc.300);
   --tw-prose-headings: theme(colors.zinc.100);
+  --tw-prose-lead: theme(colors.zinc.400);
   --tw-prose-bold: theme(colors.zinc.100);
   --tw-prose-links: theme(colors.violet.300);
   --tw-prose-code: theme(colors.zinc.200);
+  --tw-prose-pre-code: theme(colors.zinc.300);
+  --tw-prose-kbd: theme(colors.zinc.100);
+  --tw-prose-kbd-shadows: var(--white);
+  --tw-prose-captions: theme(colors.zinc.500);
+  --tw-prose-quotes: theme(colors.zinc.300);
   --tw-prose-bullets: theme(colors.zinc.600);
   --tw-prose-counters: theme(colors.zinc.500);
   --tw-prose-hr: theme(colors.zinc.800);

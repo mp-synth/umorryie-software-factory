@@ -90,6 +90,23 @@ export async function git(cwd: string, args: string[], timeoutMs = 120_000): Pro
   return exec('git', args, { cwd, timeoutMs, env: { ...repoShellEnv(), GIT_TERMINAL_PROMPT: '0' } });
 }
 
+const repoLocks = new Map<string, Promise<unknown>>();
+
+export function withRepoLock<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+  const key = path.resolve(repo);
+  const result = (repoLocks.get(key) ?? Promise.resolve()).then(fn);
+  const settled = result.catch(() => undefined);
+  repoLocks.set(key, settled);
+  void settled.then(() => {
+    if (repoLocks.get(key) === settled) repoLocks.delete(key);
+  });
+  return result;
+}
+
+export function fetchOrigin(repo: string, opts: { cwd?: string; ref?: string } = {}): Promise<ExecResult> {
+  return withRepoLock(repo, () => git(opts.cwd ?? repo, ['fetch', '--quiet', 'origin', ...(opts.ref ? [opts.ref] : [])], 120_000));
+}
+
 async function gitOut(cwd: string, args: string[]): Promise<string> {
   const r = await git(cwd, args);
   if (r.code !== 0) throw new Error(`git ${args.join(' ')} failed: ${(r.stderr || r.stdout).trim()}`);
@@ -142,7 +159,7 @@ export async function refExists(repo: string, ref: string): Promise<boolean> {
 
 export async function resolveBaseRef(repo: string, branch: string): Promise<string> {
   if (await remoteUrl(repo)) {
-    await git(repo, ['fetch', '--quiet', 'origin', branch], 60_000);
+    await fetchOrigin(repo, { ref: branch });
     if (await refExists(repo, `origin/${branch}`)) return `origin/${branch}`;
   }
   if (await refExists(repo, branch)) return branch;
@@ -155,13 +172,15 @@ export async function ensureWorktree(repo: string, worktree: string, branch: str
     if (current === branch) return false;
     throw new Error(`worktree ${worktree} is on ${current || 'a detached HEAD'}, expected ${branch}`);
   }
-  await git(repo, ['worktree', 'prune']);
-  fs.mkdirSync(path.dirname(worktree), { recursive: true });
-  const args = (await branchExists(repo, branch))
-    ? ['worktree', 'add', worktree, branch]
-    : ['worktree', 'add', '--no-track', '-b', branch, worktree, baseRef];
-  await gitOut(repo, args);
-  return true;
+  return withRepoLock(repo, async () => {
+    await git(repo, ['worktree', 'prune']);
+    fs.mkdirSync(path.dirname(worktree), { recursive: true });
+    const args = (await branchExists(repo, branch))
+      ? ['worktree', 'add', worktree, branch]
+      : ['worktree', 'add', '--no-track', '-b', branch, worktree, baseRef];
+    await gitOut(repo, args);
+    return true;
+  });
 }
 
 const MAX_WORKTREE_INCLUDES = 500;
@@ -210,15 +229,17 @@ export async function resetHard(worktree: string, ref: string): Promise<void> {
   await gitOut(worktree, ['reset', '--hard', '--quiet', ref]);
 }
 
-export async function removeWorktree(repo: string, worktree: string | null, branch: string | null): Promise<void> {
-  if (worktree && fs.existsSync(worktree)) {
-    await git(repo, ['worktree', 'remove', '--force', worktree]);
-    if (fs.existsSync(worktree)) fs.rmSync(worktree, { recursive: true, force: true });
-  }
-  await git(repo, ['worktree', 'prune']);
-  if (branch && branch.startsWith('factory/') && (await branchExists(repo, branch))) {
-    await git(repo, ['branch', '-D', branch]);
-  }
+export function removeWorktree(repo: string, worktree: string | null, branch: string | null): Promise<void> {
+  return withRepoLock(repo, async () => {
+    if (worktree && fs.existsSync(worktree)) {
+      await git(repo, ['worktree', 'remove', '--force', worktree]);
+      if (fs.existsSync(worktree)) fs.rmSync(worktree, { recursive: true, force: true });
+    }
+    await git(repo, ['worktree', 'prune']);
+    if (branch && branch.startsWith('factory/') && (await branchExists(repo, branch))) {
+      await git(repo, ['branch', '-D', branch]);
+    }
+  });
 }
 
 export async function commitsAhead(worktree: string, base: string): Promise<number> {

@@ -54,7 +54,7 @@ export function RunDrawer() {
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-fade-in" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
-          className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[820px] flex-col border-l border-line-strong bg-[#0d0d11] shadow-2xl data-[state=open]:animate-slide-in"
+          className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[820px] flex-col border-l border-line-strong bg-drawer shadow-2xl data-[state=open]:animate-slide-in"
         >
           {runId && <RunView runId={runId} onClose={close} />}
         </DialogPrimitive.Content>

@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, MoreHorizontal, Pencil, RotateCcw, Trash2 } from 'lucide-react';
+import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, MoreHorizontal, Pencil, RotateCcw, Trash2, Wrench } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -67,6 +67,12 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
     onSuccess: toastSuccess('Report copied'),
     onError: toastError,
   });
+  const fixPrs = useMutation({
+    mutationFn: () => api.bulk(i.id, 'fix-prs'),
+    onSuccess: ({ count }) => toast.success(count ? `Started a fixer on ${count} PR${count > 1 ? 's' : ''}` : 'No open PR has anything to fix right now'),
+    onError: toastError,
+  });
+  const hasOpenPrs = detail.tickets.some((t) => t.prNumber && t.prState !== 'MERGED' && t.prState !== 'CLOSED');
   const remove = useMutation({
     mutationFn: () => api.deleteInitiative(i.id),
     onSuccess: () => {
@@ -113,6 +119,11 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
                 </Button>
               }
             >
+              <MenuItem icon={<Wrench />} disabled={!hasOpenPrs || fixPrs.isPending} onSelect={() => fixPrs.mutate()}>
+                <span className="block">Fix PRs now</span>
+                <span className="block text-2xs text-zinc-500">Review comments, failing CI, conflicts</span>
+              </MenuItem>
+              <MenuSeparator />
               <MenuItem icon={<Pencil />} onSelect={() => setEditing(true)}>
                 Edit title & brief
               </MenuItem>

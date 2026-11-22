@@ -56,7 +56,7 @@ export interface InspectResult {
   suggestion?: EnvironmentSuggestion;
 }
 
-export type BulkAction = 'run-ready' | 'review-all' | 'fix-all' | 'sync-prs';
+export type BulkAction = 'run-ready' | 'review-all' | 'fix-all' | 'fix-prs' | 'sync-prs';
 export type TicketAction = 'run' | 'check' | 'review' | 'fix' | 'reset' | 'mark-approved' | 'mark-merged' | 'mark-todo';
 
 export const api = {
@@ -64,6 +64,7 @@ export const api = {
   settings: () => get<AppSettings>('/api/settings'),
   updateSettings: (p: Partial<AppSettings>) => patch<AppSettings>('/api/settings', p),
   defaults: () => get<{ initiativeSettings: InitiativeSettings }>('/api/defaults'),
+  sweepPrs: () => post<{ ok: true; count: number }>('/api/pr-sweep'),
 
   projects: () => get<Project[]>('/api/projects'),
   inspect: (path: string) => get<InspectResult>(`/api/fs/inspect?path=${encodeURIComponent(path)}`),

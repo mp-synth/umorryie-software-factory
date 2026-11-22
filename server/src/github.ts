@@ -1,6 +1,11 @@
 import { exec } from './git.ts';
 
 export const FACTORY_MARKER = '<!-- software-factory -->';
+export const COMMENT_PREFIX = '**Claude Bot Automation**';
+
+export function factoryCommentBody(body: string): string {
+  return `${FACTORY_MARKER}\n${COMMENT_PREFIX}\n\n${body}`;
+}
 
 const CHECKS_ONLY_HUMANS_TURN_GREEN = /^(Code review( gate)?|Meticulous (Tests|Checks))$/;
 const STATUS_ONLY_COMMENT_AUTHORS = /^(github-actions|alwaysmeticulous)\[bot\]$/;
@@ -51,7 +56,7 @@ export async function closePr(cwd: string, prNumber: number, why: string): Promi
 }
 
 export async function comment(cwd: string, prNumber: number, body: string): Promise<void> {
-  await gh(cwd, ['pr', 'comment', String(prNumber), '--body-file', '-'], `${FACTORY_MARKER}\n${body}`);
+  await gh(cwd, ['pr', 'comment', String(prNumber), '--body-file', '-'], factoryCommentBody(body));
 }
 
 interface CheckRun {
@@ -76,7 +81,7 @@ export interface PrSnapshot {
   failingChecks: { name: string; url: string | null }[];
   pendingChecks: string[];
   comments: { author: string; body: string; createdAt: string; url: string }[];
-  reviews: { author: string; state: string; body: string }[];
+  reviews: { author: string; state: string; body: string; submittedAt: string }[];
 }
 
 export async function prSnapshot(cwd: string, prNumber: number): Promise<PrSnapshot | null> {
@@ -113,10 +118,11 @@ export async function prSnapshot(cwd: string, prNumber: number): Promise<PrSnaps
       })),
     reviews: (d.reviews ?? [])
       .filter((c: { body: string; state: string }) => notMarker(c.body) && (c.body.trim() || c.state === 'CHANGES_REQUESTED'))
-      .map((c: { author?: { login: string }; state: string; body: string }) => ({
+      .map((c: { author?: { login: string }; state: string; body: string; submittedAt: string }) => ({
         author: c.author?.login ?? 'unknown',
         state: c.state,
         body: c.body,
+        submittedAt: c.submittedAt,
       })),
   };
 }
@@ -174,7 +180,7 @@ export async function unresolvedThreads(cwd: string, prNumber: number, me: strin
 
 export async function replyToThread(cwd: string, prNumber: number, rootCommentId: number, body: string): Promise<void> {
   const r = await gh(cwd, [
-    'api', '-X', 'POST', `repos/{owner}/{repo}/pulls/${prNumber}/comments/${rootCommentId}/replies`, '-f', `body=${body}\n\n${FACTORY_MARKER}`,
+    'api', '-X', 'POST', `repos/{owner}/{repo}/pulls/${prNumber}/comments/${rootCommentId}/replies`, '-f', `body=${factoryCommentBody(body)}`,
   ]);
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
 }

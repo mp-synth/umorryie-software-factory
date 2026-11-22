@@ -71,6 +71,26 @@ On a GitHub repo the same flow opens stacked draft PRs, posts each review on
 its PR, leaves every PR in draft for you to mark ready, and **Fix all PRs** turns unresolved review
 threads into a fix round (the factory's own comments are ignored).
 
+Every 15 minutes a PR sweep does the same on its own for every open factory PR
+across all initiatives: a merge conflict, failing CI that has finished (tests,
+lint) or unanswered review comments start a fresh fixer, which goes through
+checks and the verifier like any other fix. A PR being fixed carries a
+"sweep fixing" mark on its ticket row, so the next sweep leaves it alone; the
+mark clears when the fix chain finishes and expires after 45 minutes either
+way. The sweep skips tickets that need you, and never starts a fixer twice for
+the same PR state (same head commit, checks, threads and comments). Turn it off
+or run it now in **Settings**. **More → Fix PRs now** on an initiative runs the
+same sweep for that initiative right away; it also retries a PR state the loop
+already handled and includes tickets that need you.
+
+Up to 10 initiatives run side by side without slowing each other down. Agent
+slots are shared fairly (every initiative gets an agent before any gets a
+second, then each initiative's own **Parallel** limit applies), the database
+allows only one active agent per ticket or plan, every initiative has its own
+branches, worktrees and run folders, and git operations that touch a repo's
+shared state (creating or removing worktrees, fetching) run one at a time per
+repo. Keep **Agents running at once** in Settings at 10 or more for that.
+
 ## What you can do in the UI
 
 | Where | What |
@@ -80,6 +100,7 @@ threads into a fix round (the factory's own comments are ignored).
 | Initiative → Tickets | One row per ticket: status, verdict, PR, cost. Expand for what/goal/outcome, acceptance checks, guidance, branch/worktree, every agent run, and the latest output. **Run / Review / Fix** per ticket; **Run ready / Review all / Fix all PRs / Sync PRs** in bulk; edit a ticket before it starts; reset a ticket; mark approved/merged |
 | Initiative → Activity | The conversation with the agents. **Ask** starts a read-only advisor that answers from the code; **Feedback** re-plans (before approval) or goes to a fresh fixer (per ticket); **Note** just records |
 | Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs; round limits, parallelism and the model per step |
+| Sidebar | The theme switcher (system, light or dark) sits next to the live indicator |
 | Run drawer | Live stream of any agent: tool calls with inputs and results, text, thinking, the checks log, cost/tokens/turns. Its output file, the exact prompt header, and a `claude --resume` command to continue that session in your terminal. **Stop** kills it |
 | Agents | Every run across all initiatives, live |
 
@@ -89,7 +110,7 @@ threads into a fix round (the factory's own comments are ignored).
 |---|---|
 | proposed | In a plan you haven't approved |
 | to do | Approved; starts when its dependencies are approved (or press Run) |
-| building | Executor is working in `~/.software-factory/worktrees/...` on `factory/<initiative>/<nn>-<key>` |
+| building | Executor is working in `~/.software-factory/worktrees/...` on `factory/<initiative>-<id>/<nn>-<key>` |
 | running checks | The project's checks command runs in the worktree. Red → fixer. Green → push + draft PR. If the command can't run at all (exit 126/127) the ticket goes to *needs you* instead of burning a fixer round. **Run checks** re-runs it by hand |
 | built | Checked and waiting for review (when auto-review is off) |
 | in review | A fresh reviewer reads `git diff <base>...HEAD`, verifies each finding, answers APPROVE or CHANGES |
@@ -132,7 +153,9 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
   plugins, so nothing pollutes their context. The repo's own CLAUDE.md,
   `.claude/rules`, skills and `.claude/` settings still apply (see below).
 - Text from GitHub reaches agents only as quoted data in a file, and the
-  factory's own PR comments are marked so they never loop back. A review
+  factory's own PR comments are marked so they never loop back. Every
+  comment and thread reply the factory posts starts with
+  **Claude Bot Automation**. A review
   thread whose last word is yours or the factory's waits for its reviewer and
   isn't fed to a fixer again; failing CI waits until every check has finished;
   status bots (GitHub Actions, Meticulous) and human-gated checks (Code review
