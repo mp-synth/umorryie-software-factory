@@ -1192,7 +1192,6 @@ async function runReview(run: Run): Promise<void> {
 
   if (/APPROVE/i.test(verdict)) {
     await repo.updateTicket(ticket.id, { status: 'approved', lastVerdict: 'APPROVE', blockedReason: null });
-    if (fresh.prNumber) await gh.markReady(fresh.worktreePath!, fresh.prNumber);
     await agentMessage(run, `**Review approved ${ticketLabel(ticket)}.**\n\n${summaryOf(step.output!)}`);
     await refreshInitiativeStatus(init.id);
     await startReadyTickets(init.id);

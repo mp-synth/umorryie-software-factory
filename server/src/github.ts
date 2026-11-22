@@ -50,10 +50,6 @@ export async function closePr(cwd: string, prNumber: number, why: string): Promi
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh pr close exited ${r.code}`);
 }
 
-export async function markReady(cwd: string, prNumber: number): Promise<void> {
-  await gh(cwd, ['pr', 'ready', String(prNumber)]);
-}
-
 export async function comment(cwd: string, prNumber: number, body: string): Promise<void> {
   await gh(cwd, ['pr', 'comment', String(prNumber), '--body-file', '-'], `${FACTORY_MARKER}\n${body}`);
 }

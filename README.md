@@ -68,7 +68,7 @@ review → approval → 4 builds (two in parallel, stacked) → checks → 4 rev
 including one fresh executor resolving a merge conflict between two sibling
 tickets and one fix round from owner feedback, for about $2.50 of agent time.
 On a GitHub repo the same flow opens stacked draft PRs, posts each review on
-its PR, marks PRs ready on APPROVE, and **Fix all PRs** turns unresolved review
+its PR, leaves every PR in draft for you to mark ready, and **Fix all PRs** turns unresolved review
 threads into a fix round (the factory's own comments are ignored).
 
 ## What you can do in the UI
@@ -95,7 +95,7 @@ threads into a fix round (the factory's own comments are ignored).
 | in review | A fresh reviewer reads `git diff <base>...HEAD`, verifies each finding, answers APPROVE or CHANGES |
 | changes requested | Waiting for a fixer (auto-fix runs it unless the round limit is reached) |
 | fixing | A fixer gives every item a verdict before touching code (VALID / PARTIAL / INVALID / UNCONFIRMED / NEEDS-HUMAN): a bug is fixed only after it is traced and gets a test that would fail without the fix (written, not run: CI runs tests, and the fixer re-runs only the tests that failed in the PR's CI, before and after its fix); a claim is rejected only by pointing at the code. Rounds with only failing checks, CI or conflicts get a cheaper mechanical fixer that first checks whether the base branch fails the same way and lists flaky runs for one re-run. Fixes are committed locally; after the checks pass, a fresh **verifier** reads the commits and drafted replies. Approved: the factory pushes, replies in each review thread, answers top-level comments in one summary, and resolves only bot threads. Blocked: the branch is reset and a fresh fixer retries once with the findings; a second block pushes nothing and waits for you. When only rewriting pushed commits would fix the branch (someone else's commit in its history), the fixer answers REBUILD: the factory builds the ticket again on a fresh `-vN` branch and closes the old PR once the new one opens, unless another ticket already builds on it or it was built 3 times. When a PR has nothing to act on, no agent is started |
-| approved | Reviewer would merge it. PR marked ready. Dependents start |
+| approved | Reviewer would merge it. The PR stays a draft until you mark it ready. Dependents start |
 | merged | Seen by Sync PRs (automatic every 5 min) or marked by you. Unblocks dependents. Its local worktree is removed, and its local branch too once no unmerged ticket is stacked on it |
 | needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row |
 
@@ -146,7 +146,8 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
   change the checks it is judged by. Checks failures never reach a reviewer.
 - No secrets: Postgres listens on loopback only with trust auth, so there is no
   password to store. Agents use your existing `claude` login.
-- PRs are drafts with a short imperative title that states the outcome and a
+- PRs are opened as drafts and the factory never marks them ready; that is
+  always your call. Each has a short imperative title that states the outcome and a
   description written by the executor: a one-line **What**, a short **Why**
   with the context, and a 2-4 bullet high-level **Overview**. No headings,
   checklists, file lists or ticket numbers; if the executor's text breaks those
