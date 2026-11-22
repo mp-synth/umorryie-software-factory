@@ -32,7 +32,7 @@ export function parseRerunIds(md: string): string[] {
 }
 
 export function shouldResolve(reply: Reply, rootAuthor: string): boolean {
-  return isBot(rootAuthor) && (reply.verdict === 'VALID' || reply.verdict === 'INVALID');
+  return reply.verdict === 'VALID' || (isBot(rootAuthor) && reply.verdict === 'INVALID');
 }
 
 type PrComment = PrItems['comments'][number];

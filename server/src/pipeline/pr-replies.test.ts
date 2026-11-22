@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
+import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, shouldResolve, type PrItems } from './pr-replies.ts';
 
 const fixMd = `FIX: APPLIED
 
@@ -44,15 +44,22 @@ test('rerun ids are deduplicated', () => {
   assert.deepEqual(parseRerunIds(fixMd), ['1234567890']);
 });
 
-test('threads get their own reply; only settled bot threads are resolved', () => {
+test('threads get their own reply; fixed threads and settled bot threads are resolved', () => {
   const planned = planReplies(parseReplies(fixMd), items);
   assert.deepEqual(
     planned.threadReplies.map((r) => [r.thread.label, r.resolve]),
     [
-      ['T1', false],
+      ['T1', true],
       ['T2', true],
     ],
   );
+});
+
+test('a human thread the fixer disputes or only partly fixes stays open for them', () => {
+  for (const verdict of ['INVALID', 'PARTIAL', 'UNCONFIRMED', 'NEEDS-HUMAN']) {
+    assert.equal(shouldResolve({ item: 'T1', verdict, body: 'x' }, 'jane'), false, verdict);
+  }
+  assert.equal(shouldResolve({ item: 'T1', verdict: 'PARTIAL', body: 'x' }, 'cursor[bot]'), false);
 });
 
 test('top-level comments are answered in the summary; factory-only items stay off the PR', () => {
