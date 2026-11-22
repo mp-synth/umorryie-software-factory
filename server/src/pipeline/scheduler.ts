@@ -11,7 +11,18 @@ export interface QueuedRun extends SchedulableRun {
   concurrency: number;
 }
 
-export function pickRunsToStart<Q extends QueuedRun>(queuedOldestFirst: Q[], running: SchedulableRun[], slots: number): Q[] {
+export function activeLanes(unfinished: Pick<SchedulableRun, 'initiativeId'>[]): number {
+  return new Set(unfinished.map((r) => r.initiativeId)).size;
+}
+
+export interface LaneGuarantee {
+  agentsPerInitiative: number;
+  slots: number;
+}
+
+const NO_GUARANTEE: LaneGuarantee = { agentsPerInitiative: 0, slots: 0 };
+
+export function pickRunsToStart<Q extends QueuedRun>(queuedOldestFirst: Q[], running: SchedulableRun[], slots: number, guarantee: LaneGuarantee = NO_GUARANTEE): Q[] {
   const agentsPerInitiative = new Map<string, number>();
   const busyTickets = new Map<string, Set<string>>();
   const occupy = (r: SchedulableRun) => {
@@ -31,15 +42,20 @@ export function pickRunsToStart<Q extends QueuedRun>(queuedOldestFirst: Q[], run
   running.forEach(occupy);
   const waiting = [...queuedOldestFirst];
   const picked: Q[] = [];
-  while (picked.length < slots) {
+  const startLeastLoaded = (mayStart: (q: Q) => boolean): boolean => {
     let best = -1;
     waiting.forEach((q, i) => {
-      if (fitsTicketLimit(q) && (best === -1 || load(q) < load(waiting[best]))) best = i;
+      if (mayStart(q) && fitsTicketLimit(q) && (best === -1 || load(q) < load(waiting[best]))) best = i;
     });
-    if (best === -1) break;
+    if (best === -1) return false;
     const [next] = waiting.splice(best, 1);
     picked.push(next);
     occupy(next);
-  }
+    return true;
+  };
+  const belowGuarantee = (q: Q) => load(q) < guarantee.agentsPerInitiative;
+
+  while (picked.length < slots && startLeastLoaded(() => true));
+  while (picked.length < guarantee.slots && startLeastLoaded(belowGuarantee));
   return picked;
 }

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { catchUpWith, countsTowardSize, diffLines, git, linesInNumstat, restoreHistoryFrom, worktreeChanges, worktreeState } from './git.ts';
+import { catchUpWith, checkOutAgain, countsTowardSize, diffLines, ensureWorktree, fetchOrigin, git, linesInNumstat, restoreHistoryFrom, untouchedWorktreeBranch, waitForEarlierCheckout, withRepoLock, worktreeChanges, worktreeState } from './git.ts';
 
 async function run(cwd: string, ...args: string[]): Promise<string> {
   const r = await git(cwd, args);
@@ -214,4 +214,159 @@ test('diffLines leaves out files the repo marks linguist-generated', async () =>
   await commitFile(dir, 'feature.ts', 'export const a = 1;\n', 'feat: add the feature');
 
   assert.equal(await diffLines(dir, base), 2);
+});
+
+const siblingOf = (dir: string, name: string) => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'factory-wt-')), name);
+
+test('ensureWorktree creates the branch from the base and checks its files out', async () => {
+  const { dir, base } = await repoWithBase();
+  const wt = siblingOf(dir, 'ticket');
+
+  assert.equal(await ensureWorktree(dir, wt, 'factory/ticket', 'main'), true);
+
+  assert.equal(fs.readFileSync(path.join(wt, 'base.txt'), 'utf8'), 'base\n');
+  assert.equal(await head(wt), base);
+  assert.equal(await run(wt, 'branch', '--show-current'), 'factory/ticket');
+  assert.equal(await run(wt, 'status', '--porcelain'), '');
+  assert.equal(await ensureWorktree(dir, wt, 'factory/ticket', 'main'), false);
+});
+
+test('ensureWorktree finishes a worktree that was created but never checked out', async () => {
+  const { dir } = await repoWithBase();
+  const wt = siblingOf(dir, 'ticket');
+  await run(dir, 'worktree', 'add', '--quiet', '--no-checkout', '-b', 'factory/ticket', wt, 'main');
+  assert.equal(fs.existsSync(path.join(wt, 'base.txt')), false);
+
+  assert.equal(await ensureWorktree(dir, wt, 'factory/ticket', 'main'), true);
+
+  assert.equal(fs.readFileSync(path.join(wt, 'base.txt'), 'utf8'), 'base\n');
+  assert.equal(await run(wt, 'status', '--porcelain'), '');
+});
+
+test('ensureWorktree refuses a worktree that is on another branch', async () => {
+  const { dir } = await repoWithBase();
+  const wt = siblingOf(dir, 'ticket');
+  await ensureWorktree(dir, wt, 'factory/ticket', 'main');
+  await assert.rejects(ensureWorktree(dir, wt, 'factory/other', 'main'), /is on factory\/ticket, expected factory\/other/);
+});
+
+test("ensureWorktree runs the repo's post-checkout hook like git worktree add does", async () => {
+  const { dir, base } = await repoWithBase();
+  const hook = path.join(dir, '.git', 'hooks', 'post-checkout');
+  fs.mkdirSync(path.dirname(hook), { recursive: true });
+  fs.writeFileSync(hook, '#!/bin/sh\necho "$1 $2 $3" > hook-ran.txt\n', { mode: 0o755 });
+  const wt = siblingOf(dir, 'ticket');
+
+  await ensureWorktree(dir, wt, 'factory/ticket', 'main');
+
+  assert.equal(fs.readFileSync(path.join(wt, 'hook-ran.txt'), 'utf8').trim(), `${'0'.repeat(40)} ${base} 1`);
+});
+
+test('ensureWorktree checks files out as heavy work, after it let go of the repo', async () => {
+  const { dir } = await repoWithBase();
+  const wt = siblingOf(dir, 'ticket');
+  let repoWasFree = false;
+  let heavyRuns = 0;
+
+  await ensureWorktree(dir, wt, 'factory/ticket', 'main', async (work) => {
+    heavyRuns++;
+    assert.equal(fs.existsSync(path.join(wt, 'base.txt')), false);
+    repoWasFree = await Promise.race([withRepoLock(dir, async () => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000))]);
+    return work();
+  });
+
+  assert.equal(heavyRuns, 1);
+  assert.equal(repoWasFree, true);
+  assert.equal(fs.existsSync(path.join(wt, 'base.txt')), true);
+});
+
+test('creates many worktrees of one repo at the same time', async () => {
+  const { dir } = await repoWithBase();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-wt-'));
+  const names = Array.from({ length: 12 }, (_, i) => `ticket-${i}`);
+
+  await Promise.all(names.map((n) => ensureWorktree(dir, path.join(root, n), `factory/${n}`, 'main')));
+
+  for (const n of names) {
+    assert.equal(fs.readFileSync(path.join(root, n, 'base.txt'), 'utf8'), 'base\n');
+    assert.equal(await run(path.join(root, n), 'branch', '--show-current'), `factory/${n}`);
+  }
+});
+
+test('waitForEarlierCheckout waits for a checkout of that worktree that is still running, and for no other', async () => {
+  const { dir } = await repoWithBase();
+  await run(dir, 'config', 'filter.slow.smudge', 'sleep 1; cat');
+  await commitFile(dir, '.gitattributes', 'base.txt filter=slow\n', 'chore: make the checkout slow');
+  const wt = siblingOf(dir, 'ticket');
+  const checkout = ensureWorktree(dir, wt, 'factory/ticket', 'main');
+  while (!fs.existsSync(path.join(wt, '.git'))) await new Promise((resolve) => setTimeout(resolve, 20));
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  assert.equal(await waitForEarlierCheckout(`${wt}-other`, 20), false);
+  assert.equal(await waitForEarlierCheckout(wt, 20), true);
+
+  assert.equal(fs.readFileSync(path.join(wt, 'base.txt'), 'utf8'), 'base\n');
+  assert.equal(await waitForEarlierCheckout(wt, 20), false);
+  await checkout;
+});
+
+test('untouchedWorktreeBranch names the branch of a worktree that is still at its base, checked out or not', async () => {
+  const { dir } = await repoWithBase();
+  const wt = siblingOf(dir, 'ticket');
+  assert.equal(await untouchedWorktreeBranch(dir, wt, 'main'), null);
+  await run(dir, 'worktree', 'add', '--quiet', '--no-checkout', '-b', 'factory/ticket', wt, 'main');
+
+  assert.equal(await untouchedWorktreeBranch(dir, wt, 'main'), 'factory/ticket');
+  await checkOutAgain(wt);
+  assert.equal(await untouchedWorktreeBranch(dir, wt, 'main'), 'factory/ticket');
+});
+
+test('untouchedWorktreeBranch gives up a worktree that has commits, an older base or a lock a killed checkout left', async () => {
+  const { dir } = await repoWithBase();
+  const [committed, behind, locked] = ['committed', 'behind', 'locked'].map((n) => siblingOf(dir, n));
+  await ensureWorktree(dir, committed, 'factory/committed', 'main');
+  await ensureWorktree(dir, behind, 'factory/behind', 'main');
+  await ensureWorktree(dir, locked, 'factory/locked', 'main');
+
+  await commitFile(committed, 'feature.txt', 'work\n', 'feat: agent work');
+  fs.writeFileSync(path.resolve(locked, await run(locked, 'rev-parse', '--git-path', 'index.lock')), '');
+  assert.equal(await untouchedWorktreeBranch(dir, committed, 'main'), null);
+  assert.equal(await untouchedWorktreeBranch(dir, locked, 'main'), null);
+  assert.equal(await untouchedWorktreeBranch(dir, behind, 'main'), 'factory/behind');
+  await commitFile(dir, 'newer.txt', 'newer\n', 'feat: the base moved on');
+  assert.equal(await untouchedWorktreeBranch(dir, behind, 'main'), null);
+});
+
+test('checkOutAgain finishes a worktree and runs the post-checkout hook even when the files are already there', async () => {
+  const { dir } = await repoWithBase();
+  const hook = path.join(dir, '.git', 'hooks', 'post-checkout');
+  fs.mkdirSync(path.dirname(hook), { recursive: true });
+  fs.writeFileSync(hook, '#!/bin/sh\necho ran >> hook-runs.txt\n', { mode: 0o755 });
+  const wt = siblingOf(dir, 'ticket');
+  await run(dir, 'worktree', 'add', '--quiet', '--no-checkout', '-b', 'factory/ticket', wt, 'main');
+
+  await checkOutAgain(wt);
+  await checkOutAgain(wt);
+
+  assert.equal(fs.readFileSync(path.join(wt, 'base.txt'), 'utf8'), 'base\n');
+  assert.equal(fs.readFileSync(path.join(wt, 'hook-runs.txt'), 'utf8'), 'ran\nran\n');
+});
+
+test('fetchOrigin shares one fetch between callers that ask while it still waits for the repo', async () => {
+  const { dir } = await pushedFeature();
+  let release!: () => void;
+  const repoBusy = withRepoLock(dir, () => new Promise<void>((resolve) => (release = resolve)));
+
+  const first = fetchOrigin(dir, { refs: ['main'] });
+  const second = fetchOrigin(dir, { refs: ['main'] });
+  const otherRefs = fetchOrigin(dir, { refs: ['feature'] });
+  assert.equal(second, first);
+  assert.notEqual(otherRefs, first);
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  await repoBusy;
+
+  assert.equal((await first).code, 0);
+  assert.equal((await otherRefs).code, 0);
+  assert.notEqual(fetchOrigin(dir, { refs: ['main'] }), first);
 });

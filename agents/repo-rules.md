@@ -24,6 +24,12 @@ team's conventions there beat your general habits.
   for credentials and base URLs, and never print, log, write or commit their
   values. When it lists reference checkouts, read the source there instead of
   guessing how a library or service behaves.
+- Other agents work on this machine at the same time, in other worktrees of
+  this repo and in other repos. Keep what you start to yourself: write scratch
+  files under `$TMPDIR` (or a `mktemp -d` folder), never at fixed paths like
+  `/tmp/out.txt`; bind any server you start to a free port and stop it when
+  done; and stop only processes you started, by their pid, never by name
+  (`pkill`, `killall`) or by port.
 - Tests run in CI on the pull request, not here. Never run test files or
   suites (pytest, jest, vitest, `go test`, `cargo test`, `pnpm test`, the
   affected tests, a single test file), even when the repo's docs tell you to.

@@ -103,8 +103,20 @@ export function withRepoLock<T>(repo: string, fn: () => Promise<T>): Promise<T> 
   return result;
 }
 
+const fetchesNotStartedYet = new Map<string, Promise<ExecResult>>();
+
 export function fetchOrigin(repo: string, opts: { cwd?: string; refs?: string[] } = {}): Promise<ExecResult> {
-  return withRepoLock(repo, () => git(opts.cwd ?? repo, ['fetch', '--quiet', 'origin', ...(opts.refs ?? [])], 120_000));
+  const cwd = opts.cwd ?? repo;
+  const refs = opts.refs ?? [];
+  const sameFetch = JSON.stringify([path.resolve(repo), path.resolve(cwd), refs]);
+  const waitingForTheRepo = fetchesNotStartedYet.get(sameFetch);
+  if (waitingForTheRepo) return waitingForTheRepo;
+  const fetch = withRepoLock(repo, () => {
+    fetchesNotStartedYet.delete(sameFetch);
+    return git(cwd, ['fetch', '--quiet', 'origin', ...refs], 120_000);
+  });
+  fetchesNotStartedYet.set(sameFetch, fetch);
+  return fetch;
 }
 
 export function trackingRefspec(branch: string): string {
@@ -170,21 +182,79 @@ export async function resolveBaseRef(repo: string, branch: string): Promise<stri
   throw new Error(`base branch "${branch}" not found in ${repo}`);
 }
 
-export async function ensureWorktree(repo: string, worktree: string, branch: string, baseRef: string): Promise<boolean> {
+const CHECKOUT_TIMEOUT_MS = 10 * 60_000;
+const NO_COMMIT = '0'.repeat(40);
+
+async function filesCheckedOut(worktree: string): Promise<boolean> {
+  const index = await git(worktree, ['rev-parse', '--git-path', 'index']);
+  const notAWorktreeToFinish = index.code !== 0;
+  return notAWorktreeToFinish || fs.existsSync(path.resolve(worktree, index.stdout.trim()));
+}
+
+const checkoutOf = (worktree: string) => ['-C', worktree, 'reset', '--hard', '--quiet', '--no-recurse-submodules'];
+
+async function checkoutRunning(worktree: string): Promise<boolean> {
+  const processes = await exec('ps', ['-A', '-ww', '-o', 'command='], { timeoutMs: 10_000 });
+  return processes.stdout.includes(checkoutOf(worktree).join(' '));
+}
+
+export async function waitForEarlierCheckout(worktree: string, pollMs = 500): Promise<boolean> {
+  let waited = false;
+  for (const deadline = Date.now() + CHECKOUT_TIMEOUT_MS; (await checkoutRunning(worktree)) && Date.now() < deadline; waited = true) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  return waited;
+}
+
+async function checkOutFiles(worktree: string): Promise<void> {
+  const reset = await git(worktree, checkoutOf(worktree), CHECKOUT_TIMEOUT_MS);
+  if (reset.code !== 0) throw new Error(`could not check out ${worktree}: ${(reset.stderr || reset.stdout).trim()}`);
+  const hook = await git(worktree, ['hook', 'run', '--ignore-missing', 'post-checkout', '--', NO_COMMIT, (await headSha(worktree)) ?? NO_COMMIT, '1'], CHECKOUT_TIMEOUT_MS);
+  const gitHasNoHookCommand = /is not a git command/.test(hook.stderr);
+  if (hook.code !== 0 && !gitHasNoHookCommand) throw new Error(`post-checkout hook failed in ${worktree}: ${(hook.stderr || hook.stdout).trim()}`);
+}
+
+export type HeavyWork = <T>(work: () => Promise<T>) => Promise<T>;
+
+export function checkOutAgain(worktree: string, heavy: HeavyWork = (work) => work()): Promise<void> {
+  return heavy(() => checkOutFiles(worktree));
+}
+
+async function indexLockLeftBehind(worktree: string): Promise<boolean> {
+  const lock = await git(worktree, ['rev-parse', '--git-path', 'index.lock']);
+  return lock.code !== 0 || fs.existsSync(path.resolve(worktree, lock.stdout.trim()));
+}
+
+export async function untouchedWorktreeBranch(repo: string, worktree: string, baseRef: string): Promise<string | null> {
+  if (!fs.existsSync(path.join(worktree, '.git'))) return null;
+  const branch = (await git(worktree, ['branch', '--show-current'])).stdout.trim();
+  const head = await revParse(worktree, 'HEAD');
+  const stillAtItsBase = !!branch && !!head && head === (await revParse(repo, baseRef));
+  return stillAtItsBase && !(await indexLockLeftBehind(worktree)) ? branch : null;
+}
+
+export async function finishCheckout(worktree: string, heavy: HeavyWork = (work) => work()): Promise<boolean> {
+  if (await filesCheckedOut(worktree)) return false;
+  await heavy(() => checkOutFiles(worktree));
+  return true;
+}
+
+export async function ensureWorktree(repo: string, worktree: string, branch: string, baseRef: string, heavy: HeavyWork = (work) => work()): Promise<boolean> {
   if (fs.existsSync(path.join(worktree, '.git'))) {
     const current = (await git(worktree, ['branch', '--show-current'])).stdout.trim();
-    if (current === branch) return false;
-    throw new Error(`worktree ${worktree} is on ${current || 'a detached HEAD'}, expected ${branch}`);
+    if (current !== branch) throw new Error(`worktree ${worktree} is on ${current || 'a detached HEAD'}, expected ${branch}`);
+    return finishCheckout(worktree, heavy);
   }
-  return withRepoLock(repo, async () => {
+  await withRepoLock(repo, async () => {
     await git(repo, ['worktree', 'prune']);
     fs.mkdirSync(path.dirname(worktree), { recursive: true });
     const args = (await branchExists(repo, branch))
-      ? ['worktree', 'add', worktree, branch]
-      : ['worktree', 'add', '--no-track', '-b', branch, worktree, baseRef];
+      ? ['worktree', 'add', '--no-checkout', worktree, branch]
+      : ['worktree', 'add', '--no-checkout', '--no-track', '-b', branch, worktree, baseRef];
     await gitOut(repo, args);
-    return true;
   });
+  await heavy(() => checkOutFiles(worktree));
+  return true;
 }
 
 const MAX_WORKTREE_INCLUDES = 500;

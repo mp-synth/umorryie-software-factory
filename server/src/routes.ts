@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DEFAULT_INITIATIVE_SETTINGS, MODELS, type ChangeEvent, type InitiativeDetail, type RunEvent } from '@factory/shared';
+import { DEFAULT_INITIATIVE_SETTINGS, MAX_MANUAL_AGENTS, MODELS, type ChangeEvent, type InitiativeDetail, type RunEvent } from '@factory/shared';
 import { claudeVersion, resolveClaudeBin } from './agents/claude.ts';
 import { config } from './config.ts';
 import { sql } from './db.ts';
@@ -91,7 +91,8 @@ export async function routes(app: FastifyInstance): Promise<void> {
   app.patch('/api/settings', async (req) => {
     const body = z
       .object({
-        maxConcurrentAgents: z.number().int().min(1).max(40),
+        autoScaleAgents: z.boolean(),
+        maxConcurrentAgents: z.number().int().min(1).max(MAX_MANUAL_AGENTS),
         runTimeoutMinutes: z.number().int().min(5).max(600),
         maxBudgetUsdPerRun: z.number().positive().max(1000).nullable(),
         loadUserSettings: z.boolean(),
@@ -105,6 +106,8 @@ export async function routes(app: FastifyInstance): Promise<void> {
     engine.kick();
     return next;
   });
+
+  app.get('/api/capacity', async () => engine.capacityStatus());
 
   app.post('/api/pr-sweep', async () => ({ ok: true, count: await engine.sweepOpenPrs() }));
 

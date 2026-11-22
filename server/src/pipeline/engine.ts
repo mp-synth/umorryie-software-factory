@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { ACTIVE_TICKET_STATUSES, DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings, type Initiative, type Message, type Project, type Run, type RunKind, type Ticket } from '@factory/shared';
-import { agentEnvironment, type AgentEnvironment } from '../agent-env.ts';
+import { ACTIVE_TICKET_STATUSES, DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings, type CapacityStatus, type Initiative, type MachinePressure, type Message, type Project, type Run, type RunKind, type Ticket } from '@factory/shared';
+import { agentEnvironment, type AgentEnvironment, type Redact } from '../agent-env.ts';
 import { ROOT, config } from '../config.ts';
 import { sql } from '../db.ts';
 import { emitChange } from '../events.ts';
 import { repoShellEnv } from '../shell-env.ts';
-import { claudeVersion, startAgent, type AgentHandle, type AgentResult, type AgentSpec } from '../agents/claude.ts';
+import { attachAgent, claudeVersion, startDetachedAgent, type AgentResult, type AgentSink, type AgentSpec, type DetachedAgentHandle } from '../agents/claude.ts';
+import { LeftRunning, abandonSpool, followCommand, launchSpooled, removeSpool, spoolFate, wasLaunched, type CommandOutcome, type SpoolHandle, type SpoolOffsets } from '../agents/spool.ts';
 import * as gitx from '../git.ts';
 import * as gh from '../github.ts';
 import * as repo from '../repo.ts';
@@ -19,6 +20,9 @@ import {
   readIfExists,
   renderConversation,
   renderOwnerHistory,
+  spoolDir,
+  spoolRoot,
+  stoppedOnPurposeMark,
   ticketDir,
   ticketRoundDir,
   worktreePath,
@@ -59,8 +63,10 @@ import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderComme
 import { describeIgnored, describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
 import { MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, type AgentKind } from './role-prompt.ts';
-import { INTERRUPTED_REASON, ORPHAN_INITIATIVE_STATUSES, ORPHAN_REASON, orphanRunKind, restingInitiativeStatus, restingTicketStatus, shouldResumeInterrupted } from './recovery.ts';
-import { pickRunsToStart, type SchedulableRun } from './scheduler.ts';
+import { HELD_REASON, INTERRUPTED_REASON, ORPHAN_INITIATIVE_STATUSES, ORPHAN_REASON, orphanRunKind, restingInitiativeStatus, restingTicketStatus, shouldResumeInterrupted, startupFate, type StartupFate } from './recovery.ts';
+import { activeLanes, pickRunsToStart, type SchedulableRun } from './scheduler.ts';
+import { GUARANTEED_AGENTS_PER_INITIATIVE, agentCeiling, agentLimit, localWorkSlots, mostAgentsWithGuarantees, pressureOf, sampleMachine, thisMachine } from './capacity.ts';
+import { fairLimiter } from './limiter.ts';
 import { nextStackStep, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
 import { autoMergeStep, MERGE_QUEUE_ATTEMPTS_PER_HEAD } from './auto-merge.ts';
 
@@ -70,8 +76,13 @@ export class PipelineError extends Error {
   }
 }
 
-const active = new Map<string, AgentHandle>();
+type RunControls = Pick<SpoolHandle<unknown>, 'cancel' | 'leave' | 'abandon'>;
+type ServerExit = 'leave-agents-running' | 'stop-agents';
+
+const active = new Map<string, RunControls>();
 const inFlight = new Map<string, Run>();
+const settling = new Set<string>();
+let serverExit: ServerExit | null = null;
 const syncingWorktrees = new Map<string, Promise<void>>();
 const ts = (x: unknown): number => (x ? new Date(x as string).getTime() : 0);
 const touchRun = (r: Run) => emitChange({ type: 'run', id: r.id, initiativeId: r.initiativeId });
@@ -324,6 +335,58 @@ function isSecondActiveAgent(err: unknown): boolean {
   return (err as { constraint_name?: string } | null)?.constraint_name === 'runs_one_active_agent_per_scope';
 }
 
+const localWork = fairLimiter(() => localWorkSlots(thisMachine()));
+
+function heavyLocalWork<T>(run: Run, what: string, work: () => Promise<T>): Promise<T> {
+  const waiting = () =>
+    void log(run, `Waiting to ${what}: this machine runs ${localWorkSlots(thisMachine())} setups, checks and checkouts at once, shared between the initiatives.`).catch((err) =>
+      console.warn('[local-work]', err.message),
+    );
+  return localWork.run(run.initiativeId, work, waiting);
+}
+
+async function agentPool(app: AppSettings, lanes: number) {
+  const machine = thisMachine();
+  const sample = await sampleMachine();
+  const pressure = pressureOf(sample);
+  const ceiling = agentCeiling(app, machine);
+  return { machine, sample, pressure, ceiling, limit: agentLimit({ autoScale: app.autoScaleAgents, ceiling, pressure, machine, lanes }) };
+}
+
+export async function capacityStatus(): Promise<CapacityStatus> {
+  const app = await repo.getAppSettings();
+  const unfinished = await sql<(SchedulableRun & { status: Run['status'] })[]>`
+    select id, initiative_id, ticket_id, kind, status from runs where status in ('queued','running')`;
+  const running = unfinished.filter((r) => r.status === 'running').length;
+  const lanes = activeLanes(unfinished);
+  const pool = await agentPool(app, lanes);
+  return {
+    autoScale: app.autoScaleAgents,
+    limit: pool.limit,
+    ceiling: pool.ceiling,
+    running,
+    queued: unfinished.length - running,
+    lanes,
+    localWorkSlots: localWorkSlots(pool.machine),
+    cores: pool.machine.cores,
+    memoryGb: pool.machine.memoryGb,
+    loadPerCore: pool.sample.loadPerCore,
+    pressure: pool.pressure,
+  };
+}
+
+let reportedPressure: MachinePressure = 'ok';
+
+function reportPressureChange(pressure: MachinePressure, limit: number, loadPerCore: number): void {
+  if (pressure === reportedPressure) return;
+  reportedPressure = pressure;
+  console.log(
+    pressure === 'ok'
+      ? `[scheduler] the machine has room again; the agent pool is back to ${limit}`
+      : `[scheduler] the machine is short on ${pressure === 'memory' ? 'memory' : `cpu (load ${loadPerCore} per core)`}; holding the agent pool at ${limit} until it recovers`,
+  );
+}
+
 let ticking = false;
 let tickAgain = false;
 
@@ -332,21 +395,27 @@ export function kick(): void {
 }
 
 async function tick(): Promise<void> {
+  if (serverExit) return;
   if (ticking) {
     tickAgain = true;
     return;
   }
   ticking = true;
   try {
-    const app = await repo.getAppSettings();
-    const running = await sql<SchedulableRun[]>`select id, initiative_id, ticket_id, kind from runs where status = 'running'`;
-    const slots = app.maxConcurrentAgents - running.length;
-    if (slots <= 0) return;
     const queued = await sql<(Run & { settings: Initiative['settings'] })[]>`
       select r.*, i.settings from runs r join initiatives i on i.id = r.initiative_id
       where r.status = 'queued' order by r.queued_at`;
+    if (!queued.length) return;
+    const running = await sql<SchedulableRun[]>`select id, initiative_id, ticket_id, kind from runs where status = 'running'`;
+    const app = await repo.getAppSettings();
+    const pool = await agentPool(app, activeLanes([...queued, ...running]));
+    if (app.autoScaleAgents) reportPressureChange(pool.pressure, pool.limit, pool.sample.loadPerCore);
+    const slots = Math.max(pool.limit - running.length, 0);
+    const guarantee = app.autoScaleAgents
+      ? { agentsPerInitiative: GUARANTEED_AGENTS_PER_INITIATIVE, slots: Math.max(mostAgentsWithGuarantees(pool.ceiling) - running.length, 0) }
+      : undefined;
     const candidates = queued.map((q) => ({ ...q, concurrency: repo.initiativeSettings({ settings: q.settings }).concurrency }));
-    for (const q of pickRunsToStart(candidates, running, slots)) {
+    for (const q of pickRunsToStart(candidates, running, slots, guarantee)) {
       const [claimed] = await sql<Run[]>`
         update runs set status = 'running', started_at = now() where id = ${q.id} and status = 'queued' returning *`;
       if (!claimed) continue;
@@ -379,59 +448,75 @@ export function startScheduler(): void {
   kick();
 }
 
-async function startRun(run: Run): Promise<void> {
-  inFlight.set(run.id, run);
+const STEPS: Record<RunKind, (run: Run) => Promise<void>> = {
+  plan: runPlan,
+  plan_review: runPlanReview,
+  execute: runExecute,
+  gate: runGate,
+  review: runReview,
+  fix: runFix,
+  verify: runVerify,
+  arbitrate: runArbitrate,
+  ask: runAsk,
+};
+
+async function runStep(run: Run): Promise<void> {
+  if (run.ticketId) await syncingWorktrees.get(run.ticketId);
+  await STEPS[run.kind](run);
+}
+
+function startRun(run: Run): Promise<void> {
+  return supervise(run, () => runStep(run));
+}
+
+class SetupStopped extends Error {
+  constructor() {
+    super('the setup command was stopped');
+  }
+}
+
+async function endStopped(run: Run): Promise<void> {
+  await finish(run, 'canceled');
+  await revertAfterStop(run, null);
+}
+
+async function failRun(run: Run, err: unknown): Promise<void> {
+  if (err instanceof SetupStopped) return endStopped(run).catch((inner) => console.error('[run cleanup]', inner));
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[run ${run.id.slice(0, 8)} ${run.kind}]`, err);
   try {
-    if (run.ticketId) await syncingWorktrees.get(run.ticketId);
-    switch (run.kind) {
-      case 'plan':
-        await runPlan(run);
-        break;
-      case 'plan_review':
-        await runPlanReview(run);
-        break;
-      case 'execute':
-        await runExecute(run);
-        break;
-      case 'gate':
-        await runGate(run);
-        break;
-      case 'review':
-        await runReview(run);
-        break;
-      case 'fix':
-        await runFix(run);
-        break;
-      case 'verify':
-        await runVerify(run);
-        break;
-      case 'arbitrate':
-        await runArbitrate(run);
-        break;
-      case 'ask':
-        await runAsk(run);
-        break;
+    const current = await repo.getRun(run.id);
+    if (current?.status === 'running') {
+      await finish(run, 'failed', { error: message });
+      await revertAfterStop(run, `${run.kind} failed: ${message}`);
+    } else {
+      await systemMessage(run, `After ${run.kind} finished, starting the next step failed: ${message}`);
     }
+  } catch (inner) {
+    console.error('[run cleanup]', inner);
+  }
+}
+
+async function wrapUp(run: Run): Promise<void> {
+  await discardSpool(run.id).catch((err) => console.warn('[spool]', err.message));
+  if (run.ticketId) await releaseSweepClaimIfIdle(run.ticketId).catch((err) => console.warn('[pr-sweep]', err.message));
+  await handOverToArbiter(run).catch((err) => console.warn('[arbiter]', err.message));
+}
+
+async function supervise(run: Run, work: () => Promise<void>): Promise<void> {
+  inFlight.set(run.id, run);
+  let leftRunning = false;
+  try {
+    await work();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[run ${run.id.slice(0, 8)} ${run.kind}]`, err);
-    try {
-      const current = await repo.getRun(run.id);
-      if (current?.status === 'running') {
-        await finish(run, 'failed', { error: message });
-        await revertAfterStop(run, `${run.kind} failed: ${message}`);
-      } else {
-        await systemMessage(run, `After ${run.kind} finished, starting the next step failed: ${message}`);
-      }
-    } catch (inner) {
-      console.error('[run cleanup]', inner);
-    }
+    leftRunning = err instanceof LeftRunning;
+    if (!leftRunning) await failRun(run, err);
   } finally {
     active.delete(run.id);
     canceling.delete(run.id);
     inFlight.delete(run.id);
-    if (run.ticketId) void releaseSweepClaimIfIdle(run.ticketId).catch((err) => console.warn('[pr-sweep]', err.message));
-    void handOverToArbiter(run).catch((err) => console.warn('[arbiter]', err.message));
+    if (!leftRunning) await wrapUp(run);
+    settling.delete(run.id);
     kick();
   }
 }
@@ -530,18 +615,105 @@ export function projectAgentSpec(
   };
 }
 
-function redactWrittenOutput(file: string, since: number, spec: AgentSpec): string | null {
+function redactWrittenOutput(file: string, since: number, redact: Redact | undefined): string | null {
   const written = readIfWrittenSince(file, since);
-  if (!written || !spec.redact) return written;
-  const redacted = spec.redact(written);
+  if (!written || !redact) return written;
+  const redacted = redact(written);
   if (redacted !== written) fs.writeFileSync(file, redacted);
   return redacted;
 }
 
-async function runAgent(
+interface AgentSnapshot {
+  startedAt: number;
+  worktreeBefore: gitx.WorktreeState | null;
+}
+
+interface PersistedStep {
+  agent: AgentSnapshot;
+  step: unknown;
+}
+
+interface StepStates {
+  plan: { feedbackIds: string[] };
+  plan_review: Record<string, never>;
+  execute: { start: string | null; base: string; feedbackIds: string[] };
+  review: { gateVerdict: string | null };
+  fix: { start: string | null; base: string; feedbackIds: string[] };
+  verify: { start: string; fixRunIds: string[] };
+  arbitrate: { approveBlocker: string | null; stoppedRunId: string | null };
+  ask: Record<string, never>;
+}
+
+const AFTER_AGENT: { [K in AgentKind]: (run: Run, step: StepResult, state: StepStates[K]) => Promise<void> } = {
+  plan: afterPlan,
+  plan_review: afterPlanReview,
+  execute: afterExecute,
+  review: afterReview,
+  fix: afterFix,
+  verify: afterVerify,
+  arbitrate: afterArbitrate,
+  ask: afterAsk,
+};
+
+const offsetsOf = (spool: repo.RunSpool): SpoolOffsets => ({ stdout: spool.stdoutOffset, stderr: spool.stderrOffset });
+
+function storeEvents(run: Run): AgentSink {
+  return async (events, readUpTo) => {
+    try {
+      await repo.addSpooledRunEvents(run.id, events, readUpTo);
+      const init = events.find((e) => e.type === 'init' && e.data.sessionId);
+      if (init) await repo.updateRun(run.id, { sessionId: String(init.data.sessionId) });
+    } catch (err) {
+      console.error('[event]', err);
+    }
+  };
+}
+
+function watch(run: Run, controls: RunControls): void {
+  active.set(run.id, controls);
+  if (canceling.has(run.id)) controls.cancel();
+  if (serverExit) letGo(controls, serverExit);
+}
+
+function letGo(controls: RunControls, exit: ServerExit): void {
+  if (exit === 'stop-agents') controls.abandon();
+  else controls.leave();
+}
+
+async function discardSpool(runId: string): Promise<void> {
+  const spool = await repo.getRunSpool(runId);
+  if (!spool) return;
+  removeSpool(spool.dir);
+  await repo.deleteRunSpool(runId);
+}
+
+async function collectAgent(run: Run, handle: DetachedAgentHandle, snapshot: AgentSnapshot, redact: Redact | undefined): Promise<StepResult> {
+  watch(run, handle);
+  const result = await handle.done;
+  settling.add(run.id);
+  const cwd = run.cwd!;
+  const output = redactWrittenOutput(run.outputPath!, snapshot.startedAt, redact);
+  const diffsTicket = TICKET_DIFF_STEPS.includes(run.kind as AgentKind) && !!run.ticketId;
+  await repo.updateRun(run.id, {
+    pid: null,
+    sessionId: result.sessionId,
+    costUsd: result.costUsd,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    numTurns: result.numTurns,
+    outputMd: output,
+    verdict: firstLine(output),
+    summary: result.resultText?.trim().slice(0, 500) ?? null,
+    headSha: diffsTicket ? await gitx.headSha(cwd) : null,
+  });
+  const worktreeChanges = snapshot.worktreeBefore ? gitx.worktreeChanges(snapshot.worktreeBefore, await gitx.worktreeState(cwd)) : [];
+  return { output, result, worktreeChanges };
+}
+
+async function runAgent<K extends AgentKind>(
   run: Run,
   opts: {
-    kind: AgentKind;
+    kind: K;
     cwd: string;
     prompt: string;
     runDir: string;
@@ -550,7 +722,8 @@ async function runAgent(
     roleFile?: string;
     env?: Record<string, string>;
   },
-): Promise<StepResult> {
+  state: StepStates[K],
+): Promise<void> {
   const app = await repo.getAppSettings();
   const model = opts.model ?? run.model ?? 'opus';
   fs.mkdirSync(opts.runDir, { recursive: true });
@@ -584,39 +757,36 @@ async function runAgent(
   });
   await log(run, `Spawning fresh ${opts.kind} agent · model ${model} · cwd ${opts.cwd}`);
 
-  let chain = Promise.resolve();
   const startedAt = Date.now();
   const guardsTicketWorktree = READ_ONLY_WORKTREE_STEPS.includes(opts.kind) && opts.cwd !== project.repoPath;
-  const worktreeBefore = guardsTicketWorktree ? await gitx.worktreeState(opts.cwd) : null;
-  const handle = startAgent(
-    spec,
-    (e) => {
-      chain = chain.then(async () => {
-        await repo.addRunEvent(run.id, e.type, e.data);
-        if (e.type === 'init' && e.data.sessionId) await repo.updateRun(run.id, { sessionId: String(e.data.sessionId) });
-      }).catch((err) => console.error('[event]', err));
-    },
-  );
-  active.set(run.id, handle);
-  if (canceling.has(run.id)) handle.cancel();
-  await repo.updateRun(run.id, { pid: handle.pid ?? null });
-  const result = await handle.done;
-  await chain;
-  const output = redactWrittenOutput(opts.outputPath, startedAt, spec);
-  await repo.updateRun(run.id, {
-    pid: null,
-    sessionId: result.sessionId,
-    costUsd: result.costUsd,
-    inputTokens: result.inputTokens,
-    outputTokens: result.outputTokens,
-    numTurns: result.numTurns,
-    outputMd: output,
-    verdict: firstLine(output),
-    summary: result.resultText?.trim().slice(0, 500) ?? null,
-    headSha: ticket ? await gitx.headSha(opts.cwd) : null,
-  });
-  const worktreeChanges = worktreeBefore ? gitx.worktreeChanges(worktreeBefore, await gitx.worktreeState(opts.cwd)) : [];
-  return { output, result, worktreeChanges };
+  const snapshot: AgentSnapshot = { startedAt, worktreeBefore: guardsTicketWorktree ? await gitx.worktreeState(opts.cwd) : null };
+  const spool = await repo.insertRunSpool(run.id, spoolDir(run.id), { agent: snapshot, step: state } satisfies PersistedStep);
+  const handle = startDetachedAgent(spec, spool.dir, storeEvents(run), opts.runDir);
+  const launched = await repo.updateRun(run.id, { pid: handle.pid ?? null });
+  if (handle.scratchDir) await log(run, `Scratch space for this session only (TMPDIR): ${handle.scratchDir}`);
+  const step = await collectAgent(launched, handle, snapshot, spec.redact);
+  await AFTER_AGENT[opts.kind](run, step, (spool.state as PersistedStep).step as StepStates[K]);
+}
+
+async function redactionOf(run: Run): Promise<Redact> {
+  const init = await mustInitiative(run.initiativeId);
+  const project = await mustProject(init.projectId);
+  return agentEnvironment(project.repoPath, project.copyFiles ?? []).redact;
+}
+
+async function adoptAgent(run: Run, spool: repo.RunSpool): Promise<void> {
+  const persisted = spool.state as PersistedStep;
+  const redact = await redactionOf(run);
+  const handle = attachAgent(spool.dir, offsetsOf(spool), redact, storeEvents(run));
+  const step = await collectAgent(run, handle, persisted.agent, redact);
+  await AFTER_AGENT[run.kind as AgentKind](run, step, persisted.step as never);
+}
+
+async function adoptRun(run: Run, spool: repo.RunSpool): Promise<void> {
+  await log(run, 'The factory server restarted while this was running. Following it again from where its stored events end.');
+  if (runsSetup(spool)) await adoptSetup(run, spool);
+  else if (run.kind === 'gate') await adoptChecks(run, spool);
+  else await adoptAgent(run, spool);
 }
 
 async function stoppedEarly(run: Run, step: StepResult, outputName: string): Promise<boolean> {
@@ -687,13 +857,21 @@ async function runPlan(run: Run): Promise<void> {
     [planMd, planJson],
     'Reply with one line: the first line of plan.md, then " · <n> tickets".',
   );
-  const step = await runAgent(run, { kind: 'plan', cwd: project.repoPath, prompt, runDir: dir, outputPath: planMd });
+  await runAgent(run, { kind: 'plan', cwd: project.repoPath, prompt, runDir: dir, outputPath: planMd }, { feedbackIds: feedback.map((f) => f.id) });
+}
+
+async function afterPlan(run: Run, step: StepResult, state: StepStates['plan']): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const project = await mustProject(init.projectId);
+  const s = repo.initiativeSettings(init);
+  const dir = planRoundDir(init, run.round);
+  const planJson = path.join(dir, 'plan.json');
   if (await stoppedEarly(run, step, 'plan.md')) return;
   const output = step.output!;
   const verdict = firstLine(output) ?? '';
   const planVerdict = parseVerdict('plan', output);
   if (!planVerdict) return failMalformedVerdict(run, output);
-  await repo.consumeFeedback(feedback.map((f) => f.id), run.id);
+  await repo.consumeFeedback(state.feedbackIds, run.id);
 
   if (planVerdict === 'BLOCKED') {
     await finish(run, 'succeeded');
@@ -787,7 +965,12 @@ async function runPlanReview(run: Run): Promise<void> {
     [out],
     'Reply with one line: the first line of plan-review.md.',
   );
-  const step = await runAgent(run, { kind: 'plan_review', cwd: project.repoPath, prompt, runDir: dir, outputPath: out });
+  await runAgent(run, { kind: 'plan_review', cwd: project.repoPath, prompt, runDir: dir, outputPath: out }, {});
+}
+
+async function afterPlanReview(run: Run, step: StepResult): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const s = repo.initiativeSettings(init);
   if (await stoppedEarly(run, step, 'plan-review.md')) return;
   const verdict = parseVerdict('plan_review', step.output);
   if (!verdict) return failMalformedVerdict(run, step.output);
@@ -874,6 +1057,48 @@ function setupDoneMarker(init: Initiative, ticket: Ticket): string {
   return path.join(ticketDir(init, ticket), 'worktree-ready');
 }
 
+const SETUP_TIMEOUT_MS = 20 * 60_000;
+const SETUP_OUTPUT_KEPT = 20_000;
+const SETUP_OUTPUT_EVERY_MS = 500;
+const SETUP_PHASE = { phase: 'setup' };
+
+function runsSetup(spool: repo.RunSpool | null): boolean {
+  return (spool?.state as { phase?: string } | undefined)?.phase === SETUP_PHASE.phase;
+}
+
+async function followSetup(run: Run, spool: repo.RunSpool, pid: number | undefined): Promise<CommandOutcome> {
+  const handle = followCommand(spool.dir, { pid, from: offsetsOf(spool), maxOutput: SETUP_OUTPUT_KEPT, pollMs: SETUP_OUTPUT_EVERY_MS, onOutput: storeOutput(run) });
+  watch(run, handle);
+  const setup = await handle.done;
+  active.delete(run.id);
+  return setup;
+}
+
+async function startSetup(run: Run, command: string, cwd: string, env: NodeJS.ProcessEnv): Promise<CommandOutcome> {
+  const spool = await repo.insertRunSpool(run.id, spoolDir(run.id), SETUP_PHASE);
+  const marker = `factory-setup-${run.id}`;
+  const pid = launchSpooled(spool.dir, { bin: 'bash', args: ['-c', command, marker], cwd, timeoutMs: SETUP_TIMEOUT_MS, marker }, env);
+  return followSetup(run, spool, pid);
+}
+
+async function concludeSetup(run: Run, setup: CommandOutcome, doneMarker: string): Promise<void> {
+  if (setup.canceled) throw new SetupStopped();
+  if (setup.code !== 0) {
+    throw new Error(`setup command exited ${setup.code}${setup.timedOut ? ' (timed out)' : ''}:\n${(setup.stdout + setup.stderr).slice(-2000)}`);
+  }
+  await log(run, 'Setup finished.');
+  write(doneMarker, new Date().toISOString());
+  await discardSpool(run.id);
+}
+
+async function adoptSetup(run: Run, spool: repo.RunSpool): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const ticket = await mustTicket(run.ticketId!);
+  const setup = await heavyLocalWork(run, 'follow the setup command', () => followSetup(run, spool, undefined));
+  await concludeSetup(run, setup, setupDoneMarker(init, ticket));
+  await runStep(run);
+}
+
 async function prepareWorktree(run: Run, init: Initiative, project: Project, ticket: Ticket): Promise<void> {
   const marker = setupDoneMarker(init, ticket);
   if (fs.existsSync(marker) || !ticket.worktreePath) return;
@@ -882,25 +1107,22 @@ async function prepareWorktree(run: Run, init: Initiative, project: Project, tic
   const local = await gitx.copyLocalFiles(project.repoPath, ticket.worktreePath, project.copyFiles ?? []);
   if (local.copied.length) await log(run, `Copied local files: ${local.copied.join(', ')}`);
   if (local.skipped.length) await log(run, `Not copied (missing, tracked or not gitignored): ${local.skipped.join(', ')}`);
-  if (project.setupCommand?.trim()) {
-    await log(run, `Running setup: ${project.setupCommand}`);
-    const r = await gitx.runInNonLoginShell(project.setupCommand, {
-      cwd: ticket.worktreePath,
-      timeoutMs: 20 * 60_000,
-      maxOutput: 20_000,
-      env: await shellEnvFor(project, ticket),
-    });
-    if (r.code !== 0) {
-      throw new Error(`setup command exited ${r.code}${r.timedOut ? ' (timed out)' : ''}:\n${(r.stdout + r.stderr).slice(-2000)}`);
-    }
-    await log(run, 'Setup finished.');
+  const command = project.setupCommand?.trim() ? project.setupCommand : null;
+  if (!command) {
+    write(marker, new Date().toISOString());
+    return;
   }
-  write(marker, new Date().toISOString());
+  await log(run, `Running setup: ${command}`);
+  const env = await shellEnvFor(project, ticket);
+  const setup = await heavyLocalWork(run, 'run the setup command', () => startSetup(run, command, ticket.worktreePath!, env));
+  await concludeSetup(run, setup, marker);
 }
 
 async function fetchPrHead(project: Project, ticket: Ticket): Promise<void> {
   const head = ticket.prHeadRef!;
-  const r = await gitx.fetchOrigin(project.repoPath, { refs: [gitx.trackingRefspec(head)] });
+  const fetch = () => gitx.fetchOrigin(project.repoPath, { refs: [gitx.trackingRefspec(head)] });
+  const first = await fetch();
+  const r = first.code === 0 ? first : await fetch();
   if (r.code !== 0) throw new Error(`could not fetch ${head} from origin: ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
 }
 
@@ -913,16 +1135,29 @@ async function catchUpWithPrHead(run: Run, project: Project, ticket: Ticket): Pr
   await log(run, `Up to date with origin/${ticket.prHeadRef}.`);
 }
 
+async function startedWorktreeBranch(run: Run, project: Project, wt: string, baseRef: string, wanted: string): Promise<string | null> {
+  if (!fs.existsSync(path.join(wt, '.git'))) return null;
+  const started = await gitx.untouchedWorktreeBranch(project.repoPath, wt, baseRef);
+  if (started === wanted || started?.startsWith(`${wanted}-v`)) return started;
+  const orphan = (await gitx.git(wt, ['branch', '--show-current'])).stdout.trim();
+  await log(run, `Removing a half-created worktree from an earlier attempt (${orphan || 'detached HEAD'})`);
+  await gitx.removeWorktree(project.repoPath, wt, orphan || null);
+  return null;
+}
+
 async function ensureTicketWorktree(run: Run, init: Initiative, project: Project, ticket: Ticket): Promise<Ticket> {
+  const checkout: gitx.HeavyWork = (work) => heavyLocalWork(run, 'check out the worktree', work);
+  const wt = ticket.worktreePath ?? worktreePath(project, init, ticket);
+  if (await gitx.waitForEarlierCheckout(wt)) await log(run, 'Waited for a checkout of this worktree that was still running from before the factory server restarted.');
   if (ticket.branch && ticket.worktreePath && fs.existsSync(path.join(ticket.worktreePath, '.git'))) {
+    if (await gitx.finishCheckout(ticket.worktreePath, checkout)) await log(run, 'Finished a checkout that an earlier attempt left half done.');
     await prepareWorktree(run, init, project, ticket);
     return ticket;
   }
-  const wt = ticket.worktreePath ?? worktreePath(project, init, ticket);
+  fs.rmSync(setupDoneMarker(init, ticket), { force: true });
   if (ticket.branch && (await gitx.branchExists(project.repoPath, ticket.branch))) {
     await log(run, `Restoring worktree for ${ticket.branch}`);
-    await gitx.ensureWorktree(project.repoPath, wt, ticket.branch, ticket.branch);
-    fs.rmSync(setupDoneMarker(init, ticket), { force: true });
+    await gitx.ensureWorktree(project.repoPath, wt, ticket.branch, ticket.branch, checkout);
     const restored = await repo.updateTicket(ticket.id, { worktreePath: wt });
     await prepareWorktree(run, init, project, restored);
     return restored;
@@ -930,8 +1165,7 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
   if (ticket.prHeadRef) {
     await log(run, `Checking out ${ticket.prHeadRef} from origin as ${ticket.branch}`);
     await fetchPrHead(project, ticket);
-    await gitx.ensureWorktree(project.repoPath, wt, ticket.branch!, `origin/${ticket.prHeadRef}`);
-    fs.rmSync(setupDoneMarker(init, ticket), { force: true });
+    await gitx.ensureWorktree(project.repoPath, wt, ticket.branch!, `origin/${ticket.prHeadRef}`, checkout);
     const checkedOut = await repo.updateTicket(ticket.id, { worktreePath: wt });
     await prepareWorktree(run, init, project, checkedOut);
     return checkedOut;
@@ -940,16 +1174,12 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
   const parentBranch = stackBase(ticket, await repo.listTickets(init.id))?.branch;
   const baseRef = parentBranch ?? (await gitx.resolveBaseRef(project.repoPath, init.baseBranch));
   const prBase = parentBranch ?? init.baseBranch;
-  if (fs.existsSync(path.join(wt, '.git'))) {
-    const orphan = (await gitx.git(wt, ['branch', '--show-current'])).stdout.trim();
-    await log(run, `Removing a half-created worktree from an earlier attempt (${orphan || 'detached HEAD'})`);
-    await gitx.removeWorktree(project.repoPath, wt, orphan || null);
-  }
-  const branch = await uniqueBranch(project.repoPath, branchName(init, ticket));
-  await log(run, `Creating worktree ${wt} on ${branch} from ${baseRef}`);
-  await gitx.ensureWorktree(project.repoPath, wt, branch, baseRef);
+  const started = await startedWorktreeBranch(run, project, wt, baseRef, branchName(init, ticket));
+  const branch = started ?? (await uniqueBranch(project.repoPath, branchName(init, ticket)));
+  await log(run, started ? `Carrying on with the worktree an earlier attempt started on ${branch}` : `Creating worktree ${wt} on ${branch} from ${baseRef}`);
+  if (started) await gitx.checkOutAgain(wt, checkout);
+  else await gitx.ensureWorktree(project.repoPath, wt, branch, baseRef, checkout);
   ticket = await repo.updateTicket(ticket.id, { branch, baseRef: prBase, worktreePath: wt, ciState: null, ciHeadSha: null });
-  fs.rmSync(setupDoneMarker(init, ticket), { force: true });
   await prepareWorktree(run, init, project, ticket);
   return ticket;
 }
@@ -1022,12 +1252,22 @@ async function runExecute(run: Run): Promise<void> {
     'Reply with one line: the first line of build.md.',
   );
   const start = await gitx.headSha(ticket.worktreePath!);
-  const step = await runAgent(run, { kind: 'execute', cwd: ticket.worktreePath!, prompt, runDir: dir, outputPath: out, env: factoryEnv(ticket, base) });
+  await runAgent(
+    run,
+    { kind: 'execute', cwd: ticket.worktreePath!, prompt, runDir: dir, outputPath: out, env: factoryEnv(ticket, base) },
+    { start, base, feedbackIds: feedback.map((f) => f.id) },
+  );
+}
+
+async function afterExecute(run: Run, step: StepResult, state: StepStates['execute']): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const ticket = await mustTicket(run.ticketId!);
+  const { start, base } = state;
   if (await stoppedEarly(run, step, 'build.md')) return;
   await keepBranchHistory(run, ticket, start, pullRequestText(step.output, ticket).title);
   const verdict = parseVerdict('execute', step.output);
   if (!verdict) return failMalformedVerdict(run, step.output);
-  await repo.consumeFeedback(feedback.map((f) => f.id), run.id);
+  await repo.consumeFeedback(state.feedbackIds, run.id);
 
   if (verdict === 'BLOCKED') {
     await finish(run, 'succeeded');
@@ -1051,54 +1291,91 @@ async function runExecute(run: Run): Promise<void> {
   await enqueue({ kind: 'gate', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
 }
 
+const CANCELED_BEFORE_IT_STARTED: CommandOutcome = { code: 130, stdout: '', stderr: 'Canceled before the checks started.', timedOut: false, canceled: true };
+const CHECKS_OUTPUT_KEPT = 200_000;
+const CHECKS_OUTPUT_EVERY_MS = 500;
+
+interface ChecksRun {
+  outcome: CommandOutcome;
+  started: number;
+}
+
+function storeOutput(run: Run): (text: string, readUpTo: SpoolOffsets) => Promise<void> {
+  return (text, readUpTo) =>
+    repo.addSpooledRunEvents(run.id, [{ type: 'log', data: { text } }], readUpTo).catch((err) => console.error('[event]', err));
+}
+
+async function followChecks(run: Run, spool: repo.RunSpool, pid: number | undefined): Promise<CommandOutcome> {
+  const handle = followCommand(spool.dir, { pid, from: offsetsOf(spool), maxOutput: CHECKS_OUTPUT_KEPT, pollMs: CHECKS_OUTPUT_EVERY_MS, onOutput: storeOutput(run) });
+  watch(run, handle);
+  const outcome = await handle.done;
+  settling.add(run.id);
+  await repo.updateRun(run.id, { pid: null });
+  return outcome;
+}
+
+async function startChecks(run: Run, command: string, cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<ChecksRun> {
+  const started = Date.now();
+  const spool = await repo.insertRunSpool(run.id, spoolDir(run.id), { started });
+  const marker = `factory-checks-${run.id}`;
+  const pid = launchSpooled(spool.dir, { bin: 'bash', args: ['-c', command, marker], cwd, timeoutMs, marker }, env);
+  await repo.updateRun(run.id, { pid: pid ?? null });
+  return { outcome: await followChecks(run, spool, pid), started };
+}
+
+async function adoptChecks(run: Run, spool: repo.RunSpool): Promise<void> {
+  const { started } = spool.state as { started: number };
+  const outcome = await heavyLocalWork(run, 'follow the checks', () => followChecks(run, spool, undefined));
+  await afterGate(run, { outcome, started });
+}
+
 async function runGate(run: Run): Promise<void> {
   const init = await mustInitiative(run.initiativeId);
   const project = await mustProject(init.projectId);
   let ticket = await mustTicket(run.ticketId!);
   ticket = await ensureTicketWorktree(run, init, project, ticket);
-  const s = repo.initiativeSettings(init);
   const app = await repo.getAppSettings();
   const dir = ticketRoundDir(init, ticket, Math.max(run.round, 1));
   const out = path.join(dir, 'checks.md');
-  const logPath = path.resolve(dir, 'checks.log');
   await repo.updateRun(run.id, { cwd: ticket.worktreePath, runDir: dir, outputPath: out, prompt: project.checksCommand, headSha: await gitx.headSha(ticket.worktreePath!) });
+  const command = project.checksCommand?.trim() ? project.checksCommand : null;
+  if (!command) return afterGate(run, null);
+  await log(run, `$ ${command}`);
+  const queuedAt = Date.now();
+  const env = await shellEnvFor(project, ticket);
+  const checks = await heavyLocalWork(run, 'run the checks', async () => {
+    if (canceling.has(run.id)) return { outcome: CANCELED_BEFORE_IT_STARTED, started: queuedAt };
+    return startChecks(run, command, ticket.worktreePath!, app.gateTimeoutMinutes * 60_000, env);
+  });
+  await afterGate(run, checks);
+}
+
+async function afterGate(run: Run, checks: ChecksRun | null): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const project = await mustProject(init.projectId);
+  const ticket = await mustTicket(run.ticketId!);
+  const s = repo.initiativeSettings(init);
+  const dir = ticketRoundDir(init, ticket, Math.max(run.round, 1));
+  const out = path.join(dir, 'checks.md');
+  const logPath = path.resolve(dir, 'checks.log');
 
   let verdict: 'PASS' | 'FAIL' | 'SKIPPED';
   let body: string;
   let envFailure: string | null = null;
-  if (!project.checksCommand?.trim()) {
+  if (!checks) {
     verdict = 'SKIPPED';
     body = 'No checks command is configured for this project, so nothing was run. Set one on the Projects page.';
   } else {
-    await log(run, `$ ${project.checksCommand}`);
-    const started = Date.now();
-    let pending = '';
-    const flush = () => {
-      if (pending) void repo.addRunEvent(run.id, 'log', { text: pending });
-      pending = '';
-    };
-    const timer = setInterval(flush, 500);
-    const r = await gitx.runInNonLoginShell(project.checksCommand, {
-      cwd: ticket.worktreePath!,
-      timeoutMs: app.gateTimeoutMinutes * 60_000,
-      maxOutput: 200_000,
-      env: await shellEnvFor(project, ticket),
-      onOutput: (c) => {
-        pending += c;
-        if (pending.length > 8000) flush();
-      },
-    });
-    clearInterval(timer);
-    flush();
+    const r = checks.outcome;
     verdict = r.code === 0 ? 'PASS' : 'FAIL';
     if (gitx.commandCouldNotRun(r.code)) envFailure = `The checks command could not run (exit ${r.code}: command not found or not executable). Fix the environment or the project's checks command, then press Fix or re-run checks.`;
     const output = r.stdout + (r.stderr ? `\n${r.stderr}` : '');
     write(logPath, output);
     body = gateBody({
-      command: project.checksCommand,
+      command: project.checksCommand!,
       code: r.code,
       timedOut: r.timedOut,
-      seconds: Math.round((Date.now() - started) / 1000),
+      seconds: Math.round((Date.now() - checks.started) / 1000),
       cwd: ticket.worktreePath!,
       output,
       logPath,
@@ -1107,7 +1384,7 @@ async function runGate(run: Run): Promise<void> {
   const md = `GATE: ${verdict}\n\n${body}\n`;
   write(out, md);
   const fresh = await mustTicket(ticket.id);
-  if (canceling.has(run.id)) {
+  if (canceling.has(run.id) || checks?.outcome.canceled) {
     await finish(run, 'canceled', { outputMd: md, verdict: `GATE: ${verdict}` });
     await revertAfterStop(run, null);
     return;
@@ -1255,7 +1532,6 @@ async function runReview(run: Run): Promise<void> {
   const project = await mustProject(init.projectId);
   let ticket = await mustTicket(run.ticketId!);
   ticket = await ensureTicketWorktree(run, init, project, ticket);
-  const s = repo.initiativeSettings(init);
   const all = await repo.listTickets(init.id);
   const dir = ticketRoundDir(init, ticket, run.round);
   const runs = await lastRuns(ticket.id);
@@ -1288,14 +1564,24 @@ async function runReview(run: Run): Promise<void> {
     [out],
     'Reply with one line: the first line of review.md.',
   );
-  const step = await runAgent(run, { kind: 'review', cwd: ticket.worktreePath!, prompt, runDir: dir, outputPath: out, env: factoryEnv(ticket, base) });
+  await runAgent(
+    run,
+    { kind: 'review', cwd: ticket.worktreePath!, prompt, runDir: dir, outputPath: out, env: factoryEnv(ticket, base) },
+    { gateVerdict: gate?.verdict ?? null },
+  );
+}
+
+async function afterReview(run: Run, step: StepResult, state: StepStates['review']): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const ticket = await mustTicket(run.ticketId!);
+  const s = repo.initiativeSettings(init);
   if (await stoppedEarly(run, step, 'review.md')) return;
   const verdict = parseVerdict('review', step.output);
   if (!verdict) return failMalformedVerdict(run, step.output);
   await finish(run, 'succeeded');
   const fresh = await mustTicket(ticket.id);
   if (s.postReviewsToPr && fresh.prNumber) {
-    const body = reviewComment(step.output!, { gate: gateResult(gate?.verdict), verdict, round: run.round, acceptance: parseAcceptance(step.output) });
+    const body = reviewComment(step.output!, { gate: gateResult(state.gateVerdict), verdict, round: run.round, acceptance: parseAcceptance(step.output) });
     await gh.comment(fresh.worktreePath!, fresh.prNumber, body);
   }
 
@@ -1318,6 +1604,7 @@ async function runReview(run: Run): Promise<void> {
 }
 
 const CARRIED_REPORTS = ['review.md', 'checks.md', 'pr-comments.md', 'feedback.md'];
+const FIX_INPUTS = [...CARRIED_REPORTS, 'pr-items.json'];
 
 function readPrItems(dir: string): PrItems | null {
   const raw = readIfExists(path.join(dir, 'pr-items.json'));
@@ -1406,6 +1693,7 @@ async function collectFixInputs(run: Run, init: Initiative, project: Project, ti
     return { reports: [blocked, ...carried], feedback: [], mechanicalOnly };
   }
 
+  for (const leftByAnEarlierPass of FIX_INPUTS) fs.rmSync(path.join(dir, leftByAnEarlierPass), { force: true });
   const work = await pendingFixWork(project, ticket, run.id);
   const reports: string[] = [];
   let mechanicalOnly = !work.review && !work.feedback.length;
@@ -1467,7 +1755,7 @@ async function runFix(run: Run): Promise<void> {
   const collected = await collectFixInputs(run, init, project, ticket, dir);
   if (!collected) {
     await finish(run, 'succeeded', { verdict: 'FIX: NOTHING-TO-DO', outputMd: 'FIX: NOTHING-TO-DO\n\nNo failing checks, review findings, PR comments or feedback to act on.' });
-    await repo.updateTicket(ticket.id, { status: settledStatus(ticket) });
+    await repo.updateTicket(ticket.id, { status: settledStatus(ticket), round: run.round - 1 });
     await systemMessage(run, `${ticketLabel(ticket)}: nothing to fix.`);
     await refreshInitiativeStatus(init.id);
     return;
@@ -1501,21 +1789,33 @@ async function runFix(run: Run): Promise<void> {
     'Reply with one line: the first line of fix.md.',
   );
   await repo.updateTicket(ticket.id, { round: run.round });
-  const step = await runAgent(run, {
-    kind: 'fix',
-    cwd: ticket.worktreePath!,
-    prompt,
-    runDir: dir,
-    outputPath: out,
-    model,
-    roleFile: collected.mechanicalOnly ? MECHANICAL_FIXER_FILE : undefined,
-    env: factoryEnv(ticket, base),
-  });
+  await runAgent(
+    run,
+    {
+      kind: 'fix',
+      cwd: ticket.worktreePath!,
+      prompt,
+      runDir: dir,
+      outputPath: out,
+      model,
+      roleFile: collected.mechanicalOnly ? MECHANICAL_FIXER_FILE : undefined,
+      env: factoryEnv(ticket, base),
+    },
+    { start, base, feedbackIds: collected.feedback.map((f) => f.id) },
+  );
+}
+
+async function afterFix(run: Run, step: StepResult, state: StepStates['fix']): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const ticket = await mustTicket(run.ticketId!);
+  const s = repo.initiativeSettings(init);
+  const dir = ticketRoundDir(init, ticket, run.round);
+  const { start, base } = state;
   if (await stoppedEarly(run, step, 'fix.md')) return;
   await keepBranchHistory(run, ticket, start, `Fix round ${run.round} on ${ticket.title}`);
   const verdict = parseVerdict('fix', step.output);
   if (!verdict) return failMalformedVerdict(run, step.output);
-  await repo.consumeFeedback(collected.feedback.map((f) => f.id), run.id);
+  await repo.consumeFeedback(state.feedbackIds, run.id);
   await finish(run, 'succeeded');
   await agentMessage(run, `**Fix round ${run.round} on ${ticketLabel(ticket)}: ${firstLine(step.output)!.replace(/^FIX:\s*/i, '')}**\n\n${summaryOf(step.output!)}`);
   await rerunUnrelatedFailures(run, ticket, step.output!);
@@ -1632,7 +1932,6 @@ async function runVerify(run: Run): Promise<void> {
   const project = await mustProject(init.projectId);
   let ticket = await mustTicket(run.ticketId!);
   ticket = await ensureTicketWorktree(run, init, project, ticket);
-  const s = repo.initiativeSettings(init);
   const runs = await lastRuns(ticket.id);
   const fixes = fixesAwaitingVerification(runs);
   if (!fixes.length) {
@@ -1669,7 +1968,28 @@ async function runVerify(run: Run): Promise<void> {
     [out],
     'Reply with one line: the first line of verify.md.',
   );
-  const step = await runAgent(run, { kind: 'verify', cwd: wt, prompt, runDir: dir, outputPath: out, env: factoryEnv(ticket, base) });
+  await runAgent(
+    run,
+    { kind: 'verify', cwd: wt, prompt, runDir: dir, outputPath: out, env: factoryEnv(ticket, base) },
+    { start, fixRunIds: fixes.map((f) => f.id) },
+  );
+}
+
+async function runsById(ids: string[]): Promise<Run[]> {
+  const runs = await Promise.all(ids.map((id) => repo.getRun(id)));
+  return runs.filter((r): r is Run => !!r);
+}
+
+async function afterVerify(run: Run, step: StepResult, state: StepStates['verify']): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const project = await mustProject(init.projectId);
+  const ticket = await mustTicket(run.ticketId!);
+  const s = repo.initiativeSettings(init);
+  const wt = ticket.worktreePath!;
+  const fixes = await runsById(state.fixRunIds);
+  const fixDirs = fixes.map((f) => roundDirOf(init, ticket, f));
+  const dir = fixDirs[0];
+  const { start } = state;
   if (await stoppedEarly(run, step, 'verify.md')) return;
   const verdict = parseVerdict('verify', step.output);
   if (!verdict) return failMalformedVerdict(run, step.output);
@@ -1747,7 +2067,10 @@ async function runAsk(run: Run): Promise<void> {
     [out],
     'Reply with one line: the first sentence of your answer.',
   );
-  const step = await runAgent(run, { kind: 'ask', cwd, prompt, runDir: dir, outputPath: out });
+  await runAgent(run, { kind: 'ask', cwd, prompt, runDir: dir, outputPath: out }, {});
+}
+
+async function afterAsk(run: Run, step: StepResult): Promise<void> {
   if (await stoppedEarly(run, step, 'answer.md')) return;
   await finish(run, 'succeeded');
   await agentMessage(run, step.output!.trim(), 'answer');
@@ -1888,17 +2211,30 @@ async function runArbitrate(run: Run): Promise<void> {
     [out],
     'Reply with one line: the first line of decision.md.',
   );
-  const step = await runAgent(run, { kind: 'arbitrate', cwd: arbitration.cwd, prompt, runDir: dir, outputPath: out, env: arbitration.env });
+  await runAgent(
+    run,
+    { kind: 'arbitrate', cwd: arbitration.cwd, prompt, runDir: dir, outputPath: out, env: arbitration.env },
+    { approveBlocker: arbitration.approveBlocker, stoppedRunId: arbitration.stopped?.id ?? null },
+  );
+}
+
+type ArbitratedSituation = Pick<Arbitration, 'approveBlocker' | 'stopped'>;
+
+async function afterArbitrate(run: Run, step: StepResult, state: StepStates['arbitrate']): Promise<void> {
   if (await stoppedEarly(run, step, 'decision.md')) return;
   const decision = parseVerdict('arbitrate', step.output) as Decision | null;
   if (!decision) return failMalformedVerdict(run, step.output);
   await finish(run, 'succeeded');
   const text = decisionText(step.output!);
-  if (ticket) await applyTicketDecision(run, decision, text, arbitration);
+  const arbitration: ArbitratedSituation = {
+    approveBlocker: state.approveBlocker,
+    stopped: state.stoppedRunId ? await repo.getRun(state.stoppedRunId) : null,
+  };
+  if (run.ticketId) await applyTicketDecision(run, decision, text, arbitration);
   else await applyPlanDecision(run, decision, text, arbitration);
 }
 
-async function applyPlanDecision(run: Run, decision: Decision, text: DecisionText, arbitration: Arbitration): Promise<void> {
+async function applyPlanDecision(run: Run, decision: Decision, text: DecisionText, arbitration: ArbitratedSituation): Promise<void> {
   const init = await mustInitiative(run.initiativeId);
   if (!waitsForOwner(init, null)) return systemMessage(run, `The plan: ${OWNER_ACTED_FIRST}`);
   if (decision === 'APPROVE' && !arbitration.approveBlocker) {
@@ -1912,7 +2248,7 @@ async function applyPlanDecision(run: Run, decision: Decision, text: DecisionTex
   await agentMessage(run, `**The plan needs you.** ${escalationQuestion(decision, text, arbitration.approveBlocker)}`);
 }
 
-async function applyTicketDecision(run: Run, decision: Decision, text: DecisionText, arbitration: Arbitration): Promise<void> {
+async function applyTicketDecision(run: Run, decision: Decision, text: DecisionText, arbitration: ArbitratedSituation): Promise<void> {
   const init = await mustInitiative(run.initiativeId);
   const ticket = await mustTicket(run.ticketId!);
   if (!waitsForOwner(init, ticket)) return systemMessage(run, `${ticketLabel(ticket)}: ${OWNER_ACTED_FIRST}`);
@@ -1970,8 +2306,15 @@ export async function cancelRun(runId: string): Promise<void> {
   }
 }
 
-export function stopAllAgents(): void {
-  for (const handle of active.values()) handle.cancel();
+const SETTLE_BEFORE_EXIT_MS = 15_000;
+
+export async function releaseRuns(exit: ServerExit): Promise<number> {
+  serverExit = exit;
+  write(stoppedOnPurposeMark(), new Date().toISOString());
+  const followed = [...active.values()];
+  for (const controls of followed) letGo(controls, exit);
+  for (const deadline = Date.now() + SETTLE_BEFORE_EXIT_MS; settling.size && Date.now() < deadline; ) await new Promise((res) => setTimeout(res, 100));
+  return followed.length;
 }
 
 async function cancelActive(where: { initiativeId: string; ticketId?: string }): Promise<void> {
@@ -2066,11 +2409,12 @@ export async function refreshInitiativeStatus(initiativeId: string): Promise<voi
   const tickets = (await repo.listTickets(init.id)).filter((t) => t.status !== 'canceled');
   const done = tickets.length > 0 && tickets.every((t) => ['approved', 'merged'].includes(t.status));
   if (done && init.status !== 'done') {
-    await repo.updateInitiative(init.id, { status: 'done' });
+    const firstToSeeItDone = await repo.moveInitiativeStatus(init.id, 'in_progress', 'done');
+    if (!firstToSeeItDone) return;
     const merged = tickets.every((t) => t.status === 'merged');
     await systemMessage({ initiativeId: init.id }, merged ? 'Every ticket is merged. Initiative done.' : 'Every ticket passed review. Merge the PRs (in order) to finish.');
   } else if (!done && init.status === 'done') {
-    await repo.updateInitiative(init.id, { status: 'in_progress' });
+    await repo.moveInitiativeStatus(init.id, 'done', 'in_progress');
   }
 }
 
@@ -2486,27 +2830,106 @@ async function repairOrphans(): Promise<number> {
   return tickets.length + initiatives.length;
 }
 
+type RunWithPid = Run & { pid: number | null };
+
+interface LeftRunningRun {
+  run: RunWithPid;
+  spool: repo.RunSpool | null;
+  fate: StartupFate;
+}
+
+function serverWasStoppedOnPurpose(): boolean {
+  const stopped = fs.existsSync(stoppedOnPurposeMark());
+  fs.rmSync(stoppedOnPurposeMark(), { force: true });
+  return stopped;
+}
+
+async function runsLeftRunning(serverStoppedOnPurpose: boolean): Promise<LeftRunningRun[]> {
+  const running = await sql<RunWithPid[]>`select * from runs where status = 'running'`;
+  const left: LeftRunningRun[] = [];
+  for (const run of running) {
+    const stored = await repo.getRunSpool(run.id);
+    const spool = stored && wasLaunched(stored.dir) ? stored : null;
+    const process = spool ? await spoolFate(spool.dir) : null;
+    const fate = startupFate({ process, settingUp: runsSetup(spool), pid: run.pid, crashRequeues: run.crashRequeues ?? 0, serverStoppedOnPurpose });
+    left.push({ run, spool, fate });
+  }
+  return left;
+}
+
+async function putBackInQueue(run: Run, afterCrash: boolean): Promise<void> {
+  const [row] = await sql<Run[]>`
+    update runs set status = 'queued', started_at = null, pid = null, crash_requeues = crash_requeues + ${afterCrash ? 1 : 0}
+    where id = ${run.id} and status = 'running' returning *`;
+  if (!row) return;
+  touchRun(row);
+  await log(row, 'The factory server restarted while this step was still setting up, before its agent or checks started. It is queued again and starts over.');
+}
+
+async function markInterrupted(run: Run, error: string): Promise<Run> {
+  const [row] = await sql<Run[]>`
+    update runs set status = 'interrupted', finished_at = now(), pid = null, error = ${error} where id = ${run.id} returning *`;
+  await repo.addRunEvent(run.id, 'system', { text: `Interrupted: ${error}.` });
+  return row;
+}
+
+async function holdForOwner(run: Run): Promise<void> {
+  const row = await markInterrupted(run, 'the factory server died too often before this step started its agent or checks');
+  await revertAfterStop(row, HELD_REASON);
+}
+
+async function interruptOrResume(run: Run, resume: boolean, sweepOwned: boolean): Promise<void> {
+  const row = await markInterrupted(run, 'the factory server stopped while this was running');
+  if (!(await resumeInterrupted(row, resume, sweepOwned))) await revertAfterStop(row, INTERRUPTED_REASON, false);
+}
+
+function reportRecovery(runs: { followed: number; requeued: number; interrupted: number }): void {
+  if (runs.followed) console.log(`[recover] following ${runs.followed} run(s) that kept going while the server was down`);
+  if (runs.requeued) console.log(`[recover] queued ${runs.requeued} run(s) again that had not started their agent or checks yet`);
+  if (runs.interrupted) console.log(`[recover] marked ${runs.interrupted} run(s) interrupted`);
+}
+
+async function stopWhatIsLeftOf(run: Run & { pid?: number | null }): Promise<void> {
+  const spool = await repo.getRunSpool(run.id);
+  if (spool) await abandonSpool(spool.dir);
+  else if (run.pid) gitx.killTree(run.pid);
+  await discardSpool(run.id);
+}
+
+async function discardSpoolsWithoutRun(keep: Set<string>): Promise<void> {
+  for (const spool of await repo.listRunSpools()) {
+    if (!keep.has(spool.runId)) await discardSpool(spool.runId);
+  }
+  if (!fs.existsSync(spoolRoot())) return;
+  for (const name of fs.readdirSync(spoolRoot())) {
+    if (!keep.has(name)) removeSpool(path.join(spoolRoot(), name));
+  }
+}
+
 export async function recoverOnStartup(): Promise<void> {
-  const claimed = await repo.listPrSweepClaims();
+  const stoppedOnPurpose = serverWasStoppedOnPurpose();
+  const stale = await runsLeftRunning(stoppedOnPurpose);
+  const having = (...fates: StartupFate[]) => stale.filter((s) => fates.includes(s.fate));
+  const stillWorkedOn = new Set(having('follow', 'requeue').filter((s) => s.run.kind !== 'ask').map((s) => s.run.ticketId));
+  const claimed = (await repo.listPrSweepClaims()).filter((t) => !stillWorkedOn.has(t.id));
   for (const t of claimed) await repo.releasePrSweepClaim(t.id, { forgetState: true });
   const sweepOwned = new Set(claimed.map((t) => t.id));
   const { resumeInterruptedRuns } = await repo.getAppSettings();
-  const stale = await sql<(Run & { pid: number | null })[]>`select * from runs where status = 'running'`;
-  for (const r of stale) {
-    if (r.pid) gitx.killTree(r.pid);
-    const [row] = await sql<Run[]>`
-      update runs set status = 'interrupted', finished_at = now(), pid = null, error = 'the factory server stopped while this was running'
-      where id = ${r.id} returning *`;
-    await repo.addRunEvent(r.id, 'system', { text: 'Interrupted: the factory server stopped while this was running.' });
-    if (!(await resumeInterrupted(row, resumeInterruptedRuns, !!r.ticketId && sweepOwned.has(r.ticketId)))) {
-      await revertAfterStop(row, INTERRUPTED_REASON, false);
-    }
+  for (const { run, fate } of having('requeue', 'hold', 'interrupt')) {
+    await stopWhatIsLeftOf(run);
+    if (fate === 'requeue') await putBackInQueue(run, !stoppedOnPurpose);
+    else if (fate === 'hold') await holdForOwner(run);
+    else await interruptOrResume(run, resumeInterruptedRuns, !!run.ticketId && sweepOwned.has(run.ticketId));
   }
-  if (stale.length) console.log(`[recover] marked ${stale.length} run(s) interrupted`);
+  await discardSpoolsWithoutRun(new Set(having('follow').map((s) => s.run.id)));
+  reportRecovery({ followed: having('follow').length, requeued: having('requeue').length, interrupted: having('interrupt', 'hold').length });
   const repaired = await repairOrphans();
   if (repaired) console.log(`[recover] repaired ${repaired} item(s) left mid-step`);
   const withMergedWorktrees = await sql<{ id: string }[]>`
     select distinct initiative_id as id from tickets where status = 'merged' and worktree_path is not null`;
   for (const r of withMergedWorktrees) await cleanUpMergedTickets(r.id).catch((e) => console.warn('[recover]', e.message));
   await stackDependentTickets();
+  for (const { run, spool } of having('follow')) {
+    if (spool) void supervise(run, () => adoptRun(run, spool));
+  }
 }

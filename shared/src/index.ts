@@ -84,6 +84,7 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
 };
 
 export interface AppSettings {
+  autoScaleAgents: boolean;
   maxConcurrentAgents: number;
   runTimeoutMinutes: number;
   maxBudgetUsdPerRun: number | null;
@@ -94,7 +95,10 @@ export interface AppSettings {
   prNoiseCommentAuthors: string[];
 }
 
+export const MAX_MANUAL_AGENTS = 200;
+
 export const DEFAULT_APP_SETTINGS: AppSettings = {
+  autoScaleAgents: true,
   maxConcurrentAgents: 12,
   runTimeoutMinutes: 60,
   maxBudgetUsdPerRun: null,
@@ -257,6 +261,7 @@ export interface Run {
   factorySha?: string | null;
   baseSha?: string | null;
   headSha?: string | null;
+  crashRequeues?: number;
   error: string | null;
   queuedAt: string;
   startedAt: string | null;
@@ -312,6 +317,22 @@ export type ChangeEvent = {
   id: string;
   initiativeId?: string | null;
 };
+
+export type MachinePressure = 'ok' | 'load' | 'memory';
+
+export interface CapacityStatus {
+  autoScale: boolean;
+  limit: number;
+  ceiling: number;
+  running: number;
+  queued: number;
+  lanes: number;
+  localWorkSlots: number;
+  cores: number;
+  memoryGb: number;
+  loadPerCore: number;
+  pressure: MachinePressure;
+}
 
 export interface Health {
   db: boolean;

@@ -47,6 +47,10 @@ switch (process.env.FAKE_SCENARIO) {
     init();
     result({ subtype: 'error_max_turns', is_error: true, result: 'ran out of turns' });
     break;
+  case 'environment':
+    init();
+    result({ result: JSON.stringify({ tmpdir: process.env.TMPDIR ?? null, autoMemoryOff: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? null }) });
+    break;
   case 'crash':
     init();
     console.error('boom: something broke');
@@ -54,6 +58,24 @@ switch (process.env.FAKE_SCENARIO) {
     break;
   case 'hang':
     init();
+    setInterval(() => {}, 1000);
+    break;
+  case 'slow': {
+    init();
+    const steps = Number(process.env.FAKE_STEPS ?? 5);
+    let step = 0;
+    const timer = setInterval(() => {
+      step += 1;
+      emit({ type: 'assistant', message: { content: [{ type: 'text', text: `step ${step}` }] } });
+      if (step < steps) return;
+      clearInterval(timer);
+      result();
+    }, Number(process.env.FAKE_STEP_MS ?? 100));
+    break;
+  }
+  case 'linger':
+    init();
+    result();
     setInterval(() => {}, 1000);
     break;
   default:

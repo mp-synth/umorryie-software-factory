@@ -5,15 +5,32 @@ import fastifyStatic from '@fastify/static';
 import { resolveClaudeBin } from './agents/claude.ts';
 import { config } from './config.ts';
 import { migrate, sql } from './db.ts';
-import { recoverOnStartup, startScheduler, stopAllAgents } from './pipeline/engine.ts';
+import { recoverOnStartup, releaseRuns, startScheduler } from './pipeline/engine.ts';
 import { routes } from './routes.ts';
+import { lockHeldMessage, takeServerLock } from './server-lock.ts';
 import { loadLoginShellPath } from './shell-env.ts';
+import { stopSignals } from './stop-signals.ts';
+
+function stopAfterLosingTheLock(): never {
+  console.error('[server] another factory server now holds this database; this one stops at once and leaves the running agents to it');
+  process.exit(1);
+}
 
 async function main(): Promise<void> {
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? 'warn' },
     bodyLimit: 5 * 1024 * 1024,
   });
+
+  process.on('unhandledRejection', (reason) => {
+    console.error('[server] a background task failed; the agents of every initiative keep running:', reason);
+  });
+
+  const lock = await takeServerLock(config.databaseUrl, stopAfterLosingTheLock);
+  if (!lock) {
+    console.error(lockHeldMessage(config.databaseUrl));
+    process.exit(1);
+  }
 
   await migrate();
   if (!(await loadLoginShellPath())) console.warn('[shell] could not read your login shell PATH; repo commands use the server PATH');
@@ -36,14 +53,28 @@ async function main(): Promise<void> {
   console.log(`    state     ${config.home}`);
   console.log(`    claude    ${resolveClaudeBin() ?? 'NOT FOUND (set CLAUDE_BIN)'}\n`);
 
-  const shutdown = async () => {
-    stopAllAgents();
+  const nextStopSignal = stopSignals();
+  const shutdown = (agents: 'leave-agents-running' | 'stop-agents') => async () => {
+    const signal = nextStopSignal();
+    if (signal === 'stop-now') process.exit(1);
+    if (signal === 'copy-of-the-stop') return;
+    const followed = await releaseRuns(agents);
+    if (followed) {
+      console.log(
+        agents === 'stop-agents'
+          ? `\n  stopped ${followed} running step(s); they are marked interrupted at the next start`
+          : `\n  ${followed} step(s) keep running without the server and are followed again at the next start (Ctrl-\\ stops them too)`,
+      );
+    }
     await app.close();
     await sql.end({ timeout: 2 });
+    await lock.release();
     process.exit(0);
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  const onExit = config.stopAgentsOnExit ? 'stop-agents' : 'leave-agents-running';
+  process.on('SIGINT', shutdown(onExit));
+  process.on('SIGTERM', shutdown(onExit));
+  process.on('SIGQUIT', shutdown('stop-agents'));
 }
 
 main().catch((err) => {

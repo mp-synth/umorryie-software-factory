@@ -8,6 +8,7 @@ import { redactDeep, type Redact } from '../agent-env.ts';
 import { config } from '../config.ts';
 import { exec, killTree } from '../git.ts';
 import { repoShellEnv } from '../shell-env.ts';
+import { launchSpooled, superviseSpool, type SpoolExit, type SpoolHandle, type SpoolLine, type SpoolOffsets } from './spool.ts';
 
 export interface AgentSpec {
   cwd: string;
@@ -49,6 +50,7 @@ export interface AgentEvent {
 
 export interface AgentHandle {
   pid: number | undefined;
+  scratchDir: string | null;
   done: Promise<AgentResult>;
   cancel: () => void;
 }
@@ -98,6 +100,24 @@ export function freshAgentEnv(): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(repoShellEnv()).filter(([name]) => !belongsToParentClaudeSession(name, insideClaudeSession)));
 }
 
+const CONTEXT_FREE_SESSION = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' };
+const SHORT_ENOUGH_FOR_UNIX_SOCKETS = '/tmp';
+
+export function makeScratchDir(): string | null {
+  for (const base of [SHORT_ENOUGH_FOR_UNIX_SOCKETS, os.tmpdir()]) {
+    try {
+      return fs.mkdtempSync(path.join(base, 'factory-agent-'));
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+export function isolatedAgentEnv(spec: Pick<AgentSpec, 'env'>, scratchDir: string | null): NodeJS.ProcessEnv {
+  return { ...freshAgentEnv(), ...spec.env, ...CONTEXT_FREE_SESSION, ...(scratchDir ? { TMPDIR: scratchDir } : {}) };
+}
+
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}… [${s.length - n} more chars]` : s;
 }
@@ -140,35 +160,114 @@ export function buildArgs(spec: AgentSpec): string[] {
   return args;
 }
 
+export function agentStream(redact: Redact = (text) => text) {
+  let sessionId: string | null = null;
+  let result: Record<string, any> | null = null;
+  let stderrTail = '';
+
+  const eventsOf = (msg: Record<string, any>): AgentEvent[] => {
+    switch (msg.type) {
+      case 'system':
+        if (msg.subtype !== 'init') return [];
+        sessionId = msg.session_id ?? null;
+        return [{ type: 'init', data: { model: msg.model, sessionId, cwd: msg.cwd, tools: msg.tools } }];
+      case 'assistant':
+        return (msg.message?.content ?? []).flatMap((block: Record<string, any>): AgentEvent[] => {
+          if (block.type === 'text' && block.text?.trim()) return [{ type: 'text', data: { text: block.text } }];
+          if (block.type === 'thinking' && block.thinking?.trim()) return [{ type: 'thinking', data: { text: truncate(block.thinking, 4000) } }];
+          if (block.type === 'tool_use') return [{ type: 'tool_use', data: { id: block.id, name: block.name, input: compactInput(block.input) } }];
+          return [];
+        });
+      case 'user':
+        return (msg.message?.content ?? [])
+          .filter((block: Record<string, any>) => block.type === 'tool_result')
+          .map((block: Record<string, any>): AgentEvent => ({
+            type: 'tool_result',
+            data: { toolUseId: block.tool_use_id, isError: !!block.is_error, text: truncate(toolResultText(block.content), 3000) },
+          }));
+      case 'result':
+        result = msg;
+        return [
+          {
+            type: 'result',
+            data: {
+              isError: !!msg.is_error,
+              subtype: msg.subtype,
+              costUsd: msg.total_cost_usd,
+              durationMs: msg.duration_ms,
+              numTurns: msg.num_turns,
+              text: typeof msg.result === 'string' ? truncate(msg.result, 4000) : null,
+            },
+          },
+        ];
+      default:
+        return [];
+    }
+  };
+
+  return {
+    stdout(line: string): AgentEvent[] {
+      if (!line.trim()) return [];
+      try {
+        return eventsOf(redactDeep(JSON.parse(line), redact));
+      } catch {
+        return [{ type: 'log', data: { text: truncate(redact(line), 2000) } }];
+      }
+    },
+    stderr(raw: string): AgentEvent[] {
+      const line = redact(raw);
+      stderrTail = `${stderrTail}${line}\n`.slice(-8000);
+      return line.trim() ? [{ type: 'stderr', data: { text: truncate(line, 2000) } }] : [];
+    },
+    note(text: string): void {
+      stderrTail += text;
+    },
+    sawResult: (): boolean => result !== null,
+    result(end: { exitCode: number; timedOut: boolean; canceled: boolean }): AgentResult {
+      const usage = (result?.usage ?? {}) as Record<string, number>;
+      return {
+        exitCode: end.exitCode,
+        sessionId,
+        resultText: typeof result?.result === 'string' ? result.result : null,
+        isError: !result || !!result.is_error,
+        costUsd: typeof result?.total_cost_usd === 'number' ? result.total_cost_usd : null,
+        inputTokens: result
+          ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0)
+          : null,
+        outputTokens: result ? usage.output_tokens ?? 0 : null,
+        numTurns: typeof result?.num_turns === 'number' ? result.num_turns : null,
+        subtype: typeof result?.subtype === 'string' ? result.subtype : null,
+        timedOut: end.timedOut,
+        canceled: end.canceled,
+        stderrTail,
+      };
+    },
+  };
+}
+
+const CLAUDE_NOT_FOUND: AgentResult = {
+  exitCode: 127, sessionId: null, resultText: null, isError: true, costUsd: null, inputTokens: null,
+  outputTokens: null, numTurns: null, subtype: null, timedOut: false, canceled: false,
+  stderrTail: 'claude CLI not found. Install Claude Code or set CLAUDE_BIN in .env.',
+};
+
 export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): AgentHandle {
   const bin = resolveClaudeBin();
-  if (!bin) {
-    return {
-      pid: undefined,
-      cancel: () => {},
-      done: Promise.resolve({
-        exitCode: 127, sessionId: null, resultText: null, isError: true, costUsd: null, inputTokens: null,
-        outputTokens: null, numTurns: null, subtype: null, timedOut: false, canceled: false,
-        stderrTail: 'claude CLI not found. Install Claude Code or set CLAUDE_BIN in .env.',
-      }),
-    };
-  }
+  if (!bin) return { pid: undefined, scratchDir: null, cancel: () => {}, done: Promise.resolve(CLAUDE_NOT_FOUND) };
 
+  const scratchDir = makeScratchDir();
   const child = spawn(bin, buildArgs(spec), {
     cwd: spec.cwd,
-    env: { ...freshAgentEnv(), ...spec.env },
+    env: isolatedAgentEnv(spec, scratchDir),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   });
 
-  let sessionId: string | null = null;
-  let result: Record<string, unknown> | null = null;
-  let stderrTail = '';
+  const stream = agentStream(spec.redact);
   let timedOut = false;
   let canceled = false;
   let exited = false;
   let lingeringProcessesTimer: NodeJS.Timeout | null = null;
-  const redact = spec.redact ?? ((text: string) => text);
 
   const timer = setTimeout(() => {
     timedOut = true;
@@ -181,66 +280,12 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
 
   const lines = readline.createInterface({ input: child.stdout });
   lines.on('line', (line) => {
-    if (!line.trim()) return;
-    let msg: Record<string, any>;
-    try {
-      msg = redactDeep(JSON.parse(line), redact);
-    } catch {
-      onEvent({ type: 'log', data: { text: truncate(redact(line), 2000) } });
-      return;
-    }
-    switch (msg.type) {
-      case 'system':
-        if (msg.subtype === 'init') {
-          sessionId = msg.session_id ?? null;
-          onEvent({ type: 'init', data: { model: msg.model, sessionId, cwd: msg.cwd, tools: msg.tools } });
-        }
-        break;
-      case 'assistant':
-        for (const block of msg.message?.content ?? []) {
-          if (block.type === 'text' && block.text?.trim()) onEvent({ type: 'text', data: { text: block.text } });
-          else if (block.type === 'thinking' && block.thinking?.trim())
-            onEvent({ type: 'thinking', data: { text: truncate(block.thinking, 4000) } });
-          else if (block.type === 'tool_use')
-            onEvent({ type: 'tool_use', data: { id: block.id, name: block.name, input: compactInput(block.input) } });
-        }
-        break;
-      case 'user':
-        for (const block of msg.message?.content ?? []) {
-          if (block.type === 'tool_result') {
-            onEvent({
-              type: 'tool_result',
-              data: { toolUseId: block.tool_use_id, isError: !!block.is_error, text: truncate(toolResultText(block.content), 3000) },
-            });
-          }
-        }
-        break;
-      case 'result':
-        result = msg;
-        lingeringProcessesTimer ??= setTimeout(() => killTree(child.pid), KILL_LINGERING_PROCESSES_AFTER_RESULT_MS);
-        onEvent({
-          type: 'result',
-          data: {
-            isError: !!msg.is_error,
-            subtype: msg.subtype,
-            costUsd: msg.total_cost_usd,
-            durationMs: msg.duration_ms,
-            numTurns: msg.num_turns,
-            text: typeof msg.result === 'string' ? truncate(msg.result, 4000) : null,
-          },
-        });
-        break;
-      default:
-        break;
-    }
+    stream.stdout(line).forEach(onEvent);
+    if (stream.sawResult()) lingeringProcessesTimer ??= setTimeout(() => killTree(child.pid), KILL_LINGERING_PROCESSES_AFTER_RESULT_MS);
   });
 
   const stderrLines = readline.createInterface({ input: child.stderr });
-  stderrLines.on('line', (raw) => {
-    const line = redact(raw);
-    stderrTail = `${stderrTail}${line}\n`.slice(-8000);
-    if (line.trim()) onEvent({ type: 'stderr', data: { text: truncate(line, 2000) } });
-  });
+  stderrLines.on('line', (line) => stream.stderr(line).forEach(onEvent));
 
   const done = new Promise<AgentResult>((resolve) => {
     const finish = (code: number | null) => {
@@ -248,27 +293,11 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
       if (lingeringProcessesTimer) clearTimeout(lingeringProcessesTimer);
       lines.close();
       stderrLines.close();
-      const r = result as Record<string, any> | null;
-      const usage = (r?.usage ?? {}) as Record<string, number>;
-      resolve({
-        exitCode: code ?? 1,
-        sessionId,
-        resultText: typeof r?.result === 'string' ? r.result : null,
-        isError: !r || !!r.is_error,
-        costUsd: typeof r?.total_cost_usd === 'number' ? r.total_cost_usd : null,
-        inputTokens: r
-          ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0)
-          : null,
-        outputTokens: r ? usage.output_tokens ?? 0 : null,
-        numTurns: typeof r?.num_turns === 'number' ? r.num_turns : null,
-        subtype: typeof r?.subtype === 'string' ? r.subtype : null,
-        timedOut,
-        canceled,
-        stderrTail,
-      });
+      if (scratchDir) fs.rm(scratchDir, { recursive: true, force: true }, () => {});
+      resolve(stream.result({ exitCode: code ?? 1, timedOut, canceled }));
     };
     child.on('error', (err) => {
-      stderrTail += String(err);
+      stream.note(String(err));
       finish(127);
     });
     child.on('close', finish);
@@ -276,6 +305,7 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
 
   return {
     pid: child.pid,
+    scratchDir,
     done,
     cancel: () => {
       if (exited) return;
@@ -283,4 +313,50 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
       killTree(child.pid);
     },
   };
+}
+
+export type AgentSink = (events: AgentEvent[], offsets: SpoolOffsets) => Promise<void>;
+export type DetachedAgentHandle = AgentHandle & Pick<SpoolHandle<AgentResult>, 'leave' | 'abandon'>;
+
+const NOTHING_STORED: SpoolOffsets = { stdout: 0, stderr: 0 };
+const SUPERVISOR_LOST = "The agent's supervisor process disappeared before it recorded an exit.\n";
+
+function followAgent(
+  dir: string,
+  opts: { pid: number | undefined; scratchDir: string | null; from: SpoolOffsets; redact?: Redact },
+  sink: AgentSink,
+): DetachedAgentHandle {
+  const stream = agentStream(opts.redact);
+  const stored = { ...opts.from };
+  const onLines = async (lines: SpoolLine[]) => {
+    const fresh: AgentEvent[] = [];
+    for (const line of lines) {
+      const events = stream[line.stream](line.text);
+      if (line.end <= stored[line.stream]) continue;
+      stored[line.stream] = line.end;
+      fresh.push(...events);
+    }
+    if (fresh.length) await sink(fresh, { ...stored });
+  };
+  const conclude = (exit: SpoolExit | null, cancelRequested: boolean): AgentResult => {
+    if (!exit) stream.note(SUPERVISOR_LOST);
+    return stream.result({ exitCode: exit?.code ?? 1, timedOut: !!exit?.timedOut, canceled: cancelRequested || !!exit?.canceled });
+  };
+  return { ...superviseSpool(dir, opts.pid, onLines, conclude), scratchDir: opts.scratchDir };
+}
+
+export function startDetachedAgent(spec: AgentSpec, dir: string, sink: AgentSink, marker?: string): DetachedAgentHandle {
+  const bin = resolveClaudeBin();
+  if (!bin) return { pid: undefined, scratchDir: null, cancel: () => {}, leave: () => {}, abandon: () => {}, done: Promise.resolve(CLAUDE_NOT_FOUND) };
+  const scratchDir = makeScratchDir();
+  const pid = launchSpooled(
+    dir,
+    { bin, args: buildArgs(spec), cwd: spec.cwd, timeoutMs: spec.timeoutMs, lingerAfterResultMs: KILL_LINGERING_PROCESSES_AFTER_RESULT_MS, scratchDir, marker },
+    isolatedAgentEnv(spec, scratchDir),
+  );
+  return followAgent(dir, { pid, scratchDir, from: NOTHING_STORED, redact: spec.redact }, sink);
+}
+
+export function attachAgent(dir: string, from: SpoolOffsets, redact: Redact | undefined, sink: AgentSink): DetachedAgentHandle {
+  return followAgent(dir, { pid: undefined, scratchDir: null, from, redact }, sink);
 }

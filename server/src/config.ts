@@ -21,6 +21,7 @@ export const config = {
   databaseUrl,
   home: path.resolve(expandHome(process.env.FACTORY_HOME ?? '~/.software-factory')),
   claudeBin: process.env.CLAUDE_BIN ?? null,
+  stopAgentsOnExit: process.env.FACTORY_STOP_AGENTS_ON_EXIT === '1',
   agentsDir: path.join(ROOT, 'agents'),
   migrationsDir: path.join(ROOT, 'server', 'migrations'),
   webDist: path.join(ROOT, 'web', 'dist'),

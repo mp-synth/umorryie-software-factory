@@ -97,6 +97,12 @@ export async function updateInitiative(id: string, patch: Partial<Initiative>): 
   return normalizeInitiative(row);
 }
 
+export async function moveInitiativeStatus(id: string, from: Initiative['status'], to: Initiative['status']): Promise<boolean> {
+  const moved = await sql`update initiatives set status = ${to}, updated_at = now() where id = ${id} and status = ${from} returning id`;
+  if (moved.length) emitChange({ type: 'initiative', id, initiativeId: id });
+  return moved.length > 0;
+}
+
 export async function initiativeCost(id: string): Promise<number> {
   const [{ cost }] = await sql<{ cost: number }[]>`select coalesce(sum(cost_usd), 0)::float8 as cost from runs where initiative_id = ${id}`;
   return cost;
@@ -279,6 +285,48 @@ export async function latestRun(initiativeId: string, ticketId: string | null, k
 export async function addRunEvent(runId: string, type: RunEventType, data: Record<string, unknown>): Promise<void> {
   const [row] = await sql<RunEvent[]>`insert into run_events (run_id, type, data) values (${runId}, ${type}, ${json(data)}) returning *`;
   emitRunEvent(runId, { ...row, id: String(row.id) });
+}
+
+export interface RunSpool {
+  runId: string;
+  dir: string;
+  stdoutOffset: number;
+  stderrOffset: number;
+  state: unknown;
+}
+
+type RunSpoolRow = Omit<RunSpool, 'stdoutOffset' | 'stderrOffset'> & { stdoutOffset: string; stderrOffset: string };
+
+const toRunSpool = (row: RunSpoolRow): RunSpool => ({ ...row, stdoutOffset: Number(row.stdoutOffset), stderrOffset: Number(row.stderrOffset) });
+
+export async function insertRunSpool(runId: string, dir: string, state: unknown): Promise<RunSpool> {
+  const [row] = await sql<RunSpoolRow[]>`insert into run_spools (run_id, dir, state) values (${runId}, ${dir}, ${json(state)}) returning *`;
+  return toRunSpool(row);
+}
+
+export async function getRunSpool(runId: string): Promise<RunSpool | null> {
+  const [row] = await sql<RunSpoolRow[]>`select * from run_spools where run_id = ${runId}`;
+  return row ? toRunSpool(row) : null;
+}
+
+export async function listRunSpools(): Promise<RunSpool[]> {
+  return (await sql<RunSpoolRow[]>`select * from run_spools`).map(toRunSpool);
+}
+
+export async function deleteRunSpool(runId: string): Promise<void> {
+  await sql`delete from run_spools where run_id = ${runId}`;
+}
+
+export async function addSpooledRunEvents(
+  runId: string,
+  events: { type: RunEventType; data: Record<string, unknown> }[],
+  readUpTo: { stdout: number; stderr: number },
+): Promise<void> {
+  const rows = await sql.begin(async (tx) => {
+    await tx`update run_spools set stdout_offset = ${readUpTo.stdout}, stderr_offset = ${readUpTo.stderr} where run_id = ${runId}`;
+    return tx<RunEvent[]>`insert into run_events ${tx(events.map((e) => ({ runId, type: e.type, data: json(e.data) })))} returning *`;
+  });
+  for (const row of [...rows].sort((a, b) => Number(a.id) - Number(b.id))) emitRunEvent(runId, { ...row, id: String(row.id) });
 }
 
 export async function listRunEvents(runId: string, afterId = 0, limit = 5000): Promise<RunEvent[]> {

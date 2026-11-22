@@ -2,8 +2,9 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Cpu, HardDrive, Settings2, XCircle } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
-import { DEFAULT_APP_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings } from '@factory/shared';
+import { DEFAULT_APP_SETTINGS, MAX_MANUAL_AGENTS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, type AppSettings, type CapacityStatus } from '@factory/shared';
 import { api } from '@/lib/api';
+import { poolNote, poolSize, useCapacity } from '@/lib/live';
 import { toastError, toastSuccess } from '@/lib/toasts';
 import { shortPath } from '@/lib/utils';
 import { Button, Card, CardHeader, Field, Input, Spinner, Switch } from '@/components/ui';
@@ -13,6 +14,7 @@ export function SettingsPage() {
   const { data: health, isLoading: healthLoading } = useQuery({ queryKey: ['health'], queryFn: api.health, staleTime: 30_000 });
   const [form, setForm] = useState<AppSettings | null>(null);
   const [noiseAuthors, setNoiseAuthors] = useState('');
+  const capacity = useCapacity();
   useEffect(() => {
     if (!settings) return;
     setForm(settings);
@@ -66,10 +68,26 @@ export function SettingsPage() {
           </div>
         ) : (
           <div className="space-y-5 p-4">
+            {form.autoScaleAgents !== undefined && (
+              <Toggle
+                label="Size the agent pool to this machine"
+                hint={
+                  <>
+                    On: every initiative works in its own lane, side by side, with as many agents as this machine holds{capacity ? ` (${capacity.ceiling} on ${capacity.cores} cores and ${capacity.memoryGb} GB)` : ''}. An initiative with work always has at least
+                    one agent, even when the pool is full. While the machine is short on CPU or memory, new agents wait. Off: the fixed number below, as a hard limit.
+                    {capacity && <PoolNow capacity={capacity} />}
+                  </>
+                }
+                checked={form.autoScaleAgents}
+                onChange={(v) => setForm({ ...form, autoScaleAgents: v })}
+              />
+            )}
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Agents running at once" hint="Across every initiative, shared fairly: each initiative gets an agent before any gets a second. Gates (checks) count too.">
-                <Input type="number" min={1} max={40} value={form.maxConcurrentAgents} onChange={(e) => setForm({ ...form, maxConcurrentAgents: Number(e.target.value) })} />
-              </Field>
+              {!form.autoScaleAgents && (
+                <Field label="Agents running at once" hint="Across every initiative, shared fairly: each initiative gets an agent before any gets a second. Gates (checks) count too.">
+                  <Input type="number" min={1} max={MAX_MANUAL_AGENTS} value={form.maxConcurrentAgents} onChange={(e) => setForm({ ...form, maxConcurrentAgents: Number(e.target.value) })} />
+                </Field>
+              )}
               <Field label="Agent timeout (minutes)" hint="A run that exceeds this is stopped and marked failed.">
                 <Input type="number" min={5} max={600} value={form.runTimeoutMinutes} onChange={(e) => setForm({ ...form, runTimeoutMinutes: Number(e.target.value) })} />
               </Field>
@@ -107,7 +125,7 @@ export function SettingsPage() {
             />
             <Toggle
               label="Resume steps interrupted by a restart"
-              hint="When the factory server restarts, a step that was running is queued again once, as long as it was not already interrupted in the same round. Otherwise the ticket waits for you with the reason shown."
+              hint="A restart leaves running agents, checks and setup commands alone, and a step that had not started its agent yet starts over whatever this says. A step whose agent or checks process is gone is queued again once, as long as it was not already interrupted in the same round. Otherwise the ticket waits for you with the reason shown."
               checked={form.resumeInterruptedRuns ?? true}
               onChange={(v) => setForm({ ...form, resumeInterruptedRuns: v })}
             />
@@ -145,6 +163,16 @@ export function SettingsPage() {
         </ol>
       </Card>
     </div>
+  );
+}
+
+function PoolNow({ capacity: c }: { capacity: CapacityStatus }) {
+  const held = poolNote(c);
+  return (
+    <span className="mt-1.5 block font-mono text-zinc-400">
+      Now: {c.running} running{c.queued ? `, ${c.queued} waiting` : ''} in {c.lanes} initiative{c.lanes === 1 ? '' : 's'} · {poolSize(c)}
+      {held ? ` (${held})` : ''} · load {c.loadPerCore} per core · {c.localWorkSlots} setups, checks and checkouts at once
+    </span>
   );
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import type { ChangeEvent, RunEvent } from '@factory/shared';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { CapacityStatus, ChangeEvent, RunEvent } from '@factory/shared';
+import { api } from './api';
 
 const DEAD_STREAM_SILENCE_MS = 25_000;
 const TAB_FOCUS_SILENCE_MS = 12_000;
@@ -89,9 +90,13 @@ export function useLiveUpdates(): boolean {
       if (e.type === 'run') {
         queue(['runs']);
         queue(['run', e.id]);
+        queue(['capacity']);
       }
       if (e.type === 'project') queue(['projects']);
-      if (e.type === 'settings') queue(['settings']);
+      if (e.type === 'settings') {
+        queue(['settings']);
+        queue(['capacity']);
+      }
       if (e.type !== 'message') queue(['initiatives']);
     }
     return () => {
@@ -100,6 +105,28 @@ export function useLiveUpdates(): boolean {
     };
   }, [qc]);
   return connected;
+}
+
+const CAPACITY_REFRESH_MS = 5000;
+
+export function useCapacity(): CapacityStatus | undefined {
+  const serverKnowsCapacity = (failed: boolean) => (failed ? false : CAPACITY_REFRESH_MS);
+  return useQuery({
+    queryKey: ['capacity'],
+    queryFn: api.capacity,
+    retry: false,
+    refetchInterval: (query) => serverKnowsCapacity(query.state.status === 'error'),
+  }).data;
+}
+
+export function poolSize(c: CapacityStatus): string {
+  const guaranteed = c.running - c.limit;
+  return guaranteed > 0 ? `pool of ${c.limit} + ${guaranteed} guaranteed` : `pool of ${c.limit}`;
+}
+
+export function poolNote(c: CapacityStatus): string | null {
+  if (!c.autoScale || c.pressure === 'ok' || c.limit >= c.ceiling) return null;
+  return `held at ${c.limit} of ${c.ceiling} while this machine is short on ${c.pressure === 'memory' ? 'memory' : 'CPU'}`;
 }
 
 export function useRunEvents(runId: string | null): { events: RunEvent[]; ready: boolean } {

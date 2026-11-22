@@ -4,7 +4,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { Link, useOutletContext } from 'react-router-dom';
 import type { InitiativeSummary, Run } from '@factory/shared';
 import { api } from '@/lib/api';
-import { useNow } from '@/lib/live';
+import { poolNote, poolSize, useCapacity, useNow } from '@/lib/live';
 import { runKind, isNotArchived } from '@/lib/status';
 import { ago, cn, money, pad2, runDuration } from '@/lib/utils';
 import { InitiativePill } from '@/components/StatusPill';
@@ -39,6 +39,9 @@ export function Dashboard() {
   );
   const attention = list.filter((i) => i.attention && isNotArchived(i));
   const running = active.filter((r) => r.status === 'running');
+  const capacity = useCapacity();
+  const queuedNote = active.length > running.length ? `${active.length - running.length} queued` : undefined;
+  const poolSub = capacity ? [poolSize(capacity), queuedNote, poolNote(capacity)].filter(Boolean).join(' · ') : queuedNote;
 
   return (
     <div className="mx-auto max-w-[1440px] px-6 py-8 lg:px-8">
@@ -59,7 +62,7 @@ export function Dashboard() {
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <Stat icon={<Layers />} label="Active initiatives" value={stats.activeInitiatives} />
-        <Stat icon={<Activity />} label="Agents running" value={running.length} sub={active.length > running.length ? `${active.length - running.length} queued` : undefined} live={running.length > 0} />
+        <Stat icon={<Activity />} label="Agents running" value={running.length} sub={poolSub} live={running.length > 0} />
         <Stat icon={<BellRing />} label="Waiting on you" value={stats.attention} tone={stats.attention ? 'attention' : undefined} />
         <Stat icon={<Rocket />} label="Tickets approved" value={`${stats.shipped}/${stats.tickets}`} />
         <Stat icon={<CircleDollarSign />} label="Agent spend" value={money(stats.cost)} sub="API-equivalent" />

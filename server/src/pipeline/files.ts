@@ -33,6 +33,18 @@ export function arbiterDir(i: Initiative, t: Ticket | null, runId: string): stri
   return path.join(t ? ticketDir(i, t) : path.join(initiativeDir(i), 'plan'), 'arbiter', runId.slice(0, 8));
 }
 
+export function spoolRoot(): string {
+  return path.join(config.home, 'spool');
+}
+
+export function spoolDir(runId: string): string {
+  return path.join(spoolRoot(), runId);
+}
+
+export function stoppedOnPurposeMark(): string {
+  return path.join(config.home, 'stopped-on-purpose');
+}
+
 export function worktreePath(p: Project, i: Initiative, t: Ticket): string {
   return path.join(config.home, 'worktrees', slugify(p.name, 30), initiativeFolder(i), `${seqLabel(t.seq)}-${t.key}`);
 }

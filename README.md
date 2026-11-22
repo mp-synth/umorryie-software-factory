@@ -132,13 +132,30 @@ or run it now in **Settings**. **More → Fix PRs now** on an initiative runs th
 same sweep for that initiative right away; it also retries a PR state the loop
 already handled and includes tickets that need you.
 
-Up to 10 initiatives run side by side without slowing each other down. Agent
-slots are shared fairly (every initiative gets an agent before any gets a
-second, then each initiative's own **Parallel** limit applies), the database
-allows only one active agent per ticket or plan, every initiative has its own
-branches, worktrees and run folders, and git operations that touch a repo's
-shared state (creating or removing worktrees, fetching) run one at a time per
-repo. Keep **Agents running at once** in Settings at 10 or more for that.
+Every initiative works in its own lane, side by side with the others, the way
+tasks spawned in the cloud would: 15 initiatives all move at once. The agent
+pool is sized to this machine (four agents per core, less when memory runs out
+first; 42 on an 11-core, 36 GB laptop), and a free slot always goes to the
+initiative with the fewest agents, then each initiative's own **Parallel**
+limit applies. An initiative never waits for another to start: one with work
+and no agent gets one even when the pool is full (up to half the pool on top).
+While the machine is short on CPU (load of 2 per core) or memory, new agents
+wait, down to one per core and never below one per initiative; nothing running
+is stopped. The Dashboard and Settings show the pool, what is running and
+waiting, and when it is held. Turn **Size the agent pool to this machine** off
+in Settings for a fixed number, which is then a hard limit. The pool counts
+only CPU and memory, not your Claude plan's rate limits or spend: if those
+run out first, turn sizing off and pick a smaller number.
+
+Each agent is a session of its own: a fresh process with no memory of earlier
+steps, Claude's auto memory switched off so nothing carries over between
+sessions or leaks in from your own, and a private scratch directory as
+`TMPDIR` that is removed when it exits. The database allows only one active
+agent per ticket or plan, and every initiative has its own branches, worktrees
+and run folders. Per repo, only the quick git bookkeeping (registering or
+removing a worktree, fetching) runs one at a time; checking files out, setup
+commands and checks run in parallel, one per core, shared fairly between the
+initiatives.
 
 ## What you can do in the UI
 
@@ -204,12 +221,34 @@ still apply.
 - **Postgres (Docker, `127.0.0.1:54329`)**: projects, initiatives (brief, plan.md,
   plan.json, settings), tickets, runs (prompt, output, verdict, cost, tokens,
   session id), every streamed agent event, and the conversation. Survives
-  restarts; queued runs resume, runs that were mid-flight are marked interrupted
-  and, unless **Resume steps interrupted by a restart** in Settings is off, queued
-  again once per round (never an advisor question, nor a sweep's fixer, which the
-  next sweep redoes). Otherwise the ticket waits with the reason "Interrupted when
-  the factory server stopped." Tickets and plans left mid-step with no run are put
-  back the same way at startup.
+  restarts, and so does the work in flight: queued runs resume, and a running
+  agent, checks command or project setup command keeps running while the server
+  is down. Each one runs
+  under a small supervisor process of its own, detached from the server, that
+  writes its output to the spool folder below, enforces the run's timeout and
+  records the exit code. At startup the server follows every such run again from
+  where its stored events end, or collects the result if it finished in the
+  meantime, and then does what the step would have done next (parse the verdict,
+  keep the branch history, queue the next step) with the state the step saved
+  before its agent started. Nothing is run or posted twice.
+  A step the restart catches before its agent or checks started (creating the
+  worktree, collecting PR state) has done no agent work, so the same run goes
+  back in the queue and starts over, whatever Settings say and without counting
+  as an interruption. What it repeats is safe to repeat: it waits for a checkout
+  the stopped server left running and carries on with that worktree instead of
+  creating it again, and a setup command that was running is followed to its end
+  like an agent (its output is in the run's log), after which the step carries
+  on. A stop you asked for (Ctrl-C, `kill`, `dev:watch`) can do this any number
+  of times. Only a run caught this way for the sixth time by a server that died
+  (a crash or `kill -9`) is marked interrupted, and its ticket waits for you, in
+  case its setup is what brings the server down.
+  A restart still interrupts a step whose agent or checks process is gone (a
+  reboot, or you stopped the agents with the server, see Development). Those are
+  marked interrupted and, unless **Resume steps interrupted by a restart** in
+  Settings is off, queued again once per round (never an advisor question, nor a
+  sweep's fixer, which the next sweep redoes). Otherwise the ticket waits with
+  the reason "Interrupted when the factory server stopped." Tickets and plans
+  left mid-step with no run are put back the same way at startup.
   Each run also records a hash of its exact role prompt, the Claude CLI version,
   the factory commit, and the base and head commits it worked on, so results can
   be compared across prompt edits, CLI upgrades and factory versions.
@@ -218,6 +257,10 @@ still apply.
   `tickets/<nn>-<key>/ticket.md`, `round-N/build.md|checks.md|review.md|fix.md`).
 - **`~/.software-factory/worktrees/`**: one git worktree per ticket, removed
   once the ticket is merged. Your own checkout is never modified.
+- **`~/.software-factory/spool/<run id>/`**: one folder per run that has a
+  process in flight: what was launched, its raw output (`stdout.log`,
+  `stderr.log`) and, once it ends, its exit code. The server reads the run's
+  events from here, so they survive a restart. Removed when the run ends.
 - **`agents/*.md`**: the role instructions for planner, plan reviewer, executor,
   reviewer, fixer, mechanical fixer, fix verifier, arbiter and advisor, plus the
   shared `repo-rules.md` (every agent), `code-style.md` (agents that write or
@@ -238,9 +281,10 @@ still apply.
   agents that must not change code also can't `git commit`, `reset` or `rebase`.
   If a review or verify still changes its worktree (HEAD or a tracked file), the
   run fails and the ticket is handed to you; nothing is restored for you.
-- Agents start clean: no MCP servers and (by default) no user-level hooks or
-  plugins, so nothing pollutes their context. The repo's own CLAUDE.md,
-  `.claude/rules`, skills and `.claude/` settings still apply (see below).
+- Agents start clean: no MCP servers, no Claude auto memory and (by default)
+  no user-level hooks or plugins, so nothing pollutes their context. The
+  repo's own CLAUDE.md, `.claude/rules`, skills and `.claude/` settings still
+  apply (see below).
 - A step passes only if its output file starts with a known verdict line (for
   example `VERDICT: APPROVE`) and the agent finished without an error. Anything
   else fails the run and hands the ticket to you; nothing is retried.
@@ -321,10 +365,35 @@ still apply.
 
 ## Development
 
-`pnpm dev` runs the server without file watching on purpose: a restart stops
-every running agent (they are marked interrupted and resumed once when the
-server is back, see Settings). When you
-are changing the factory itself, use `pnpm --filter @factory/server dev:watch`.
+`pnpm dev` runs the server without file watching. A restart does not stop the
+agents, so restart as often as you like while you change the factory, or use
+`pnpm --filter @factory/server dev:watch` to restart on every save.
+
+Only one server runs per database: a second one started with the same
+`DATABASE_URL` exits at once with a message, before it migrates anything or
+touches a run.
+
+- **Ctrl-C** (SIGINT), `kill` (SIGTERM, which `dev:watch` sends) and a crash stop
+  only the server. Running agents, checks and setup commands keep going and the
+  next start picks them up; a step that had not started its agent or checks yet
+  is queued again and starts over, as often as you restart (see "Where things
+  live"). On Ctrl-C and `kill` the server first waits up to 15 seconds for steps
+  that are just finishing, so none is cut off between recording its result and
+  queueing the next step; pressing Ctrl-C again a second or more later skips
+  the wait (the copies of one Ctrl-C that `pnpm` and `tsx` pass on do not).
+  After a crash or
+  `kill -9`, a step caught in that moment is put back at startup and waits for
+  you.
+- **Ctrl-\\** (SIGQUIT) stops the server and every running agent, checks command
+  and setup command. So does any exit when the server was started with
+  `FACTORY_STOP_AGENTS_ON_EXIT=1`. Steps stopped this way are marked interrupted
+  at the next start and queued again once, as every restart used to do; a step
+  stopped in its setup command is queued again and runs the setup from the start.
+- **Stop** on a run in the UI stops that run's process, its setup command
+  included, whether or not the server that started it is still the one running.
+- Changes to the server's own code, and new migrations, apply to the steps that
+  start after the restart. A run that was already in flight keeps the agent it
+  has; only its follow-up work runs on the new code.
 
 ```bash
 pnpm typecheck

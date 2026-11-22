@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   BrowseResult,
+  CapacityStatus,
   EnvironmentSuggestion,
   Health,
   Initiative,
@@ -64,6 +65,7 @@ export const api = {
   settings: () => get<AppSettings>('/api/settings'),
   updateSettings: (p: Partial<AppSettings>) => patch<AppSettings>('/api/settings', p),
   defaults: () => get<{ initiativeSettings: InitiativeSettings }>('/api/defaults'),
+  capacity: () => get<CapacityStatus>('/api/capacity'),
   sweepPrs: () => post<{ ok: true; count: number }>('/api/pr-sweep'),
 
   projects: () => get<Project[]>('/api/projects'),

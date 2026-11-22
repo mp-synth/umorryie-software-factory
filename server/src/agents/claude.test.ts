@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import type { AgentEvent, AgentSpec } from './claude.ts';
+import type { SpoolOffsets } from './spool.ts';
 
 process.env.CLAUDE_BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fake-claude.mjs');
 
-const { startAgent } = await import('./claude.ts');
+const { attachAgent, startAgent, startDetachedAgent } = await import('./claude.ts');
+const { LeftRunning, readExit, removeSpool } = await import('./spool.ts');
 
 const spec = (scenario: string, timeoutMs = 10_000): AgentSpec => ({
   cwd: process.cwd(),
@@ -110,4 +114,168 @@ test('cancel after the process has finished is a no-op', async () => {
   const result = await handle.done;
   handle.cancel();
   assert.equal(result.canceled, false);
+});
+
+async function environmentOf(env: Record<string, string> = {}) {
+  const handle = startAgent({ ...spec('environment'), env: { FAKE_SCENARIO: 'environment', ...env } }, () => {});
+  const scratchWhileRunning = !!handle.scratchDir && fs.statSync(handle.scratchDir).isDirectory();
+  const result = await handle.done;
+  return { handle, scratchWhileRunning, seen: JSON.parse(result.resultText!) as { tmpdir: string | null; autoMemoryOff: string | null } };
+}
+
+test('gives every agent a scratch directory of its own as TMPDIR', async () => {
+  const [a, b] = await Promise.all([environmentOf(), environmentOf()]);
+  assert.ok(a.scratchWhileRunning && b.scratchWhileRunning);
+  assert.equal(a.seen.tmpdir, a.handle.scratchDir);
+  assert.equal(b.seen.tmpdir, b.handle.scratchDir);
+  assert.notEqual(a.seen.tmpdir, b.seen.tmpdir);
+});
+
+test('keeps the scratch path short enough for unix sockets', async () => {
+  const { handle } = await environmentOf();
+  assert.ok(handle.scratchDir!.length < 40, handle.scratchDir!);
+});
+
+test('removes the scratch directory when the agent exits', async () => {
+  const { handle } = await environmentOf();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(fs.existsSync(handle.scratchDir!), false);
+});
+
+test("starts every session without Claude's auto memory, whatever the repo env files say", async () => {
+  const { seen, handle } = await environmentOf({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0', TMPDIR: '/somewhere/shared' });
+  assert.equal(seen.autoMemoryOff, '1');
+  assert.equal(seen.tmpdir, handle.scratchDir);
+});
+
+const spools: string[] = [];
+after(() => spools.forEach(removeSpool));
+
+function newSpool(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-spool-'));
+  spools.push(dir);
+  return dir;
+}
+
+function stored() {
+  const events: AgentEvent[] = [];
+  let readUpTo: SpoolOffsets = { stdout: 0, stderr: 0 };
+  const sink = async (batch: AgentEvent[], offsets: SpoolOffsets) => {
+    events.push(...batch);
+    readUpTo = offsets;
+  };
+  return { events, sink, readUpTo: () => readUpTo };
+}
+
+const slow = (steps: number): AgentSpec => ({ ...spec('slow'), env: { FAKE_SCENARIO: 'slow', FAKE_STEPS: String(steps), FAKE_STEP_MS: '60' } });
+const texts = (events: AgentEvent[]) => events.filter((e) => e.type === 'text').map((e) => e.data.text);
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  while (!condition()) await new Promise((r) => setTimeout(r, 20));
+}
+
+test('a detached agent produces the same events and result as an attached one', async () => {
+  const attached = await run('success');
+  const db = stored();
+  const result = await startDetachedAgent(spec('success'), newSpool(), db.sink).done;
+  assert.deepEqual(db.events, attached.events);
+  assert.deepEqual(result, attached.result);
+});
+
+test('a detached agent that crashes reports its exit code and stderr', async () => {
+  const db = stored();
+  const result = await startDetachedAgent(spec('crash'), newSpool(), db.sink).done;
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.stderrTail, 'boom: something broke\n');
+  assert.deepEqual(db.events.filter((e) => e.type === 'stderr').map((e) => e.data.text), ['boom: something broke']);
+});
+
+test('an agent picked up after the server left it yields every event once and the full result', { timeout: 15_000 }, async () => {
+  const dir = newSpool();
+  const db = stored();
+  const first = startDetachedAgent(slow(8), dir, db.sink);
+  await waitFor(() => texts(db.events).length >= 3);
+  first.leave();
+  await assert.rejects(first.done, LeftRunning);
+  const seenBeforeLeaving = db.events.length;
+  const result = await attachAgent(dir, db.readUpTo(), undefined, db.sink).done;
+  assert.ok(db.events.length > seenBeforeLeaving);
+  assert.deepEqual(types(db.events), ['init', ...Array(8).fill('text'), 'result']);
+  assert.deepEqual(texts(db.events), [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `step ${n}`));
+  assert.equal(result.sessionId, 'sess-1');
+  assert.equal(result.costUsd, 0.25);
+  assert.equal(result.isError, false);
+  assert.equal(result.canceled, false);
+});
+
+test('an agent that finished while nobody followed is collected with only the events not stored yet', { timeout: 15_000 }, async () => {
+  const dir = newSpool();
+  const db = stored();
+  const first = startDetachedAgent(slow(4), dir, db.sink);
+  await waitFor(() => db.events.length >= 2);
+  first.leave();
+  await assert.rejects(first.done, LeftRunning);
+  await waitFor(() => !!readExit(dir));
+  const result = await attachAgent(dir, db.readUpTo(), undefined, db.sink).done;
+  assert.deepEqual(types(db.events), ['init', ...Array(4).fill('text'), 'result']);
+  assert.equal(result.resultText, 'all done');
+  assert.equal(result.exitCode, 0);
+});
+
+test('collecting a finished agent again from the end stores nothing twice', async () => {
+  const dir = newSpool();
+  const db = stored();
+  await startDetachedAgent(spec('success'), dir, db.sink).done;
+  const before = db.events.length;
+  const result = await attachAgent(dir, db.readUpTo(), undefined, db.sink).done;
+  assert.equal(db.events.length, before);
+  assert.equal(result.sessionId, 'sess-1');
+  assert.equal(result.numTurns, 3);
+});
+
+test('cancel reaches an agent that was picked up again', { timeout: 15_000 }, async () => {
+  const dir = newSpool();
+  const db = stored();
+  const first = startDetachedAgent(spec('hang'), dir, db.sink);
+  await waitFor(() => db.events.some((e) => e.type === 'init'));
+  first.leave();
+  await assert.rejects(first.done, LeftRunning);
+  const again = attachAgent(dir, db.readUpTo(), undefined, db.sink);
+  again.cancel();
+  const result = await again.done;
+  assert.equal(result.canceled, true);
+  assert.equal(result.isError, true);
+  assert.deepEqual(types(db.events), ['init']);
+});
+
+test('the supervisor times a detached agent out', async () => {
+  const result = await startDetachedAgent(spec('hang', 400), newSpool(), stored().sink).done;
+  assert.equal(result.timedOut, true);
+  assert.equal(result.canceled, false);
+});
+
+test('a detached agent gets its own scratch directory, removed at exit even when nobody followed', { timeout: 15_000 }, async () => {
+  const dir = newSpool();
+  const db = stored();
+  const handle = startDetachedAgent({ ...spec('environment'), env: { FAKE_SCENARIO: 'environment' } }, dir, db.sink);
+  const scratchDir = handle.scratchDir!;
+  assert.ok(fs.statSync(scratchDir).isDirectory());
+  handle.leave();
+  await assert.rejects(handle.done, LeftRunning);
+  await waitFor(() => !!readExit(dir));
+  assert.equal(fs.existsSync(scratchDir), false);
+  const result = await attachAgent(dir, db.readUpTo(), undefined, db.sink).done;
+  assert.equal(JSON.parse(result.resultText!).tmpdir, scratchDir);
+});
+
+test('redacts secrets from events of an agent that is picked up again', async () => {
+  const dir = newSpool();
+  const db = stored();
+  const first = startDetachedAgent(spec('success'), dir, db.sink);
+  first.leave();
+  await assert.rejects(first.done, LeftRunning);
+  await waitFor(() => !!readExit(dir));
+  const redact = (text: string) => text.split('file body').join('[redacted]');
+  await attachAgent(dir, { stdout: 0, stderr: 0 }, redact, db.sink).done;
+  assert.equal(db.events.find((e) => e.type === 'tool_result')?.data.text, '[redacted]');
 });

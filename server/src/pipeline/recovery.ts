@@ -1,7 +1,27 @@
 import type { Initiative, Run, RunKind, Ticket } from '@factory/shared';
+import type { SpoolFate } from '../agents/spool.ts';
 
 export const INTERRUPTED_REASON = 'Interrupted when the factory server stopped.';
 export const ORPHAN_REASON = 'Left mid-step when the factory server stopped.';
+export const REQUEUE_LIMIT = 5;
+export const HELD_REASON = `The factory server died ${REQUEUE_LIMIT + 1} times (a crash or kill -9, not a stop you asked for) while this step was setting up, before its agent or checks started. It is not queued again in case its setup is what brings the server down.`;
+
+export type StartupFate = 'follow' | 'requeue' | 'interrupt' | 'hold';
+
+export interface RunLeftRunning {
+  process: SpoolFate | null;
+  settingUp: boolean;
+  pid: number | null;
+  crashRequeues: number;
+  serverStoppedOnPurpose: boolean;
+}
+
+export function startupFate(run: RunLeftRunning): StartupFate {
+  if (run.process === 'follow' || run.process === 'collect') return 'follow';
+  const startedItsAgent = run.process ? !run.settingUp : run.pid !== null;
+  if (startedItsAgent) return 'interrupt';
+  return run.serverStoppedOnPurpose || run.crashRequeues < REQUEUE_LIMIT ? 'requeue' : 'hold';
+}
 
 export function restingTicketStatus(kind: RunKind, hasBranch: boolean, failed: boolean): Ticket['status'] {
   if (failed) return 'blocked';
