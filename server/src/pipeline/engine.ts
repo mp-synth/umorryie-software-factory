@@ -36,6 +36,7 @@ import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderComme
 import { describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
 import { pickRunsToStart, type SchedulableRun } from './scheduler.ts';
+import { nextStackStep, stackChain, stackStepMessage, type StackStep } from './stacks.ts';
 
 export class PipelineError extends Error {
   constructor(message: string, public status = 409) {
@@ -1149,24 +1150,76 @@ async function publish(run: Run, init: Initiative, project: Project, ticket: Tic
     return false;
   }
   await log(run, `Pushed ${remoteBranch} to origin.`);
-  if (!gitx.isGithubUrl(remote) || ticket.prNumber) return true;
+  if (!gitx.isGithubUrl(remote)) return true;
+  if (ticket.prNumber) {
+    await stackPr(run, init, ticket, ticket.worktreePath!, { background: true });
+    return true;
+  }
   const found = await gh.findPr(ticket.worktreePath!, ticket.branch!);
   if (found && found.state === 'OPEN') {
-    await repo.updateTicket(ticket.id, { prNumber: found.number, prUrl: found.url, prState: found.state });
+    await stackPr(run, init, await repo.updateTicket(ticket.id, { prNumber: found.number, prUrl: found.url, prState: found.state }), ticket.worktreePath!);
     return true;
   }
   const build = await repo.latestRun(init.id, ticket.id, 'execute');
   const { title, body } = pullRequestText(build?.outputMd, ticket);
   const { pr, error } = await gh.createPr(ticket.worktreePath!, { base: ticket.baseRef ?? init.baseBranch, head: ticket.branch!, title, body });
   if (pr) {
-    await repo.updateTicket(ticket.id, { prNumber: pr.number, prUrl: pr.url, prState: 'OPEN' });
+    const opened = await repo.updateTicket(ticket.id, { prNumber: pr.number, prUrl: pr.url, prState: 'OPEN' });
     await systemMessage(run, `Opened draft PR for ${ticketLabel(ticket)}: ${pr.url}`);
+    await stackPr(run, init, opened, ticket.worktreePath!);
     await closeSupersededPrs(run, init, ticket, pr);
   } else {
     await log(run, `Could not open a PR: ${error}`);
     await systemMessage(run, `${ticketLabel(ticket)}: could not open a PR.\n\n\`\`\`\n${error}\n\`\`\``);
   }
   return true;
+}
+
+async function findPrStack(cwd: string, chain: number[]): Promise<{ pr: number; stack: gh.PrStack } | null> {
+  for (const pr of [...chain].reverse()) {
+    const stack = await gh.stackOf(cwd, pr);
+    if (stack) return { pr, stack };
+  }
+  return null;
+}
+
+async function applyStackStep(cwd: string, step: StackStep): Promise<number | null> {
+  switch (step.kind) {
+    case 'create':
+      return (await gh.createStack(cwd, step.prs)).number;
+    case 'add':
+      return (await gh.addToStack(cwd, step.stack, step.prs)).number;
+    case 'done':
+      return step.stack;
+    case 'taken':
+      return null;
+  }
+}
+
+async function joinParentStack(init: Initiative, ticketId: string, cwd: string): Promise<{ step: StackStep; note: string | null } | null> {
+  const all = await repo.listTickets(init.id);
+  const ticket = all.find((t) => t.id === ticketId);
+  if (!ticket || ticket.prStack) return null;
+  const chain = stackChain(ticket, all);
+  if (!chain) return null;
+  const step = nextStackStep(chain, await findPrStack(cwd, chain));
+  const stack = await applyStackStep(cwd, step);
+  if (stack) {
+    for (const t of all) if (t.prNumber && chain.includes(t.prNumber) && t.prStack !== stack) await repo.updateTicket(t.id, { prStack: stack });
+  }
+  return { step, note: stackStepMessage(step, chain) };
+}
+
+async function stackPr(scope: MessageScope, init: Initiative, ticket: Ticket, cwd: string, { background = false } = {}): Promise<void> {
+  try {
+    const joined = await joinParentStack(init, ticket.id, cwd);
+    const alreadyReported = background && joined?.step.kind === 'taken';
+    if (joined?.note && !alreadyReported) await systemMessage(scope, `${ticketLabel(ticket)}: ${joined.note}`);
+  } catch (err) {
+    const why = `${ticketLabel(ticket)}: could not link the PR into a GitHub stack: ${(err as Error).message}`;
+    if (background) console.warn('[stackPr]', why);
+    else await systemMessage(scope, why);
+  }
 }
 
 async function closeSupersededPrs(run: Run, init: Initiative, ticket: Ticket, replacement: gh.PrRef): Promise<void> {
@@ -1711,6 +1764,7 @@ export async function resetTicket(ticketId: string): Promise<void> {
     prNumber: null,
     prUrl: null,
     prState: null,
+    prStack: null,
     lastVerdict: null,
     gateStatus: null,
     blockedReason: null,
@@ -1809,10 +1863,11 @@ export async function bulk(initiativeId: string, action: 'run-ready' | 'review-a
 }
 
 export async function syncPrs(initiativeId: string): Promise<number> {
+  const init = await mustInitiative(initiativeId);
   const tickets = (await repo.listTickets(initiativeId)).filter((t) => t.prNumber && !['merged', 'canceled'].includes(t.status));
   let changed = 0;
   for (const t of tickets) {
-    const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : (await mustProject((await mustInitiative(initiativeId)).projectId)).repoPath;
+    const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : (await mustProject(init.projectId)).repoPath;
     const snap = await gh.prSnapshot(cwd, t.prNumber!);
     if (!snap) continue;
     const patch: Partial<Ticket> = {};
@@ -1824,6 +1879,7 @@ export async function syncPrs(initiativeId: string): Promise<number> {
       changed++;
       if (patch.status) await systemMessage({ initiativeId, ticketId: t.id }, `${ticketLabel(t)} was ${patch.status === 'merged' ? 'merged' : 'closed'}.`);
     }
+    if (snap.state === 'OPEN') await stackPr({ initiativeId, ticketId: t.id }, init, t, cwd, { background: true });
   }
   await cleanUpMergedTickets(initiativeId);
   await refreshInitiativeStatus(initiativeId);

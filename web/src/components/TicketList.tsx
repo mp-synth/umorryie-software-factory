@@ -9,6 +9,7 @@ import {
   GitMerge,
   GitPullRequest,
   Hammer,
+  Layers,
   ListChecks,
   MessageCircleQuestion,
   MoreHorizontal,
@@ -181,6 +182,7 @@ function TicketRow({
   const cost = runs.reduce((a, r) => a + (r.costUsd ?? 0), 0);
   const deps = t.dependsOn.map((k) => all.find((x) => x.key === k)).filter(Boolean) as Ticket[];
   const waitingOn = deps.filter((d) => !['approved', 'merged'].includes(d.status) && !d.branch);
+  const stackedOn = all.find((x) => x.prNumber && (x.prHeadRef ?? x.branch) === t.baseRef);
   const act = useMutation({
     mutationFn: (a: TicketAction) => api.ticketAction(t.id, a),
     onSuccess: (_r, a) => {
@@ -241,6 +243,14 @@ function TicketRow({
                 <GitPullRequest className="h-3 w-3" />#{t.prNumber}
                 {t.prState && t.prState !== 'OPEN' && <span className="text-zinc-500">({t.prState.toLowerCase()})</span>}
               </a>
+            )}
+            {t.prStack && (
+              <Tooltip content={stackedOn ? `Stacked PR on GitHub, on top of #${stackedOn.prNumber}` : 'Bottom of a stacked PR on GitHub'}>
+                <span className="inline-flex items-center gap-1 text-violet-300/80">
+                  <Layers className="h-3 w-3" />
+                  stacked
+                </span>
+              </Tooltip>
             )}
             {t.prSweepClaimedAt && (
               <Tooltip content={`The PR sweep started fixing this PR ${ago(t.prSweepClaimedAt)}. The mark clears when the fix finishes, or after ${PR_SWEEP_CLAIM_MINUTES} minutes.`}>

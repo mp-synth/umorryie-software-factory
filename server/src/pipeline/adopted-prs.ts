@@ -47,6 +47,7 @@ export function adoptedTicket(pr: OpenPr, seq: number): Omit<Ticket, 'id' | 'ini
     prUrl: pr.url,
     prState: 'OPEN',
     prHeadRef: pr.headRefName,
+    prStack: null,
     lastVerdict: null,
     gateStatus: null,
     blockedReason: null,

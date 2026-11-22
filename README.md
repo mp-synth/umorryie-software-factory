@@ -128,7 +128,13 @@ repo. Keep **Agents running at once** in Settings at 10 or more for that.
 | needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row |
 
 Dependent tickets are **stacked**: a ticket whose dependency isn't merged yet
-branches from the dependency's branch and its PR targets it. A ticket with
+branches from the dependency's branch and its PR targets it. On GitHub the
+factory links those PRs into a native stacked PR as soon as the PR opens, and
+Sync PRs links any it missed (your own PRs in Open PRs too, when one targets
+another's branch). A stack is a single line, so when two tickets build on the
+same parent only the first joins its stack; the other still targets the parent's
+branch and the activity feed says why. A stacked ticket's row is marked
+**stacked**. A ticket with
 several unmerged dependencies merges the others in; if their branches conflict,
 the executor gets a `merge-deps.md` and resolves the conflict before building.
 
@@ -182,7 +188,7 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
   with the context, and a 2-4 bullet high-level **Overview**. No headings,
   checklists, file lists or ticket numbers; if the executor's text breaks those
   rules the ticket's own what and goal are used instead.
-  Dependent tickets open stacked PRs.
+  Dependent tickets open stacked PRs, linked as a stack on GitHub.
 - `agents/code-style.md` holds the owner's code rules (no duplication, no
   comments, no change-comments, no redundant docstrings). The executor, fixer
   and reviewer get it with every prompt, and the reviewer treats violations as

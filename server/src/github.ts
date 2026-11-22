@@ -67,6 +67,36 @@ export async function createPr(
   return { pr: m ? { number: Number(m[1]), url, state: 'OPEN' } : null, error: m ? null : `unexpected gh output: ${url}` };
 }
 
+export interface PrStack {
+  number: number;
+  pullRequests: number[];
+}
+
+const STACKS_API = ['-H', 'X-GitHub-Api-Version: 2026-03-10'];
+
+function toStack(d: { number: number; pull_requests: { number: number }[] }): PrStack {
+  return { number: d.number, pullRequests: d.pull_requests.map((p) => p.number) };
+}
+
+async function stacksApi(cwd: string, args: string[], body?: unknown): Promise<string> {
+  const r = await gh(cwd, ['api', ...STACKS_API, ...args, ...(body ? ['--input', '-'] : [])], body ? JSON.stringify(body) : undefined);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh api exited ${r.code}`);
+  return r.stdout;
+}
+
+export async function stackOf(cwd: string, prNumber: number): Promise<PrStack | null> {
+  const list = JSON.parse((await stacksApi(cwd, [`repos/{owner}/{repo}/stacks?pull_request=${prNumber}`])) || '[]');
+  return list[0] ? toStack(list[0]) : null;
+}
+
+export async function createStack(cwd: string, prs: number[]): Promise<PrStack> {
+  return toStack(JSON.parse(await stacksApi(cwd, ['-X', 'POST', 'repos/{owner}/{repo}/stacks'], { pull_requests: prs })));
+}
+
+export async function addToStack(cwd: string, stack: number, prs: number[]): Promise<PrStack> {
+  return toStack(JSON.parse(await stacksApi(cwd, ['-X', 'POST', `repos/{owner}/{repo}/stacks/${stack}/add`], { pull_requests: prs })));
+}
+
 export async function closePr(cwd: string, prNumber: number, why: string): Promise<void> {
   await comment(cwd, prNumber, why);
   const r = await gh(cwd, ['pr', 'close', String(prNumber)]);

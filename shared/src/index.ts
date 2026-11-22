@@ -203,6 +203,7 @@ export interface Ticket {
   prUrl: string | null;
   prState: string | null;
   prHeadRef: string | null;
+  prStack: number | null;
   lastVerdict: string | null;
   gateStatus: 'pass' | 'fail' | 'skipped' | null;
   blockedReason: string | null;
