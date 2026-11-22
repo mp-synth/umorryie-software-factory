@@ -147,9 +147,10 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
 - No secrets: Postgres listens on loopback only with trust auth, so there is no
   password to store. Agents use your existing `claude` login.
 - PRs are drafts with a short imperative title that states the outcome and a
-  2-4 sentence description of what changes and why, written by the executor.
-  No headings, checklists, file lists or ticket numbers; if the executor's text
-  breaks those rules the ticket's own plain-language summary is used instead.
+  description written by the executor: a one-line **What**, a short **Why**
+  with the context, and a 2-4 bullet high-level **Overview**. No headings,
+  checklists, file lists or ticket numbers; if the executor's text breaks those
+  rules the ticket's own what and goal are used instead.
   Dependent tickets open stacked PRs.
 - `agents/code-style.md` holds the owner's code rules (no duplication, no
   comments, no change-comments, no redundant docstrings). The executor, fixer

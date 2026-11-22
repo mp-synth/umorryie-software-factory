@@ -101,16 +101,29 @@ Decisions you made where the ticket was ambiguous, each with a one-line reason.
 ## Pull request
 <title>
 
-<description>
+**What:** <what changes>
+
+**Why:** <context and reason>
+
+**Overview**
+- <change>
+- <change>
 ```
 
-The `## Pull request` section becomes the PR the factory opens for your branch:
+The `## Pull request` section becomes the PR the factory opens for your branch.
+A reviewer should understand the PR in ten seconds:
 
 - `<title>`: short, imperative, states the outcome for a user of the code, e.g.
   "Retry failed Lago syncs automatically". No ticket number, no trailing period.
-- `<description>`: 2 to 4 plain sentences: what changes and why, at a high level.
-  No file lists, function names, step-by-step changes or test summaries (the
-  diff covers that). No headings, lists, checklists or boilerplate.
+- **What:** one sentence, at most two: the outcome, as a user of the code sees it.
+- **Why:** one to three sentences: the problem or context that makes this
+  worth doing, and what it unlocks. Say what was wrong or missing before.
+- **Overview:** 2 to 4 bullets, each one short line (under 100 characters)
+  naming a behaviour change at a high level, not how it is implemented.
+- Precise and plain: no filler ("This PR…", "comprehensive", "robust"), no
+  restating the title, no hedging. Cut every word that doesn't inform.
+- No file paths, function or class names, step-by-step changes or test
+  summaries: the diff covers that. Nothing besides the three labelled parts.
 - Mention a Linear ticket only when the brief or ticket explicitly gives one.
   Never infer or invent ticket IDs.
 
