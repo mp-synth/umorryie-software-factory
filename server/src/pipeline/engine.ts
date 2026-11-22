@@ -924,6 +924,16 @@ function historyFiles(init: Initiative, t: Ticket, beforeRound: number): string[
   return out;
 }
 
+async function keepBranchHistory(run: Run, ticket: Ticket, start: string | null, fallbackMessage: string): Promise<void> {
+  if (!start) return;
+  const rewritten = await gitx.restoreHistoryFrom(ticket.worktreePath!, start, fallbackMessage);
+  if (!rewritten.length) return;
+  const shown = rewritten.slice(0, 3).map((s) => `"${s}"`).join(', ') + (rewritten.length > 3 ? ', …' : '');
+  const note = `${ticketLabel(ticket)}: the agent rewrote commits it did not make (${shown}). The factory put its changes back on top of ${start.slice(0, 10)} as a new commit.`;
+  await log(run, note);
+  await systemMessage(run, note);
+}
+
 async function runExecute(run: Run): Promise<void> {
   const init = await mustInitiative(run.initiativeId);
   const project = await mustProject(init.projectId);
@@ -963,8 +973,10 @@ async function runExecute(run: Run): Promise<void> {
     [out],
     'Reply with one line: the first line of build.md.',
   );
+  const start = await gitx.headSha(ticket.worktreePath!);
   const step = await runAgent(run, { kind: 'execute', cwd: ticket.worktreePath!, prompt, runDir: dir, outputPath: out, env: factoryEnv(ticket, base) });
   if (await stoppedEarly(run, step, 'build.md')) return;
+  await keepBranchHistory(run, ticket, start, pullRequestText(step.output, ticket).title);
   const verdict = firstLine(step.output) ?? '';
   await repo.consumeFeedback(feedback.map((f) => f.id), run.id);
 
@@ -1317,7 +1329,8 @@ async function runFix(run: Run): Promise<void> {
   const model = collected.mechanicalOnly ? s.models.mechanicalFix : s.models.fix;
   const base = await diffBase(project, ticket);
   const out = path.join(dir, 'fix.md');
-  write(path.join(dir, 'start-sha'), (await gitx.headSha(ticket.worktreePath!)) ?? '');
+  const start = await gitx.headSha(ticket.worktreePath!);
+  write(path.join(dir, 'start-sha'), start ?? '');
   const prompt = header(
     `Factory step: fix. Ticket: ${ticketLabel(ticket)} (key ${ticket.key})`,
     [
@@ -1346,6 +1359,7 @@ async function runFix(run: Run): Promise<void> {
     env: factoryEnv(ticket, base),
   });
   if (await stoppedEarly(run, step, 'fix.md')) return;
+  await keepBranchHistory(run, ticket, start, `Fix round ${run.round} on ${ticket.title}`);
   const verdict = firstLine(step.output) ?? '';
   await repo.consumeFeedback(collected.feedback.map((f) => f.id), run.id);
   await finish(run, 'succeeded');

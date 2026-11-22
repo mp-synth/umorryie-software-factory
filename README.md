@@ -124,6 +124,10 @@ the executor gets a `merge-deps.md` and resolves the conflict before building.
 
 - Agents never push, merge, rebase shared history or talk to GitHub. The server
   pushes only `factory/*` branches, never force-pushes, and never merges: you merge.
+- Agents only add commits. The server notes HEAD before every build and fix;
+  if an agent rewrote a commit it didn't make (say, `--amend` after a
+  pre-commit hook cancelled its commit), its changes go back on top as a new
+  commit before the checks run or anything is pushed.
 - Agents start clean: no MCP servers and (by default) no user-level hooks or
   plugins, so nothing pollutes their context. The repo's own CLAUDE.md,
   `.claude/rules`, skills and `.claude/` settings still apply (see below).

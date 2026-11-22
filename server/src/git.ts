@@ -226,6 +226,30 @@ export async function commitsAhead(worktree: string, base: string): Promise<numb
   return r.code === 0 ? Number(r.stdout.trim()) : 0;
 }
 
+async function lines(cwd: string, args: string[]): Promise<string[]> {
+  return (await gitOut(cwd, args)).split('\n').filter(Boolean);
+}
+
+async function ownCommitMessage(worktree: string, start: string, rewritten: string[], fallback: string): Promise<string> {
+  const own = (await lines(worktree, ['log', '--reverse', '--no-merges', '--format=%H %s', `${start}..HEAD`]))
+    .map((line) => ({ sha: line.slice(0, line.indexOf(' ')), subject: line.slice(line.indexOf(' ') + 1) }))
+    .filter((c) => !rewritten.includes(c.subject));
+  if (own.length === 0) return fallback;
+  if (own.length === 1) return gitOut(worktree, ['log', '-1', '--format=%B', own[0].sha]);
+  return [own[0].subject, '', ...own.slice(1).map((c) => `- ${c.subject}`)].join('\n');
+}
+
+export async function restoreHistoryFrom(worktree: string, start: string, fallbackMessage: string): Promise<string[]> {
+  if ((await git(worktree, ['merge-base', '--is-ancestor', start, 'HEAD'])).code === 0) return [];
+  const rewritten = await lines(worktree, ['log', '--format=%s', `HEAD..${start}`]);
+  const message = await ownCommitMessage(worktree, start, rewritten, fallbackMessage);
+  await gitOut(worktree, ['reset', '--soft', '--quiet', start]);
+  if ((await git(worktree, ['diff', '--cached', '--quiet'])).code !== 0) {
+    await gitOut(worktree, ['commit', '--quiet', '--no-verify', '-m', message]);
+  }
+  return rewritten;
+}
+
 export async function statusPorcelain(worktree: string): Promise<string> {
   return (await git(worktree, ['status', '--porcelain'])).stdout.trim();
 }

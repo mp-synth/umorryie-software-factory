@@ -31,6 +31,12 @@ team's conventions there beat your general habits.
   exception is the fixer: when `pr-comments.md` shows tests failing in the
   PR's CI, it runs exactly those failing tests, before its fix to reproduce
   the failure and after it to confirm they pass.
+- When you commit, every change is a new commit on top of your branch. Never
+  `--amend`, rebase, reset or squash: the base and the commits of earlier
+  rounds must stay exactly as they are. The repo's pre-commit hooks run on
+  `git commit`. When it exits non-zero, or a hook rewrote files, nothing was
+  committed: stage what the hook changed, run the same `git commit` again, and
+  check that `git log -1` shows your message.
 - Run the formatter, linter and type checker the repo documents on the files
   you changed, not on the whole repo. In ticket steps `$FACTORY_BASE` holds the
   ref your branch is diffed against, for tools that take a base.
