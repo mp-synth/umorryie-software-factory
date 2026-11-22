@@ -34,7 +34,7 @@ import { copyWithToast, toastError } from '@/lib/toasts';
 import { ago, cn, copy, money, pad2, runDuration, shortPath } from '@/lib/utils';
 import { Markdown } from './Markdown';
 import { RunPill, TicketPill, VerdictPill } from './StatusPill';
-import { useRunDrawer } from './RunDrawer';
+import { useRunDock } from './RunDock';
 import { Button, Card, CardHeader, Chip, Dialog, EmptyState, Field, Input, Menu, MenuItem, MenuLabel, MenuSeparator, Pill, SegmentedBar, Textarea, Tooltip } from './ui';
 
 const CI_PILLS = {
@@ -141,13 +141,13 @@ export function TicketList({ detail }: { detail: InitiativeDetail }) {
         </EmptyState>
       ) : (
         <div className="divide-y divide-line">
-          <div className="grid grid-cols-[20px_34px_1fr_auto] items-center gap-3 px-4 py-1.5 text-2xs uppercase tracking-wider text-zinc-600 md:grid-cols-[20px_34px_1fr_130px_auto] lg:grid-cols-[20px_34px_1fr_130px_110px_70px_auto]">
+          <div className="grid grid-cols-[20px_34px_1fr_auto] items-center gap-3 px-4 py-1.5 text-2xs uppercase tracking-wider text-zinc-600 @md:grid-cols-[20px_34px_1fr_130px_auto] @lg:grid-cols-[20px_34px_1fr_130px_110px_70px_auto]">
             <span />
             <span>#</span>
             <span>Ticket</span>
-            <span className="hidden md:block">Status</span>
-            <span className="hidden lg:block">Last verdict</span>
-            <span className="hidden text-right lg:block">Cost</span>
+            <span className="hidden @md:block">Status</span>
+            <span className="hidden @lg:block">Last verdict</span>
+            <span className="hidden text-right @lg:block">Cost</span>
             <span />
           </div>
           {tickets.map((t) => (
@@ -185,7 +185,7 @@ function TicketRow({
   initiativeId: string;
   approved: boolean;
 }) {
-  const drawer = useRunDrawer();
+  const dock = useRunDock();
   const [editing, setEditing] = useState(false);
   const activeRun = runs.find(isRunInFlight);
   const cost = runs.reduce((a, r) => a + (r.costUsd ?? 0), 0);
@@ -212,7 +212,7 @@ function TicketRow({
   });
 
   const primary = (() => {
-    if (activeRun) return { label: 'Watch', icon: <Eye className="h-3.5 w-3.5" />, onClick: () => drawer.open(activeRun.id), variant: 'outline' as const };
+    if (activeRun) return { label: 'Watch', icon: <Eye className="h-3.5 w-3.5" />, onClick: () => dock.watch(activeRun.id), variant: 'outline' as const };
     if (!approved) return null;
     switch (t.status) {
       case 'todo':
@@ -237,7 +237,7 @@ function TicketRow({
 
   return (
     <div className={cn('transition-colors', open ? 'bg-white/[0.015]' : 'hover:bg-white/[0.02]')}>
-      <div className="grid cursor-pointer grid-cols-[20px_34px_1fr_auto] items-center gap-3 px-4 py-2.5 md:grid-cols-[20px_34px_1fr_130px_auto] lg:grid-cols-[20px_34px_1fr_130px_110px_70px_auto]" onClick={onToggle}>
+      <div className="grid cursor-pointer grid-cols-[20px_34px_1fr_auto] items-center gap-3 px-4 py-2.5 @md:grid-cols-[20px_34px_1fr_130px_auto] @lg:grid-cols-[20px_34px_1fr_130px_110px_70px_auto]" onClick={onToggle}>
         <ChevronRight className={cn('h-3.5 w-3.5 text-zinc-600 transition-transform', open && 'rotate-90 text-zinc-400')} />
         <span className={cn('font-mono text-xs tabular-nums', ACTIVE.has(t.status) ? 'text-cyan-300' : 'text-zinc-500')}>{pad2(t.seq)}</span>
         <div className="min-w-0">
@@ -288,20 +288,20 @@ function TicketRow({
                 <span className="truncate">{t.branch}</span>
               </span>
             )}
-            <span className="md:hidden">
+            <span className="@md:hidden">
               <TicketState ticket={t} activeRun={activeRun} />
             </span>
           </div>
         </div>
-        <span className="hidden md:block">
+        <span className="hidden @md:block">
           <TicketState ticket={t} activeRun={activeRun} />
         </span>
-        <span className="hidden lg:block">{t.lastVerdict ? <VerdictPill verdict={t.lastVerdict} /> : t.gateStatus === 'fail' ? <VerdictPill verdict="GATE: FAIL" /> : <span className="text-2xs text-zinc-700">—</span>}</span>
-        <span className="hidden text-right font-mono text-2xs tabular-nums text-zinc-500 lg:block">{cost ? money(cost) : '—'}</span>
+        <span className="hidden @lg:block">{t.lastVerdict ? <VerdictPill verdict={t.lastVerdict} /> : t.gateStatus === 'fail' ? <VerdictPill verdict="GATE: FAIL" /> : <span className="text-2xs text-zinc-700">—</span>}</span>
+        <span className="hidden text-right font-mono text-2xs tabular-nums text-zinc-500 @lg:block">{cost ? money(cost) : '—'}</span>
         <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
           {!primary && t.status === 'todo' && waitingOn.length > 0 && (
             <Tooltip content={`Starts when ${waitingOn.map((d) => pad2(d.seq)).join(', ')} ${waitingOn.length > 1 ? 'are' : 'is'} approved`}>
-              <span className="hidden whitespace-nowrap text-2xs text-zinc-600 sm:inline">waiting on {waitingOn.map((d) => pad2(d.seq)).join(', ')}</span>
+              <span className="hidden whitespace-nowrap text-2xs text-zinc-600 @sm:inline">waiting on {waitingOn.map((d) => pad2(d.seq)).join(', ')}</span>
             </Tooltip>
           )}
           {primary && (
@@ -399,7 +399,7 @@ function TicketDetail({ ticket: t, runs, initiativeId }: { ticket: Ticket; runs:
           </div>
         </div>
       )}
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 @lg:grid-cols-2">
         <dl className="space-y-2.5">
           {[
             ['What happens', t.what],
@@ -475,7 +475,7 @@ function CopyChip({ value, display, icon }: { value: string; display?: string; i
 }
 
 function RunTimeline({ runs }: { runs: Run[] }) {
-  const drawer = useRunDrawer();
+  const dock = useRunDock();
   const now = useNow(1000, runs.some((r) => r.status === 'running'));
   return (
     <div>
@@ -485,7 +485,7 @@ function RunTimeline({ runs }: { runs: Run[] }) {
           const k = runKind[r.kind];
           return (
             <li key={r.id}>
-              <button onClick={() => drawer.open(r.id)} className="group relative flex w-full items-center gap-3 rounded-lg px-0 py-1 text-left">
+              <button onClick={() => dock.watch(r.id)} className="group relative flex w-full items-center gap-3 rounded-lg px-0 py-1 text-left">
                 <span className={cn('relative z-10 grid h-6 w-6 place-items-center rounded-full border border-line bg-surface', k.color)}>
                   <k.icon className="h-3 w-3" />
                 </span>
@@ -496,7 +496,7 @@ function RunTimeline({ runs }: { runs: Run[] }) {
                 <RunPill status={r.status} />
                 <VerdictPill verdict={r.verdict} />
                 <span className="ml-auto flex items-center gap-3 font-mono text-2xs tabular-nums text-zinc-500">
-                  {r.model && <span className="hidden sm:inline">{r.model}</span>}
+                  {r.model && <span className="hidden @sm:inline">{r.model}</span>}
                   <span>{runDuration(r, now)}</span>
                   <span className="w-12 text-right">{money(r.costUsd)}</span>
                   <span className="w-16 text-right">{ago(r.queuedAt, now)}</span>

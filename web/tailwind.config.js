@@ -31,6 +31,11 @@ const SHADOW_PANEL = [
   '0 1px 2px 0 rgba(16,16,24,0.04), 0 12px 32px -20px rgba(16,16,24,0.18)',
 ];
 
+// Pages lay out by the width of <main> (the window minus the sidebar and the live run panel), not by the window:
+// `@xl:` matches where `xl:` did with only the 232px sidebar beside the page.
+const SIDEBAR_PX = 232;
+const PAGE_SCREENS = { sm: 640, md: 768, lg: 1024, xl: 1280, '2xl': 1536 };
+
 const channels = (hex) => hex.replace('#', '').match(/../g).map((h) => parseInt(h, 16)).join(' ');
 const themed = (name) => `rgb(var(--${name}) / <alpha-value>)`;
 const palette = (name) => Object.fromEntries(SHADES.map((s) => [s, themed(`${name}-${s}`)]));
@@ -97,5 +102,8 @@ export default {
   plugins: [
     typography,
     plugin(({ addBase }) => addBase({ ':root': themeVars('dark'), ':root.light': themeVars('light') })),
+    plugin(({ addVariant }) => {
+      for (const [name, px] of Object.entries(PAGE_SCREENS)) addVariant(`@${name}`, `@container page (min-width: ${px - SIDEBAR_PX}px)`);
+    }),
   ],
 };

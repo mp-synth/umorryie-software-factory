@@ -70,7 +70,8 @@ review → approval → 4 builds (two in parallel, stacked) → checks → 4 rev
 including one fresh executor resolving a merge conflict between two sibling
 tickets and one fix round from owner feedback, for about $2.50 of agent time.
 On a GitHub repo the same flow opens stacked draft PRs, posts each review on
-its PR, leaves every PR in draft for you to mark ready, and **Fix all PRs** turns unresolved review
+its PR, leaves every PR in draft for you to mark ready (one by one on GitHub, or all at once with
+**More → Make PRs non-draft**), and **Fix all PRs** turns unresolved review
 threads into a fix round (the factory's own comments are ignored). It skips every ticket with nothing
 left to act on: no new review findings, failing checks or CI, conflicts, unanswered comments or feedback.
 
@@ -168,7 +169,7 @@ initiatives.
 | Initiative → Learned rules | Rules a retro proposed from your steering: **Accept**, **Edit** or **Reject**, and the rules active in the project with **Retire** |
 | Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs, hold dependents until CI is green, the arbiter deciding for you, a retro once a steered PR merges or queues; round limits, arbiter decisions in a row, parallelism and the model per step (Fable 5.2, Opus 5.5, Sonnet 5.5 or Haiku 5.5, each pinned to that version and run with the 1M context window) |
 | Sidebar | The theme switcher (system, light or dark) sits next to the live indicator |
-| Run drawer | Live stream of any agent: tool calls with inputs and results, text, thinking, the checks log, cost/tokens/turns. Its output file, the exact prompt header, and a `claude --resume` command to continue that session in your terminal. **Stop** kills it |
+| Live panel | On an initiative page, every agent of the initiative as one log in order, newest at the bottom: running agents stream live, finished ones fold to their header. Collapse it to a rail that still shows who is running, or drag its edge to resize it. Open any run for its details: tool calls with inputs and results, text, thinking, the checks log, cost/tokens/turns, its output file, the exact prompt header, and a `claude --resume` command to continue that session in your terminal. **Stop** kills it. On other pages it appears only for a run you open |
 | Agents | Every run across all initiatives, live |
 
 ## How a ticket moves
@@ -379,7 +380,9 @@ The card also lists every rule active in the project.
 - No secrets: Postgres listens on loopback only with trust auth, so there is no
   password to store. Agents use your existing `claude` login.
 - PRs are opened as drafts, and the factory marks them ready only with
-  **Auto-merge PRs** on; otherwise that is your call. Each has a short
+  **Auto-merge PRs** on, or when you press **More → Make PRs non-draft**, which
+  marks every open draft PR of the initiative ready at once; otherwise that is
+  your call. Each has a short
   imperative title that states the outcome and a description written by the
   executor under two headings: **Why**, one to three sentences on what was
   broken or missing and what it caused, and **What**, one to four bullets on

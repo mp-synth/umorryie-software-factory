@@ -32,7 +32,7 @@ export function SettingsPage() {
   });
 
   return (
-    <div className="mx-auto max-w-[1000px] space-y-5 px-6 py-8 lg:px-8">
+    <div className="mx-auto max-w-[1000px] space-y-5 px-6 py-8 @lg:px-8">
       <header>
         <h1 className="text-xl font-semibold tracking-tight text-zinc-50">Settings</h1>
         <p className="mt-1 text-sm text-zinc-500">Limits for every agent the factory starts. Per-initiative autopilot and models live on each initiative.</p>
@@ -40,7 +40,7 @@ export function SettingsPage() {
 
       <Card>
         <CardHeader icon={<Cpu className="h-3.5 w-3.5" />} title="Environment" sub="What the server found on this machine" />
-        <div className="grid gap-px bg-line sm:grid-cols-3">
+        <div className="grid grid-cols-1 gap-px bg-line @sm:grid-cols-3">
           {healthLoading || !health ? (
             <div className="col-span-3 bg-surface p-4">
               <Spinner />
@@ -82,7 +82,7 @@ export function SettingsPage() {
                 onChange={(v) => setForm({ ...form, autoScaleAgents: v })}
               />
             )}
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 @sm:grid-cols-2">
               {!form.autoScaleAgents && (
                 <Field label="Agents running at once" hint="Across every initiative, shared fairly: each initiative gets an agent before any gets a second. Gates (checks) count too.">
                   <Input type="number" min={1} max={MAX_MANUAL_AGENTS} value={form.maxConcurrentAgents} onChange={(e) => setForm({ ...form, maxConcurrentAgents: Number(e.target.value) })} />

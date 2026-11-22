@@ -73,7 +73,7 @@ import { activeLanes, pickRunsToStart, type SchedulableRun } from './scheduler.t
 import { GUARANTEED_AGENTS_PER_INITIATIVE, agentCeiling, agentLimit, localWorkSlots, mostAgentsWithGuarantees, pressureOf, sampleMachine, thisMachine } from './capacity.ts';
 import { fairLimiter } from './limiter.ts';
 import { nextStackStep, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
-import { autoMergeStep, MERGE_QUEUE_ATTEMPTS_PER_HEAD } from './auto-merge.ts';
+import { autoMergeStep, MERGE_QUEUE_ATTEMPTS_PER_HEAD, possibleDraftPrs } from './auto-merge.ts';
 
 export class PipelineError extends Error {
   constructor(message: string, public status = 409) {
@@ -1480,7 +1480,7 @@ async function publish(run: Run, init: Initiative, project: Project, ticket: Tic
   const { title, body } = pullRequestText(build?.outputMd, ticket);
   const { pr, error } = await gh.createPr(ticket.worktreePath!, { base: ticket.baseRef ?? init.baseBranch, head: ticket.branch!, title, body });
   if (pr) {
-    const opened = await repo.updateTicket(ticket.id, { prNumber: pr.number, prUrl: pr.url, prState: 'OPEN' });
+    const opened = await repo.updateTicket(ticket.id, { prNumber: pr.number, prUrl: pr.url, prState: 'OPEN', prDraft: true });
     await systemMessage(run, `Opened draft PR for ${ticketLabel(ticket)}: ${pr.url}`);
     await stackPr(run, init, opened, ticket.worktreePath!);
     await closeSupersededPrs(run, init, ticket, pr);
@@ -2779,7 +2779,7 @@ export async function refreshInitiativeStatus(initiativeId: string): Promise<voi
   }
 }
 
-export async function bulk(initiativeId: string, action: 'run-ready' | 'review-all' | 'fix-all' | 'fix-prs' | 'sync-prs'): Promise<number> {
+export async function bulk(initiativeId: string, action: 'run-ready' | 'review-all' | 'fix-all' | 'fix-prs' | 'sync-prs' | 'ready-prs'): Promise<number> {
   const init = await mustInitiative(initiativeId);
   if (action === 'run-ready') {
     if (init.status !== 'in_progress') throw new PipelineError('approve the plan first');
@@ -2787,6 +2787,7 @@ export async function bulk(initiativeId: string, action: 'run-ready' | 'review-a
   }
   if (action === 'sync-prs') return syncPrs(init.id);
   if (action === 'fix-prs') return sweepOpenPrs({ initiativeId: init.id, manual: true });
+  if (action === 'ready-prs') return markPrsReady(init);
   const project = await mustProject(init.projectId);
   const tickets = await repo.listTickets(init.id);
   let n = 0;
@@ -2805,6 +2806,30 @@ export async function bulk(initiativeId: string, action: 'run-ready' | 'review-a
   return n;
 }
 
+/** Marks the initiative's draft PRs ready for review. GitHub is asked first, so PRs already ready or never synced are handled right. */
+async function markPrsReady(init: Initiative): Promise<number> {
+  const project = await mustProject(init.projectId);
+  let marked = 0;
+  const failed: string[] = [];
+  for (const t of possibleDraftPrs(await repo.listTickets(init.id))) {
+    const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;
+    try {
+      const pr = await gh.mergeStatus(cwd, t.prNumber!);
+      if (!pr || pr.state !== 'OPEN') continue;
+      if (pr.isDraft) {
+        await gh.markReady(cwd, t.prNumber!);
+        marked++;
+        await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: #${t.prNumber} is ready for review.`);
+      }
+      await repo.updateTicket(t.id, { prDraft: false });
+    } catch (err) {
+      failed.push(`#${t.prNumber} (${(err as Error).message})`);
+    }
+  }
+  if (failed.length) throw new PipelineError(`Could not mark ${failed.join(', ')} ready for review${marked ? `; marked ${marked} other${marked === 1 ? '' : 's'}` : ''}.`, 502);
+  return marked;
+}
+
 export async function syncPrs(initiativeId: string): Promise<number> {
   const init = await mustInitiative(initiativeId);
   const tickets = (await repo.listTickets(initiativeId)).filter((t) => t.prNumber && !['merged', 'canceled'].includes(t.status));
@@ -2815,6 +2840,7 @@ export async function syncPrs(initiativeId: string): Promise<number> {
     if (!snap) continue;
     const patch: Partial<Ticket> = {};
     if (snap.state !== t.prState) patch.prState = snap.state;
+    if (snap.state === 'OPEN' && snap.isDraft !== t.prDraft) patch.prDraft = snap.isDraft;
     if (snap.state === 'MERGED') Object.assign(patch, { status: 'merged', ciState: null, ciHeadSha: null });
     if (snap.state === 'CLOSED' && t.prHeadRef) patch.status = 'canceled';
     if (Object.keys(patch).length) {
@@ -2975,6 +3001,7 @@ async function advanceTicketMerge(init: Initiative, project: Project, ticket: Ti
   switch (autoMergeStep({ ...pr, isBottom, queuedAtHead })) {
     case 'mark-ready':
       await gh.markReady(cwd, ticket.prNumber!);
+      await repo.updateTicket(ticket.id, { prDraft: false });
       return systemMessage(scope, `${label} is ready for review, so it can merge once it is approved.`);
     case 'fix':
       await sweepTicket(ticket, false);

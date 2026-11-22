@@ -26,14 +26,14 @@ import { useNow } from '@/lib/live';
 import { toastError, toastSuccess } from '@/lib/toasts';
 import { Markdown } from './Markdown';
 import { VerdictPill } from './StatusPill';
-import { useRunDrawer } from './RunDrawer';
+import { useRunDock } from './RunDock';
 import { Button, Card, CardHeader, Chip, Skeleton, Textarea, LiveDot } from './ui';
 
 const PLAN_STEPS: RunKind[] = ['plan', 'plan_review', 'arbitrate'];
 
 export function PlanPanel({ detail }: { detail: InitiativeDetail }) {
   const { initiative: i, runs, tickets } = detail;
-  const drawer = useRunDrawer();
+  const dock = useRunDock();
   const activePlanRun = runs.find((r) => !r.ticketId && PLAN_STEPS.includes(r.kind) && isRunInFlight(r));
   const lastReview = findSucceededRun(runs, 'plan_review');
   const lastPlan = findSucceededRun(runs, 'plan');
@@ -67,7 +67,7 @@ export function PlanPanel({ detail }: { detail: InitiativeDetail }) {
               </span>
             )}
             {activePlanRun && (
-              <Button size="sm" variant="outline" icon={<Eye className="h-3.5 w-3.5" />} onClick={() => drawer.open(activePlanRun.id)}>
+              <Button size="sm" variant="outline" icon={<Eye className="h-3.5 w-3.5" />} onClick={() => dock.watch(activePlanRun.id)}>
                 Watch {runKind[activePlanRun.kind].agent.toLowerCase()}
               </Button>
             )}
@@ -85,7 +85,7 @@ export function PlanPanel({ detail }: { detail: InitiativeDetail }) {
         }
       />
       <div className="p-4">
-        {activePlanRun && !plan && <PlanningSkeleton run={activePlanRun} onWatch={() => drawer.open(activePlanRun.id)} repo={detail.project.repoPath} />}
+        {activePlanRun && !plan && <PlanningSkeleton run={activePlanRun} onWatch={() => dock.watch(activePlanRun.id)} repo={detail.project.repoPath} />}
         {!activePlanRun && !plan && i.status !== 'needs_input' && (
           <div className="flex flex-col items-center gap-3 py-8 text-center">
             {i.status === 'failed' && (
@@ -247,7 +247,7 @@ function Overview({ detail }: { detail: InitiativeDetail }) {
         </div>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
         <ListBox title="Success criteria" tone="emerald" items={p.success_criteria} icon={<Check className="h-3 w-3" />} />
         <ListBox title="Definition of done" tone="violet" items={p.definition_of_done} icon={<CircleDot className="h-3 w-3" />} />
       </div>

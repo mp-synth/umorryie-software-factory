@@ -7,7 +7,7 @@ import { useLiveUpdates } from '@/lib/live';
 import { isNotArchived } from '@/lib/status';
 import { cn } from '@/lib/utils';
 import { NewInitiativeDialog } from './NewInitiativeDialog';
-import { RunDrawer } from './RunDrawer';
+import { RunDock } from './RunDock';
 import { ThemeMenu } from './ThemeMenu';
 import { Button, Kbd, Tooltip } from './ui';
 
@@ -27,7 +27,7 @@ export function Layout() {
   ];
 
   return (
-    <div className="flex h-full">
+    <div className="relative flex h-full">
       <aside className="flex w-[232px] shrink-0 flex-col border-r border-line bg-sidebar">
         <div className="flex h-14 items-center gap-2.5 px-4">
           <div className="grid h-8 w-8 place-items-center rounded-lg border border-violet-400/25 bg-gradient-to-br from-violet-500/25 to-cyan-400/10 shadow-glow">
@@ -106,12 +106,12 @@ export function Layout() {
         </div>
       </aside>
 
-      <main className="glow-top relative min-w-0 flex-1 overflow-y-auto">
+      <main className="glow-top relative min-w-0 flex-1 overflow-y-auto [container:page/inline-size]">
         <Outlet context={{ openNew: () => setCreating(true) }} />
       </main>
 
       <NewInitiativeDialog open={creating} onOpenChange={setCreating} />
-      <RunDrawer />
+      <RunDock />
     </div>
   );
 }

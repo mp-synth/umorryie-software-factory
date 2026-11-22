@@ -236,6 +236,8 @@ export interface Ticket {
   prState: string | null;
   prHeadRef: string | null;
   prStack: number | null;
+  /** Whether the open PR is still a draft, as of the last PR sync; null until the first sync after it opened. */
+  prDraft?: boolean | null;
   ciState?: 'green' | 'red' | 'pending' | 'none' | null;
   ciHeadSha?: string | null;
   linesChanged?: number | null;

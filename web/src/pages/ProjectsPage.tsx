@@ -20,7 +20,7 @@ export function ProjectsPage() {
   });
 
   return (
-    <div className="mx-auto max-w-[1200px] px-6 py-8 lg:px-8">
+    <div className="mx-auto max-w-[1200px] px-6 py-8 @lg:px-8">
       <header className="mb-6 flex flex-wrap items-end gap-4">
         <div className="flex-1">
           <h1 className="text-xl font-semibold tracking-tight text-zinc-50">Projects</h1>
@@ -47,7 +47,7 @@ export function ProjectsPage() {
           </EmptyState>
         </Card>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
           {projects.map((p) => {
             const count = initiatives.filter((i) => i.projectId === p.id && isNotArchived(i)).length;
             return (

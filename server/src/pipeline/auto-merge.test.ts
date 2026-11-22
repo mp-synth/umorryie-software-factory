@@ -1,6 +1,21 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { autoMergeStep, MERGE_QUEUE_ATTEMPTS_PER_HEAD } from './auto-merge.ts';
+import { autoMergeStep, MERGE_QUEUE_ATTEMPTS_PER_HEAD, possibleDraftPrs } from './auto-merge.ts';
+
+test('marks ready only open PRs that are drafts or not synced yet', () => {
+  const t = (prNumber: number | null, prState: string | null, prDraft: boolean | null | undefined, status = 'built') => ({ prNumber, prState, prDraft, status: status as 'built' });
+  const tickets = [
+    t(1, 'OPEN', true),
+    t(2, 'OPEN', null),
+    t(3, 'OPEN', undefined),
+    t(4, 'OPEN', false),
+    t(5, 'MERGED', true),
+    t(6, 'CLOSED', true),
+    t(null, null, null),
+    t(8, 'OPEN', true, 'canceled'),
+  ];
+  assert.deepEqual(possibleDraftPrs(tickets).map((x) => x.prNumber), [1, 2, 3]);
+});
 
 const pr = (over: Partial<Parameters<typeof autoMergeStep>[0]> = {}) => ({
   isDraft: false,

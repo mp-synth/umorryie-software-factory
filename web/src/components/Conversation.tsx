@@ -8,7 +8,7 @@ import { api } from '@/lib/api';
 import { isRunInFlight } from '@/lib/status';
 import { ago, cn, pad2 } from '@/lib/utils';
 import { Markdown } from './Markdown';
-import { useRunDrawer } from './RunDrawer';
+import { useRunDock } from './RunDock';
 import { Button, Card, CardHeader, Segmented, Select, Spinner, Textarea } from './ui';
 
 type Mode = 'question' | 'feedback' | 'comment';
@@ -21,7 +21,7 @@ const WORKING: Partial<Record<RunKind, string>> = {
 
 export function Conversation({ detail }: { detail: InitiativeDetail }) {
   const { initiative: i, messages, tickets, runs } = detail;
-  const drawer = useRunDrawer();
+  const dock = useRunDock();
   const [target, setTarget] = useState<string>('initiative');
   const [mode, setMode] = useState<Mode>('question');
   const [text, setText] = useState('');
@@ -77,10 +77,10 @@ export function Conversation({ detail }: { detail: InitiativeDetail }) {
       <div ref={scroller} className="min-h-[200px] flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {shown.length === 0 && <p className="py-8 text-center text-xs text-zinc-600">Nothing here yet.</p>}
         {shown.map((m) => (
-          <MessageItem key={m.id} m={m} ticket={m.ticketId ? tickets.find((t) => t.id === m.ticketId) : undefined} onOpenRun={m.runId ? () => drawer.open(m.runId!) : undefined} />
+          <MessageItem key={m.id} m={m} ticket={m.ticketId ? tickets.find((t) => t.id === m.ticketId) : undefined} onOpenRun={m.runId ? () => dock.watch(m.runId!) : undefined} />
         ))}
         {pendingAsks.map((r) => (
-          <button key={r.id} onClick={() => drawer.open(r.id)} className="flex items-center gap-2 rounded-lg border border-fuchsia-400/20 bg-fuchsia-400/[0.05] px-3 py-2 text-xs text-fuchsia-200">
+          <button key={r.id} onClick={() => dock.watch(r.id)} className="flex items-center gap-2 rounded-lg border border-fuchsia-400/20 bg-fuchsia-400/[0.05] px-3 py-2 text-xs text-fuchsia-200">
             <Spinner className="text-fuchsia-300" /> {WORKING[r.kind]}
           </button>
         ))}

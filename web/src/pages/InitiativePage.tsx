@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, GitMerge, GraduationCap, MoreHorizontal, Pencil, RotateCcw, Trash2, Wrench } from 'lucide-react';
+import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, GitMerge, GitPullRequest, GraduationCap, MoreHorizontal, Pencil, RotateCcw, Trash2, Wrench } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -85,6 +85,12 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
   });
   const isFeature = i.kind !== 'open-prs';
   const hasOpenPrs = detail.tickets.some((t) => t.prNumber && t.prState !== 'MERGED' && t.prState !== 'CLOSED');
+  const drafts = detail.tickets.filter((t) => t.prNumber && t.prState === 'OPEN' && t.prDraft === true).sort((a, b) => a.seq - b.seq);
+  const markReady = useMutation({
+    mutationFn: () => api.bulk(i.id, 'ready-prs'),
+    onSuccess: ({ count }) => toast.success(count ? `Marked ${count} PR${count > 1 ? 's' : ''} ready for review` : 'No draft PR left: they are all ready for review'),
+    onError: toastError,
+  });
   const remove = useMutation({
     mutationFn: () => api.deleteInitiative(i.id),
     onSuccess: () => {
@@ -95,7 +101,7 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
   });
 
   return (
-    <div className="mx-auto max-w-[1440px] px-6 py-6 lg:px-8">
+    <div className="mx-auto max-w-[1440px] px-6 py-6 @lg:px-8">
       <div className="mb-5">
         <Link to="/" className="mb-3 inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300">
           <ChevronLeft className="h-3.5 w-3.5" /> Dashboard
@@ -136,6 +142,12 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
                 </Button>
               }
             >
+              {drafts.length > 0 && (
+                <MenuItem icon={<GitPullRequest />} disabled={markReady.isPending} onSelect={() => markReady.mutate()}>
+                  <span className="block">{drafts.length > 1 ? `Make ${drafts.length} PRs non-draft` : `Make PR #${drafts[0].prNumber} non-draft`}</span>
+                  <span className="block max-w-[280px] truncate text-2xs text-zinc-500">Ready for review: {drafts.map((t) => `#${t.prNumber}`).join(', ')}</span>
+                </MenuItem>
+              )}
               <MenuItem icon={<Wrench />} disabled={!hasOpenPrs || fixPrs.isPending} onSelect={() => fixPrs.mutate()}>
                 <span className="block">Fix PRs now</span>
                 <span className="block text-2xs text-zinc-500">Review comments, failing CI, conflicts</span>
@@ -194,12 +206,12 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
 
       {isFeature && <PipelineStrip detail={detail} />}
 
-      <div className={cn('grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]', isFeature && 'mt-5')}>
+      <div className={cn('grid grid-cols-1 gap-5 @xl:grid-cols-[minmax(0,1fr)_380px]', isFeature && 'mt-5')}>
         <div className="min-w-0 space-y-5">
           {isFeature && <PlanPanel detail={detail} />}
           <TicketList detail={detail} />
         </div>
-        <div className="space-y-5 xl:sticky xl:top-5 xl:self-start">
+        <div className="space-y-5 @xl:sticky @xl:top-5 @xl:self-start">
           <Conversation detail={detail} />
           <RulesCard detail={detail} />
           <AutopilotCard initiative={i} />

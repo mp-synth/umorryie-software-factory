@@ -8,7 +8,7 @@ import { poolNote, poolSize, useCapacity, useNow } from '@/lib/live';
 import { runKind, isNotArchived } from '@/lib/status';
 import { ago, cn, money, pad2, runDuration } from '@/lib/utils';
 import { InitiativePill } from '@/components/StatusPill';
-import { useRunDrawer } from '@/components/RunDrawer';
+import { useRunDock } from '@/components/RunDock';
 import { Button, EmptyState, Segmented, SegmentedBar, Skeleton, LiveDot } from '@/components/ui';
 
 type Filter = 'active' | 'done' | 'archived' | 'all';
@@ -44,7 +44,7 @@ export function Dashboard() {
   const poolSub = capacity ? [poolSize(capacity), queuedNote, poolNote(capacity)].filter(Boolean).join(' · ') : queuedNote;
 
   return (
-    <div className="mx-auto max-w-[1440px] px-6 py-8 lg:px-8">
+    <div className="mx-auto max-w-[1440px] px-6 py-8 @lg:px-8">
       <header className="mb-7 flex flex-wrap items-end gap-4">
         <div className="min-w-0 flex-1">
           <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-violet-400/20 bg-violet-400/[0.07] px-2.5 py-0.5 text-2xs font-medium text-violet-200">
@@ -60,7 +60,7 @@ export function Dashboard() {
         </Button>
       </header>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 @md:grid-cols-5">
         <Stat icon={<Layers />} label="Active initiatives" value={stats.activeInitiatives} />
         <Stat icon={<Activity />} label="Agents running" value={running.length} sub={poolSub} live={running.length > 0} />
         <Stat icon={<BellRing />} label="Waiting on you" value={stats.attention} tone={stats.attention ? 'attention' : undefined} />
@@ -73,7 +73,7 @@ export function Dashboard() {
           <h2 className="section-title mb-2.5 flex items-center gap-2">
             <span className="h-1.5 w-1.5 rounded-full bg-amber-400" /> Needs you
           </h2>
-          <div className="grid gap-2.5 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-2.5 @md:grid-cols-2 @xl:grid-cols-3">
             {attention.map((i) => (
               <Link
                 key={i.id}
@@ -91,7 +91,7 @@ export function Dashboard() {
         </section>
       )}
 
-      <div className="mt-8 grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="mt-8 grid grid-cols-1 gap-6 @xl:grid-cols-[minmax(0,1fr)_360px]">
         <section className="min-w-0">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="section-title">Initiatives</h2>
@@ -108,7 +108,7 @@ export function Dashboard() {
             />
           </div>
           {isLoading ? (
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
               {[0, 1, 2, 3].map((n) => (
                 <Skeleton key={n} className="h-36 rounded-xl" />
               ))}
@@ -137,7 +137,7 @@ export function Dashboard() {
               )}
             </div>
           ) : (
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 @md:grid-cols-2">
               {filtered.map((i) => (
                 <InitiativeCard key={i.id} i={i} />
               ))}
@@ -225,11 +225,11 @@ function InitiativeCard({ i }: { i: InitiativeSummary }) {
 }
 
 function RunLine({ run }: { run: Run }) {
-  const drawer = useRunDrawer();
+  const dock = useRunDock();
   const now = useNow(1000);
   const k = runKind[run.kind];
   return (
-    <button onClick={() => drawer.open(run.id)} className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-white/[0.02]">
+    <button onClick={() => dock.watch(run.id)} className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-white/[0.02]">
       <span className={cn('grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-line bg-surface-2', k.color)}>
         <k.icon className="h-3.5 w-3.5" />
       </span>

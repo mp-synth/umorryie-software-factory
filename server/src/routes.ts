@@ -353,7 +353,7 @@ export async function routes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/initiatives/:id/actions/:action', async (req) => {
     const { id: iid, action } = z
-      .object({ id: z.string().uuid(), action: z.enum(['run-ready', 'review-all', 'fix-all', 'fix-prs', 'sync-prs']) })
+      .object({ id: z.string().uuid(), action: z.enum(['run-ready', 'review-all', 'fix-all', 'fix-prs', 'sync-prs', 'ready-prs']) })
       .parse(req.params);
     const n = await engine.bulk(iid, action);
     return { ok: true, count: n };

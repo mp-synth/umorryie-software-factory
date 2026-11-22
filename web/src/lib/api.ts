@@ -60,7 +60,7 @@ export interface InspectResult {
   suggestion?: EnvironmentSuggestion;
 }
 
-export type BulkAction = 'run-ready' | 'review-all' | 'fix-all' | 'fix-prs' | 'sync-prs';
+export type BulkAction = 'run-ready' | 'review-all' | 'fix-all' | 'fix-prs' | 'sync-prs' | 'ready-prs';
 export type TicketAction = 'run' | 'check' | 'review' | 'fix' | 'retro' | 'reset' | 'mark-approved' | 'mark-merged' | 'mark-todo';
 
 export const api = {
