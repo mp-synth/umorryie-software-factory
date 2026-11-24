@@ -1,7 +1,7 @@
 ---
 name: steering router
 step: steer
-model: opus
+model: sonnet
 ---
 
 The project owner looked at the pull requests of a finished or running
