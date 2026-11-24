@@ -5,10 +5,11 @@ import net from 'node:net';
 import path from 'node:path';
 import { exec, git, isGitRepo, killTree, remoteUrl, withRepoLock, type ExecResult } from '../git.ts';
 import { repoShellEnv } from '../shell-env.ts';
+import { fetchNotionPage, notionPageId, type NotionPage } from './notion.ts';
 
 // Links the owner pastes into a brief, a feedback or a note: a PR, file, commit or
 // issue in another GitHub repo (TTVPlatform from an EnactServices initiative), an
-// open-source repo, or any web page. Before every agent run the server turns each
+// open-source repo, a Notion page, or any web page. Before every agent run the server turns each
 // one into something local the agent can read: a read-only checkout at the exact
 // commit, the PR's description and diff, or the page as text. Agents get one index
 // file (links.md) and never have to fetch, clone or guess on their own.
@@ -17,6 +18,7 @@ export type GithubLinkKind = 'pr' | 'issue' | 'commit' | 'blob' | 'tree' | 'repo
 
 export type ParsedLink =
   | { url: string; kind: GithubLinkKind; owner: string; repo: string; number?: number; sha?: string; refPath?: string[]; lines?: string }
+  | { url: string; kind: 'notion'; pageId: string }
   | { url: string; kind: 'web' };
 
 export interface ResolvedLink {
@@ -62,6 +64,8 @@ export interface LinkOptions {
   ghJson?: (args: string[], timeoutMs: number) => Promise<unknown | null>;
   ghText?: (args: string[], timeoutMs: number) => Promise<string | null>;
   fetchPage?: (url: string, timeoutMs: number) => Promise<{ contentType: string; body: string } | null>;
+  // Reads a Notion page with the owner's Notion login; runs in `cwd`.
+  fetchNotion?: (pageId: string, cwd: string, timeoutMs: number) => Promise<NotionPage>;
   now?: () => number;
   budgetMs?: number;
 }
@@ -149,7 +153,10 @@ export function parseLink(url: string): ParsedLink {
   } catch {
     return { url, kind: 'web' };
   }
-  if (!GITHUB_HOSTS.has(u.hostname)) return { url, kind: 'web' };
+  if (!GITHUB_HOSTS.has(u.hostname)) {
+    const pageId = notionPageId(url);
+    return pageId ? { url, kind: 'notion', pageId } : { url, kind: 'web' };
+  }
   const segs = decodedSegments(u.pathname);
   if (!segs || segs.length < 2) return { url, kind: 'web' };
   const [owner, rawRepo, type, ...rest] = segs;
@@ -389,6 +396,7 @@ class Linker {
   private readonly ghJson: NonNullable<LinkOptions['ghJson']>;
   private readonly ghText: NonNullable<LinkOptions['ghText']>;
   private readonly fetchPage: NonNullable<LinkOptions['fetchPage']>;
+  private readonly fetchNotion: NonNullable<LinkOptions['fetchNotion']>;
   private readonly cloneUrl: ((slug: string) => string) | undefined;
   private readonly budgetMs: number;
   private readonly deadline: number;
@@ -399,6 +407,7 @@ class Linker {
     this.ghJson = o.ghJson ?? defaultGhJson;
     this.ghText = o.ghText ?? defaultGhText;
     this.fetchPage = o.fetchPage ?? defaultFetchPage;
+    this.fetchNotion = o.fetchNotion ?? fetchNotionPage;
     this.cloneUrl = o.cloneUrl;
     this.budgetMs = o.budgetMs ?? RESOLVE_BUDGET_MS;
     this.deadline = Date.now() + this.budgetMs;
@@ -582,6 +591,7 @@ class Linker {
     this.timeLeft(1);
     const now = this.now();
     if (link.kind === 'web') return this.resolveWeb(link.url, now);
+    if (link.kind === 'notion') return this.resolveNotion(link.url, link.pageId, now);
     const slug = `${link.owner}/${link.repo}`;
     const sameRepo = this.sameRepo(slug);
     const out: ResolvedLink = { url: link.url, kind: link.kind, repo: slug, sameRepo, resolvedAt: now };
@@ -679,6 +689,18 @@ class Linker {
     out.contextFile = writeFile(path.join(this.o.dir, 'web', `${name}.md`), [`# ${title ?? url}`, '', `Source: ${url}`, `Fetched: ${new Date(now).toISOString()}`, '', capped(text, MAX_PAGE_TEXT_BYTES, `WebFetch ${url}`)].join('\n'));
     return out;
   }
+
+  // The helper session runs in the initiative's links folder, so its cost is booked to the initiative.
+  private async resolveNotion(url: string, pageId: string, now: number): Promise<ResolvedLink> {
+    const page = await this.fetchNotion(pageId, this.o.dir, this.timeLeft(180_000));
+    if (page.text.trim().length < 40) throw new Error('the Notion page is empty');
+    const title = page.title?.trim() || undefined;
+    const contextFile = writeFile(
+      path.join(this.o.dir, 'notion', `${pageId}.md`),
+      [`# ${title ?? url}`, '', `Source: ${url}`, `Fetched: ${new Date(now).toISOString()}`, '', capped(page.text, MAX_PAGE_TEXT_BYTES, `ask the owner to paste the rest of ${url}`)].join('\n'),
+    );
+    return { url, kind: 'notion', title, contextFile, resolvedAt: now };
+  }
 }
 
 interface PrMeta {
@@ -750,7 +772,11 @@ function describe(l: ResolvedLink): string[] {
     return [
       ...head,
       `Could not fetch it: ${l.error}.`,
-      l.repo ? `Try \`gh\` read commands (gh pr view/diff, gh api) or WebFetch yourself; if you can't reach it, say so in your output rather than guessing what it contains.` : 'Try WebFetch yourself; if you can’t reach it, say so in your output rather than guessing what it contains.',
+      l.repo
+        ? `Try \`gh\` read commands (gh pr view/diff, gh api) or WebFetch yourself; if you can't reach it, say so in your output rather than guessing what it contains.`
+        : l.kind === 'notion'
+          ? 'You can’t open Notion pages yourself (WebFetch has no login): say in your output that you couldn’t read it rather than guessing what it contains.'
+          : 'Try WebFetch yourself; if you can’t reach it, say so in your output rather than guessing what it contains.',
       '',
     ];
   }
@@ -766,7 +792,7 @@ function describe(l: ResolvedLink): string[] {
     const where = l.checkout ? path.join(l.checkout, l.path) : l.path;
     lines.push(`- The linked ${l.kind === 'tree' ? 'folder' : 'file'}: ${where}${l.lines ? ` (lines ${l.lines.replace(/L/g, '')})` : ''}`);
   }
-  if (l.contextFile) lines.push(`- ${l.kind === 'web' ? 'The page as text' : l.kind === 'issue' ? 'The issue and its comments' : 'Description and changed files'}: ${l.contextFile}`);
+  if (l.contextFile) lines.push(`- ${l.kind === 'web' || l.kind === 'notion' ? 'The page as text' : l.kind === 'issue' ? 'The issue and its comments' : 'Description and changed files'}: ${l.contextFile}`);
   if (l.diffFile) lines.push(`- Diff: ${l.diffFile}`);
   lines.push('');
   return lines;
@@ -817,7 +843,7 @@ export async function resolveLinks(sources: LinkSources, opts: LinkOptions): Pro
       try {
         link = await linker.resolve(parsed, usable);
       } catch (err) {
-        link = usable ?? { url, kind: parsed.kind, repo: parsed.kind === 'web' ? undefined : `${parsed.owner}/${parsed.repo}`, error: (err as Error).message.slice(0, 300), resolvedAt: now };
+        link = usable ?? { url, kind: parsed.kind, repo: 'owner' in parsed ? `${parsed.owner}/${parsed.repo}` : undefined, error: (err as Error).message.slice(0, 300), resolvedAt: now };
       }
       if (earlier?.checkout && earlier.checkout !== link.checkout) replaced.push(earlier);
       state.links[url] = link;

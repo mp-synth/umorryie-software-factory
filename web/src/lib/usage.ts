@@ -36,7 +36,7 @@ export function modelLabel(id: string | null): string {
   return MODEL_LABELS[id] ?? id.replace(/^claude-/, '');
 }
 
-const EXTRA_KINDS: Record<string, string> = { discovery: 'Project discovery', eval: 'Judge evals', other: 'Other' };
+const EXTRA_KINDS: Record<string, string> = { discovery: 'Project discovery', eval: 'Judge evals', notion_fetch: 'Notion pages', other: 'Other' };
 
 export function kindLabel(kind: string): string {
   return runKind[kind as keyof typeof runKind]?.label ?? EXTRA_KINDS[kind] ?? kind.replace(/_/g, ' ');

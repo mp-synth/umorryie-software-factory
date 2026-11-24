@@ -129,6 +129,10 @@ function options(remote: string, project: string, extra: Partial<LinkOptions> = 
         : null,
     ghText: async (args) => (args[0] === 'pr' && args[1] === 'diff' ? 'diff --git a/src/pr.ts b/src/pr.ts\n+export const pr = true;\n' : null),
     fetchPage: async () => ({ contentType: 'text/html', body: '<title>API docs</title><p>The widget API takes a bearer token on every call and returns JSON.</p>' }),
+    // Never the real claude CLI and Notion from a test.
+    fetchNotion: async () => {
+      throw new Error('no Notion in tests');
+    },
     ...extra,
   };
 }
@@ -185,6 +189,64 @@ test('a link into the project’s own repo needs no checkout, and a failure is l
   assert.equal(links[0].path, 'app.py');
   assert.equal(links[1].error, 'HTTP 403');
   assert.match(fs.readFileSync(file!, 'utf8'), /Could not fetch it: HTTP 403[\s\S]*WebFetch/);
+});
+
+const NOTION_URL = 'https://app.notion.com/p/synthesia/Salesforce-provisioning-Enact-API-V1-golden-path-422c16d22bf1816bbfc6fbe6f86d1680';
+
+test('parseLink reads the page id out of every shape of Notion link', () => {
+  assert.deepEqual(parseLink(NOTION_URL), { url: NOTION_URL, kind: 'notion', pageId: '422c16d22bf1816bbfc6fbe6f86d1680' });
+  assert.equal((parseLink('https://www.notion.so/synthesia/Golden-path-422c16d22bf1816bbfc6fbe6f86d1680?pvs=4') as { pageId: string }).pageId, '422c16d22bf1816bbfc6fbe6f86d1680');
+  assert.equal((parseLink('https://acme.notion.site/422c16d2-2bf1-816b-bfc6-fbe6f86d1680') as { pageId: string }).pageId, '422c16d22bf1816bbfc6fbe6f86d1680');
+  // A page opened over a database view: the peeked page is the one meant.
+  assert.equal((parseLink('https://www.notion.so/synthesia/11111111111111111111111111111111?v=22222222222222222222222222222222&p=33333333333333333333333333333333&pm=s') as { pageId: string }).pageId, '33333333333333333333333333333333');
+  assert.equal(parseLink('https://notion.so/private-page').kind, 'web');
+  assert.equal(parseLink('https://www.notion.com/product/ai').kind, 'web');
+  assert.equal(parseLink('https://notion.so.example.com/422c16d22bf1816bbfc6fbe6f86d1680').kind, 'web');
+});
+
+test('a Notion link becomes a local copy of the page, fetched once an hour', async () => {
+  const project = await projectRepo();
+  const c = clock();
+  const calls: { pageId: string; cwd: string }[] = [];
+  const opts = options('', project, {
+    now: c.now,
+    fetchNotion: async (pageId, cwd) => {
+      calls.push({ pageId, cwd });
+      return { title: 'Salesforce provisioning Enact API - V1 golden path', text: '<page><content>## Golden path\nSalesforce calls POST /v1/accounts once per closed-won deal.</content></page>' };
+    },
+  });
+  const first = await resolveLinks(pinned(`Spec: ${NOTION_URL}`), opts);
+  assert.deepEqual(calls, [{ pageId: '422c16d22bf1816bbfc6fbe6f86d1680', cwd: opts.dir }]);
+  const [link] = first.links;
+  assert.equal(link.kind, 'notion');
+  assert.equal(link.title, 'Salesforce provisioning Enact API - V1 golden path');
+  assert.equal(link.contextFile, path.join(opts.dir, 'notion', '422c16d22bf1816bbfc6fbe6f86d1680.md'));
+  assert.match(fs.readFileSync(link.contextFile!, 'utf8'), /^# Salesforce provisioning[\s\S]*Source: https:\/\/app\.notion\.com[\s\S]*POST \/v1\/accounts/);
+  assert.ok(fs.readFileSync(first.file!, 'utf8').includes(`- The page as text: ${link.contextFile}`));
+  assert.deepEqual(first.dirs, []);
+
+  c.advance(30 * 60_000);
+  await resolveLinks(pinned(`Spec: ${NOTION_URL}`), opts);
+  assert.equal(calls.length, 1);
+  c.advance(31 * 60_000);
+  await resolveLinks(pinned(`Spec: ${NOTION_URL}`), opts);
+  assert.equal(calls.length, 2);
+});
+
+test('a Notion page that can’t be read is listed with why, and the agent is told not to guess', async () => {
+  const project = await projectRepo();
+  const opts = options('', project, {
+    fetchNotion: async () => {
+      throw new Error('Notion is not connected for the claude CLI; connect it once with `claude mcp login notion`');
+    },
+  });
+  const { file, links } = await resolveLinks(pinned(NOTION_URL), opts);
+  assert.equal(links[0].kind, 'notion');
+  assert.equal(links[0].repo, undefined);
+  assert.match(links[0].error!, /not connected/);
+  const index = fs.readFileSync(file!, 'utf8');
+  assert.match(index, /Could not fetch it: Notion is not connected[\s\S]*can’t open Notion pages yourself/);
+  assert.doesNotMatch(index, /Try WebFetch/);
 });
 
 async function localClone(remote: string): Promise<string> {

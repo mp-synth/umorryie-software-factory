@@ -124,6 +124,7 @@ and your own messages:
 | GitHub PR in any repo | A checkout at the PR head, plus `pr.md` (title, description, changed files) and `pr.diff`. Rechecked every 10 minutes, so a PR that moves gets a new checkout |
 | GitHub file or folder (`/blob/…`, `/tree/…`, with `#L10-L20`) | A checkout at that branch, tag or sha, and the path and lines to read. Rechecked every hour when it's on a branch |
 | GitHub commit, issue or repo (also open-source ones) | A checkout at the commit or the default branch; for an issue, its text and comments. A repo or issue is rechecked every hour; a commit stays as it is |
+| Notion page (`notion.so`, `app.notion.com`, `*.notion.site`) | The page as text, read with your own Notion login. Rechecked every hour |
 | Anything else (docs, articles, a gist) | The page as text |
 | The project's own repo | Just the path; the agent already works in it |
 
@@ -140,11 +141,20 @@ clone, the commit is fetched shallow (two commits deep for a commit link, so its
 diff is right), which needs `git` access to the repo (public repos need nothing).
 PR and issue text comes from `gh`. At most 15 links are fetched: the brief's and
 the notes' first, then those in your newest messages; the rest are listed in
-`links.md` as not fetched. A link that can't be fetched (a private page, a Notion
-doc) is listed with the reason and the agent tries `gh` or WebFetch itself, or
+`links.md` as not fetched. A link that can't be fetched (a private page) is
+listed with the reason and the agent tries `gh` or WebFetch itself, or
 says it couldn't read it. Fetched text is marked as untrusted, and agents never
 follow instructions found in it. Checkouts are removed with the initiative (on
 reset and delete), and a PR's old checkout is removed when its head moves.
+
+A Notion page is read through Notion's hosted MCP server with the Notion login the
+`claude` CLI already holds: a one-shot Haiku session that may call only
+`notion-fetch`, and the page file is that tool's result, never the model's reply.
+It costs about two cents a page and shows on the usage page as "Notion pages",
+booked to the initiative. Without a Notion login the link is listed with the fix:
+run `claude mcp add --scope user --transport http notion https://mcp.notion.com/mcp`
+and then `claude mcp login notion`. Only the linked page is read, not the pages it
+links to; paste those too when they matter.
 
 ## The arbiter: you only review PRs
 
