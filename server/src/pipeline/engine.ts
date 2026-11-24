@@ -507,6 +507,8 @@ async function endStopped(run: Run): Promise<void> {
 async function failRun(run: Run, err: unknown): Promise<void> {
   if (err instanceof SetupStopped) return endStopped(run).catch((inner) => console.error('[run cleanup]', inner));
   const message = err instanceof Error ? err.message : String(err);
+  const gone = (await repo.getRun(run.id).catch(() => undefined)) === null;
+  if (gone) return console.warn(`[run ${run.id.slice(0, 8)} ${run.kind}] stopped, its initiative or ticket was deleted: ${message}`);
   console.error(`[run ${run.id.slice(0, 8)} ${run.kind}]`, err);
   try {
     const current = await repo.getRun(run.id);
@@ -1170,7 +1172,7 @@ async function applyRevisedPlan(init: Initiative): Promise<string[]> {
 
   for (const t of drop) {
     await cancelActive({ initiativeId: init.id, ticketId: t.id });
-    await gitx.removeWorktree(project.repoPath, t.worktreePath, t.branch);
+    await removeTicketWorktree(project, init, t);
     const closed = await closeOldPr(t, 'Closed: the revised plan no longer needs this change.');
     await repo.updateTicket(t.id, { status: 'canceled', worktreePath: null });
     notes.push(`${ticketLabel(t)}: dropped${closed}.`);
@@ -1364,9 +1366,34 @@ async function startedWorktreeBranch(run: Run, project: Project, wt: string, bas
   return null;
 }
 
+/** A ticket's worktree, recorded or not: a run records the path only once the checkout is done, which takes minutes in a big repo. */
+function ticketWorktree(project: Project, init: Initiative, t: Ticket): string {
+  return t.worktreePath ?? worktreePath(project, init, t);
+}
+
+/** Removes a ticket's worktree and local branch, also one a run has created but not recorded yet. */
+async function removeTicketWorktree(project: Project, init: Initiative, t: Ticket): Promise<void> {
+  const wt = ticketWorktree(project, init, t);
+  const unrecorded = !t.branch && fs.existsSync(path.join(wt, '.git'));
+  const branch = unrecorded ? (await gitx.git(wt, ['branch', '--show-current'])).stdout.trim() || null : t.branch;
+  await gitx.removeWorktree(project.repoPath, wt, branch);
+}
+
+/**
+ * Records a worktree whose checkout is done. When the ticket was deleted meanwhile (with its initiative), no
+ * cleanup saw this worktree, so it goes here: left behind, it keeps the branch checked out and the next worktree
+ * on that branch fails, as when a new Open PRs initiative adopts the same PR again.
+ */
+async function recordWorktree(project: Project, ticketId: string, wt: string, branch: string, patch: Partial<Ticket> = {}): Promise<Ticket> {
+  const recorded = await repo.updateTicketIfPresent(ticketId, { ...patch, worktreePath: wt });
+  if (recorded) return recorded;
+  await gitx.removeWorktree(project.repoPath, wt, branch);
+  throw new Error(`the ticket was deleted while its worktree was checked out; removed ${wt} and ${branch}`);
+}
+
 async function ensureTicketWorktree(run: Run, init: Initiative, project: Project, ticket: Ticket): Promise<Ticket> {
   const checkout: gitx.HeavyWork = (work) => heavyLocalWork(run, 'check out the worktree', work);
-  const wt = ticket.worktreePath ?? worktreePath(project, init, ticket);
+  const wt = ticketWorktree(project, init, ticket);
   if (await gitx.waitForEarlierCheckout(wt)) await log(run, 'Waited for a checkout of this worktree that was still running from before the factory server restarted.');
   if (ticket.branch && ticket.worktreePath && fs.existsSync(path.join(ticket.worktreePath, '.git'))) {
     if (await gitx.finishCheckout(ticket.worktreePath, checkout)) await log(run, 'Finished a checkout that an earlier attempt left half done.');
@@ -1377,7 +1404,7 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
   if (ticket.branch && (await gitx.branchExists(project.repoPath, ticket.branch))) {
     await log(run, `Restoring worktree for ${ticket.branch}`);
     await gitx.ensureWorktree(project.repoPath, wt, ticket.branch, ticket.branch, checkout);
-    const restored = await repo.updateTicket(ticket.id, { worktreePath: wt });
+    const restored = await recordWorktree(project, ticket.id, wt, ticket.branch);
     await prepareWorktree(run, init, project, restored);
     return restored;
   }
@@ -1385,7 +1412,7 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
     await log(run, `Checking out ${ticket.prHeadRef} from origin as ${ticket.branch}`);
     await fetchPrHead(project, ticket);
     await gitx.ensureWorktree(project.repoPath, wt, ticket.branch!, `origin/${ticket.prHeadRef}`, checkout);
-    const checkedOut = await repo.updateTicket(ticket.id, { worktreePath: wt });
+    const checkedOut = await recordWorktree(project, ticket.id, wt, ticket.branch!);
     await prepareWorktree(run, init, project, checkedOut);
     return checkedOut;
   }
@@ -1401,7 +1428,7 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
   await log(run, started ? `Carrying on with the worktree an earlier attempt started on ${branch}` : `Creating worktree ${wt} on ${branch} from ${baseRef}`);
   if (started) await gitx.checkOutAgain(wt, checkout);
   else await gitx.ensureWorktree(project.repoPath, wt, branch, baseRef, checkout);
-  ticket = await repo.updateTicket(ticket.id, { branch, baseRef: prBase, worktreePath: wt, ciState: null, ciHeadSha: null });
+  ticket = await recordWorktree(project, ticket.id, wt, branch, { branch, baseRef: prBase, ciState: null, ciHeadSha: null });
   await prepareWorktree(run, init, project, ticket);
   return ticket;
 }
@@ -2978,7 +3005,7 @@ export async function resetTicket(ticketId: string): Promise<void> {
   const stateFile = rebuildStateFile(init, t.id);
   const rebuilt = stateAfterReset(readRebuildState(stateFile), t);
   writeRebuildState(stateFile, rebuilt);
-  await gitx.removeWorktree(project.repoPath, t.worktreePath, t.branch);
+  await removeTicketWorktree(project, init, t);
   fs.rmSync(ticketDir(init, t), { recursive: true, force: true });
   await repo.updateTicket(t.id, {
     status: t.status !== 'proposed' && LIVE_INITIATIVE_STATUSES.includes(init.status) ? 'todo' : 'proposed',
@@ -3036,7 +3063,7 @@ export async function resetInitiative(initiativeId: string): Promise<void> {
   const init = await mustInitiative(initiativeId);
   const project = await mustProject(init.projectId);
   await cancelActive({ initiativeId: init.id });
-  for (const t of await repo.listTickets(init.id)) await gitx.removeWorktree(project.repoPath, t.worktreePath, t.branch);
+  for (const t of await repo.listTickets(init.id)) await removeTicketWorktree(project, init, t);
   await sql`delete from tickets where initiative_id = ${init.id}`;
   await removeLinks(linksDir(init), linkMirrorsRoot()).catch(() => undefined);
   fs.rmSync(initiativeDir(init), { recursive: true, force: true });
@@ -3048,7 +3075,7 @@ export async function deleteInitiative(initiativeId: string): Promise<void> {
   const init = await mustInitiative(initiativeId);
   const project = await repo.getProject(init.projectId);
   await cancelActive({ initiativeId: init.id });
-  if (project) for (const t of await repo.listTickets(init.id)) await gitx.removeWorktree(project.repoPath, t.worktreePath, t.branch);
+  if (project) for (const t of await repo.listTickets(init.id)) await removeTicketWorktree(project, init, t);
   await removeLinks(linksDir(init), linkMirrorsRoot()).catch(() => undefined);
   fs.rmSync(initiativeDir(init), { recursive: true, force: true });
   await repo.deleteInitiative(init.id);

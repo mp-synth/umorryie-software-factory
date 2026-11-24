@@ -170,9 +170,15 @@ export async function getTicket(id: string): Promise<Ticket | null> {
 }
 
 export async function updateTicket(id: string, patch: Partial<Ticket>): Promise<Ticket> {
-  const [row] = await sql<Ticket[]>`update tickets set ${sql(prepare(patch))}, updated_at = now() where id = ${id} returning *`;
-  emitChange({ type: 'ticket', id, initiativeId: row.initiativeId });
+  const row = await updateTicketIfPresent(id, patch);
+  if (!row) throw new Error(`ticket ${id} not found`);
   return row;
+}
+
+/** Null when the ticket is gone, deleted with its initiative while a run was still going. */
+export async function updateTicketIfPresent(id: string, patch: Partial<Ticket>): Promise<Ticket | null> {
+  const [row] = await sql<Ticket[]>`update tickets set ${sql(prepare(patch))}, updated_at = now() where id = ${id} returning *`;
+  return touchTicket(row);
 }
 
 function touchTicket(row: Ticket | undefined): Ticket | null {
