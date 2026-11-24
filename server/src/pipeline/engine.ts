@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { ACTIVE_TICKET_STATUSES, DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, SIDE_RUN_KINDS, isSideRun, type AppSettings, type CapacityStatus, type Initiative, type MachinePressure, type Message, type Project, type Rule, type RuleRole, type RuleScope, type Run, type RunKind, type Ticket } from '@factory/shared';
+import { ACTIVE_TICKET_STATUSES, DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, SETTLED_TICKET_STATUSES, SIDE_RUN_KINDS, isSideRun, type AppSettings, type CapacityStatus, type Initiative, type MachinePressure, type Message, type Project, type Rule, type RuleRole, type RuleScope, type Run, type RunKind, type Ticket } from '@factory/shared';
 import { agentEnvironment, type AgentEnvironment, type Redact } from '../agent-env.ts';
 import { agentLiveServicesNote } from '../live-services.ts';
 import { ROOT, config } from '../config.ts';
@@ -74,7 +74,7 @@ import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, sectio
 import { sizeNote } from './size.ts';
 import { malformedVerdictReason, outputFailure, parseVerdict } from './verdict.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
-import { describeIgnored, describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, type PrWork } from './pr-work.ts';
+import { describeIgnored, describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
 import { BASE_COMMIT_FIELD, MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, ruleFile, type AgentKind } from './role-prompt.ts';
 import { hasHumanPrItems, isSteering, oneLine, parseProposedRules, renderTimeline, retroSummary, withLearnedRule, withoutLearnedRule } from './retro.ts';
@@ -3266,7 +3266,7 @@ async function syncStackOnce(initiativeId: string): Promise<void> {
   const project = await mustProject(init.projectId);
   const all = await repo.listTickets(init.id);
   const open = all.filter((t) => t.prNumber && t.prState === 'OPEN' && !['merged', 'canceled'].includes(t.status));
-  const due = open.filter((t) => !t.prHeadRef && SETTLED_STATUSES.includes(t.status) && t.worktreePath && fs.existsSync(path.join(t.worktreePath, '.git')));
+  const due = open.filter((t) => !t.prHeadRef && SETTLED_TICKET_STATUSES.includes(t.status) && t.worktreePath && fs.existsSync(path.join(t.worktreePath, '.git')));
   if (!due.length || !gitx.isGithubUrl(await gitx.remoteUrl(project.repoPath))) return;
   const fetched = await gitx.fetchOrigin(project.repoPath, { refs: open.map((t) => gitx.trackingRefspec(remoteBranchOf(t)!)) });
   if (fetched.code !== 0) throw new Error(`could not fetch the stack's branches: ${(fetched.stderr || fetched.stdout).trim().slice(0, 500)}`);
@@ -3497,8 +3497,19 @@ async function watchBases(): Promise<void> {
   }
 }
 
-const SETTLED_STATUSES: Ticket['status'][] = ['built', 'changes_requested', 'approved'];
-const MANUALLY_SWEPT_STATUSES: Ticket['status'][] = [...SETTLED_STATUSES, 'blocked'];
+const MANUALLY_SWEPT_STATUSES: Ticket['status'][] = [...SETTLED_TICKET_STATUSES, 'blocked'];
+
+/** Records on the ticket why the sweep left its PR alone, rewriting it only when the reason changes. */
+async function noteSweepSkip(cwd: string, t: Ticket, work: PrWork, alreadyHandled: boolean): Promise<void> {
+  try {
+    const humanChecks = (await gh.humanChecks(cwd, t.prNumber!)) ?? [];
+    const skip = sweepSkip(work, { alreadyHandled, humanChecks });
+    if (t.prSweepSkip && sameSweepSkip(t.prSweepSkip, skip)) return;
+    await repo.setPrSweepSkip(t.id, { ...skip, since: new Date().toISOString() });
+  } catch (err) {
+    console.warn('[pr-sweep]', `${ticketLabel(t)}: could not record why it was skipped: ${(err as Error).message}`);
+  }
+}
 
 async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
   if (!(await ticketIdle(t.id))) return false;
@@ -3512,12 +3523,20 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
     if (mergeabilityRechecks.another(t.id, work.snap.headRefOid)) {
       sweeps.schedule(t.initiativeId, MERGEABILITY_RECHECK_MS, () => sweepOpenPrs({ initiativeId: t.initiativeId }));
     }
+    await noteSweepSkip(cwd, t, work, false);
     return false;
   }
   if (work) mergeabilityRechecks.known(t.id);
-  if (!work || !hasPrWork(work)) return false;
+  if (!work) return false;
+  if (!hasPrWork(work)) {
+    await noteSweepSkip(cwd, t, work, false);
+    return false;
+  }
   const fingerprint = prWorkFingerprint(work);
-  if (!manual && fingerprint === t.prSweepFingerprint) return false;
+  if (!manual && fingerprint === t.prSweepFingerprint) {
+    await noteSweepSkip(cwd, t, work, true);
+    return false;
+  }
   if (!(await repo.claimPrSweep(t.id, fingerprint))) return false;
   try {
     await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: t.id, trigger: manual ? 'manual' : 'auto' });
@@ -3598,7 +3617,7 @@ async function adoptPrsFor(scope: SweepScope): Promise<void> {
 export async function sweepOpenPrs(scope: SweepScope = {}): Promise<number> {
   await adoptPrsFor(scope);
   await settleSweepClaims();
-  const statuses = scope.manual ? MANUALLY_SWEPT_STATUSES : SETTLED_STATUSES;
+  const statuses = scope.manual ? MANUALLY_SWEPT_STATUSES : SETTLED_TICKET_STATUSES;
   const candidates = await sql<Ticket[]>`
     select t.* from tickets t join initiatives i on i.id = t.initiative_id
     where i.status in ('in_progress','done') and t.pr_number is not null and t.branch is not null

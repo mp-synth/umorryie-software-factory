@@ -205,7 +205,12 @@ checks and the verifier like any other fix. A PR being fixed carries a
 "sweep fixing" mark on its ticket row, so the next sweep leaves it alone; the
 mark clears when the fix chain finishes and expires after 45 minutes either
 way. The sweep skips tickets that need you, and never starts a fixer twice for
-the same PR state (same head commit, checks, threads and comments). Turn it off
+the same PR state (same head commit, checks, threads and comments). When it
+leaves an open PR alone, the ticket row says why: nothing to fix, waiting for
+CI, checking mergeability, a fixer already tried this exact state, or waiting
+on people, naming the checks only people turn green (a code-owner review, a
+Meticulous visual diff). The ticket's detail lists them, with what the sweep
+ignored. Turn it off
 or run it now in **Settings**. **More → Fix PRs now** on an initiative runs the
 same sweep for that initiative right away; it also retries a PR state the loop
 already handled and includes tickets that need you.

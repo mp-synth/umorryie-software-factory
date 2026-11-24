@@ -299,6 +299,46 @@ function ciOf(d: { state: string; headRefOid: string; statusCheckRollup?: CheckR
   };
 }
 
+/** A check only people turn green (a code-owner review, a visual-diff approval) that is not green yet. */
+export interface HumanCheck {
+  name: string;
+  state: 'pending' | 'failing';
+  /** What the check says it waits for, such as "needs review from @growth"; may be empty. */
+  description: string;
+  url: string | null;
+}
+
+export interface CheckListEntry {
+  name: string;
+  bucket: string;
+  description?: string;
+  link?: string;
+  startedAt?: string;
+}
+
+export function humanChecksFrom(entries: CheckListEntry[]): HumanCheck[] {
+  const started = (e: CheckListEntry) => Date.parse(e.startedAt ?? '') || 0;
+  const latest = new Map<string, CheckListEntry>();
+  for (const e of entries) {
+    if (!CHECKS_ONLY_HUMANS_TURN_GREEN.test(e.name)) continue;
+    const seen = latest.get(e.name);
+    if (!seen || started(e) > started(seen)) latest.set(e.name, e);
+  }
+  return [...latest.values()]
+    .filter((e) => e.bucket === 'pending' || e.bucket === 'fail')
+    .map((e) => ({ name: e.name, state: e.bucket === 'pending' ? 'pending' : 'failing', description: e.description?.trim() ?? '', url: e.link || null }));
+}
+
+/** Null when gh can't list the checks. The rollup `pr view` returns has no descriptions, so this asks `pr checks`. */
+export async function humanChecks(cwd: string, prNumber: number): Promise<HumanCheck[] | null> {
+  const r = await gh(cwd, ['pr', 'checks', String(prNumber), '--json', 'name,bucket,description,link,startedAt']);
+  try {
+    return humanChecksFrom(JSON.parse(r.stdout));
+  } catch {
+    return null;
+  }
+}
+
 /** Only a PR's head and checks, for polling CI without fetching its comments and reviews. */
 export async function prCi(cwd: string, prNumber: number): Promise<PrCi | null> {
   const r = await gh(cwd, ['pr', 'view', String(prNumber), '--json', 'state,headRefOid,statusCheckRollup']);

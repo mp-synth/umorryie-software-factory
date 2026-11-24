@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PrSnapshot, ReviewThread } from '../github.ts';
-import { describeIgnored, describePrWork, hasPrWork, isBotCommand, isNoiseAuthor, prWorkFingerprint, prWorkFrom, reviewAfterFix } from './pr-work.ts';
+import { describeIgnored, describePrWork, hasPrWork, isBotCommand, isNoiseAuthor, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip } from './pr-work.ts';
 
 const snapshot = (patch: Partial<PrSnapshot> = {}): PrSnapshot => ({
   number: 7,
@@ -239,4 +239,43 @@ test("Bugbot's findings still reach the fixer next to an approval-agent review",
   assert.equal(hasPrWork(w), true);
   assert.equal(w.threads.length, 1);
   assert.equal(w.reviews.length, 0);
+});
+
+const noHumans = { alreadyHandled: false, humanChecks: [] };
+
+test('says why the sweep left a clean PR alone and what only people can move', () => {
+  const approvalAgent = { ...comment('cursor', '2026-01-01T10:00:00Z'), body: 'Review needed.\n<sub>Sent by Cursor Approval Agent: PR Approver</sub>' };
+  const work = prWorkFrom(snapshot({ finishedChecks: 4, comments: [approvalAgent] }), [], fresh);
+  const skip = sweepSkip(work, {
+    alreadyHandled: false,
+    humanChecks: [
+      { name: 'Code review', state: 'pending', description: 'needs review from @growth', url: null },
+      { name: 'Meticulous Tests', state: 'failing', description: '', url: null },
+    ],
+  });
+  assert.equal(skip.reason, 'idle');
+  assert.equal(skip.headSha, 'abc');
+  assert.match(skip.why, /^Nothing for a fixer: CI passes, the PR merges cleanly/);
+  assert.deepEqual(skip.waitingOn, ['Code review: needs review from @growth', 'Meticulous Tests: failed']);
+  assert.equal(skip.ignored.length, 1);
+  assert.match(skip.ignored[0], /approval agent/);
+});
+
+test('tells CI still running, unknown mergeability and an already-tried state apart', () => {
+  const failing = [{ name: 'lint', url: null }];
+  assert.equal(sweepSkip(prWorkFrom(snapshot({ pendingChecks: ['test'] }), [], fresh), noHumans).reason, 'ci-running');
+  const waitingForCi = sweepSkip(prWorkFrom(snapshot({ failingChecks: failing, pendingChecks: ['test'] }), [], fresh), noHumans);
+  assert.equal(waitingForCi.reason, 'ci-running');
+  assert.match(waitingForCi.why, /^1 check failed while others still run/);
+  assert.equal(sweepSkip(prWorkFrom(snapshot({ mergeable: 'UNKNOWN' }), [], fresh), noHumans).reason, 'merge-unknown');
+  const tried = sweepSkip(prWorkFrom(snapshot({ failingChecks: failing }), [], fresh), { ...noHumans, alreadyHandled: true });
+  assert.equal(tried.reason, 'already-tried');
+  assert.match(tried.why, /^A fixer already had 1 failing check in this exact state/);
+});
+
+test('treats a skip as unchanged until the PR or its reasons change', () => {
+  const a = sweepSkip(prWorkFrom(snapshot({ finishedChecks: 1 }), [], fresh), noHumans);
+  assert.equal(sameSweepSkip(a, { ...a }), true);
+  assert.equal(sameSweepSkip(a, { ...a, headSha: 'def' }), false);
+  assert.equal(sameSweepSkip(a, { ...a, waitingOn: ['Code review: needs review from @growth'] }), false);
 });

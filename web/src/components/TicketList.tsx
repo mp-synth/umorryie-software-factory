@@ -10,6 +10,7 @@ import {
   GitPullRequest,
   GraduationCap,
   Hammer,
+  Hourglass,
   Layers,
   ListChecks,
   MessageCircleQuestion,
@@ -26,7 +27,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from 'react';
 import { toast } from 'sonner';
-import { PR_SWEEP_CLAIM_MINUTES, overSizeBudget, type InitiativeDetail, type Run, type Ticket } from '@factory/shared';
+import { PR_SWEEP_CLAIM_MINUTES, SETTLED_TICKET_STATUSES, overSizeBudget, type InitiativeDetail, type PrSweepSkip, type Run, type Ticket } from '@factory/shared';
 import { api, type BulkAction, type TicketAction } from '@/lib/api';
 import { useNow } from '@/lib/live';
 import { runKind, isArbitrating, isRunInFlight, replacedRunIds } from '@/lib/status';
@@ -44,6 +45,20 @@ const CI_PILLS = {
 } as const;
 
 const ACTIVE = new Set(['building', 'checking', 'in_review', 'fixing']);
+
+/** The PR sweep's last reason for leaving this PR alone, while the PR is still one it sweeps and nothing is fixing it. */
+function sweepSkipOf(t: Ticket, activeRun: Run | undefined): PrSweepSkip | null {
+  const skip = t.prSweepSkip;
+  if (!skip?.reason || activeRun || t.prSweepClaimedAt || t.prState !== 'OPEN' || !SETTLED_TICKET_STATUSES.includes(t.status)) return null;
+  return skip;
+}
+
+function sweepSkipLabel(skip: PrSweepSkip): string {
+  if (skip.reason === 'already-tried') return 'fixer already tried';
+  if (skip.reason === 'ci-running') return 'waiting for CI';
+  if (skip.reason === 'merge-unknown') return 'checking mergeability';
+  return skip.waitingOn.length ? 'waiting on people' : 'nothing to fix';
+}
 
 function useExpanded(initiativeId: string) {
   const key = `factory:expanded:${initiativeId}`;
@@ -191,6 +206,7 @@ function TicketRow({
   const dock = useRunDock();
   const [editing, setEditing] = useState(false);
   const activeRun = runs.find(isRunInFlight);
+  const sweepSkip = sweepSkipOf(t, activeRun);
   const cost = runs.reduce((a, r) => a + (r.costUsd ?? 0), 0);
   const deps = t.dependsOn.map((k) => all.find((x) => x.key === k)).filter(Boolean) as Ticket[];
   const waitingOn = deps.filter((d) => !['approved', 'merged'].includes(d.status) && !d.branch);
@@ -255,7 +271,7 @@ function TicketRow({
               </Tooltip>
             )}
           </div>
-          <div className="mt-0.5 flex items-center gap-2 text-2xs text-zinc-500">
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-zinc-500">
             {deps.length > 0 && <span>after {deps.map((d) => pad2(d.seq)).join(', ')}</span>}
             {t.round > 1 && <span>round {t.round}</span>}
             {t.prUrl && (
@@ -282,6 +298,14 @@ function TicketRow({
                 <span className="inline-flex items-center gap-1 text-cyan-300">
                   <RefreshCw className="h-3 w-3 animate-spin [animation-duration:2.5s]" />
                   sweep fixing
+                </span>
+              </Tooltip>
+            )}
+            {sweepSkip && (
+              <Tooltip content={`${sweepSkip.why}${sweepSkip.waitingOn.length ? ` Waiting on ${sweepSkip.waitingOn.join('; ')}.` : ''}`}>
+                <span className={cn('inline-flex items-center gap-1 whitespace-nowrap', sweepSkip.reason === 'already-tried' ? 'text-amber-300/80' : 'text-zinc-400')}>
+                  <Hourglass className="h-3 w-3" />
+                  {sweepSkipLabel(sweepSkip)}
                 </span>
               </Tooltip>
             )}
@@ -381,11 +405,58 @@ function TicketState({ ticket: t, activeRun }: { ticket: Ticket; activeRun: Run 
   return <TicketPill status={t.status} />;
 }
 
+function SweepSkipPanel({ skip }: { skip: PrSweepSkip }) {
+  return (
+    <div className="flex items-start gap-2.5 rounded-lg border border-line bg-white/[0.02] px-3 py-2.5 text-xs">
+      <Hourglass className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400" />
+      <div className="min-w-0 space-y-2">
+        <div>
+          <span className="font-medium text-zinc-100">PR sweep left this PR alone</span>
+          <span className="ml-2 font-mono text-2xs text-zinc-500">
+            {skip.headSha.slice(0, 7)} · since {ago(skip.since).replace(/ ago$/, '')}
+          </span>
+        </div>
+        <p className="leading-relaxed text-zinc-300">{skip.why}</p>
+        {skip.waitingOn.length > 0 && (
+          <div>
+            <div className="section-title">Waiting on people</div>
+            <ul className="mt-1 space-y-0.5">
+              {skip.waitingOn.map((w) => (
+                <li key={w} className="flex gap-2 leading-relaxed text-zinc-300">
+                  <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-zinc-500" />
+                  {w}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {skip.ignored.length > 0 && (
+          <details>
+            <summary className="cursor-pointer text-2xs text-zinc-500 hover:text-zinc-300">
+              Ignored {skip.ignored.length} item{skip.ignored.length > 1 ? 's' : ''} a fixer can't act on
+            </summary>
+            <ul className="mt-1 space-y-0.5">
+              {skip.ignored.map((w) => (
+                <li key={w} className="flex gap-2 break-words leading-relaxed text-zinc-400">
+                  <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-zinc-600" />
+                  <span className="min-w-0">{w}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TicketDetail({ ticket: t, runs, initiativeId }: { ticket: Ticket; runs: Run[]; initiativeId: string }) {
   const latestOutput = runs.find((r) => r.status === 'succeeded' && r.outputMd && r.kind !== 'gate') ?? runs.find((r) => r.outputMd);
   const arbitrating = isArbitrating(runs);
+  const sweepSkip = sweepSkipOf(t, runs.find(isRunInFlight));
   return (
     <div className="animate-fade-in space-y-4 border-t border-line/60 px-4 pb-4 pl-[66px] pt-3">
+      {sweepSkip && <SweepSkipPanel skip={sweepSkip} />}
       {t.status === 'blocked' && t.blockedReason && (
         <div
           className={cn(

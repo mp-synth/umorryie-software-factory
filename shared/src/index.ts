@@ -246,8 +246,29 @@ export interface Ticket {
   blockedReason: string | null;
   prSweepClaimedAt: string | null;
   prSweepFingerprint: string | null;
+  /** Why the last PR sweep that looked at this open PR started no fixer; null once one starts. */
+  prSweepSkip?: PrSweepSkip | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * idle: nothing to fix. ci-running: CI has not finished. merge-unknown: GitHub has not worked out
+ * whether the PR merges. already-tried: a fixer already had the PR in this exact state.
+ */
+export type PrSweepSkipReason = 'idle' | 'ci-running' | 'merge-unknown' | 'already-tried';
+
+export interface PrSweepSkip {
+  /** When the sweep first found the PR in this state. */
+  since: string;
+  headSha: string;
+  reason: PrSweepSkipReason;
+  /** One sentence on why no fixer started. */
+  why: string;
+  /** What only people can move, such as a code-owner review or a visual-diff approval. */
+  waitingOn: string[];
+  /** What the sweep dropped before handing the PR to a fixer. */
+  ignored: string[];
 }
 
 export interface Run {
@@ -441,6 +462,8 @@ export interface Health {
 
 export const DONE_TICKET_STATUSES: TicketStatus[] = ['approved', 'merged'];
 export const ACTIVE_TICKET_STATUSES: TicketStatus[] = ['building', 'checking', 'in_review', 'fixing'];
+/** A ticket whose PR waits on GitHub: the PR sweep looks at these on its own. */
+export const SETTLED_TICKET_STATUSES: TicketStatus[] = ['built', 'changes_requested', 'approved'];
 
 export const SIZE_BUDGETS: Record<string, number> = { XS: 50, S: 200, M: 500 };
 const SIZE_OVERRUN = 1.5;

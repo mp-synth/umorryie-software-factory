@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { PrSnapshot, ReviewThread } from '../github.ts';
+import type { PrSweepSkip } from '@factory/shared';
+import type { HumanCheck, PrSnapshot, ReviewThread } from '../github.ts';
 
 export interface PrWork {
   snap: PrSnapshot;
@@ -119,4 +120,43 @@ export function describePrWork(w: PrWork): string {
   ].filter(Boolean);
   if (parts.length <= 1) return parts[0] ?? 'nothing to act on';
   return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * Why the sweep starts no fixer on an open PR, for the ticket to show: without it an adopted PR sits
+ * at "built" with no runs and nothing says it only waits for people.
+ */
+export function sweepSkip(w: PrWork, opts: { alreadyHandled: boolean; humanChecks: HumanCheck[] }): Omit<PrSweepSkip, 'since'> {
+  return {
+    headSha: w.snap.headRefOid,
+    ...skipReason(w, opts.alreadyHandled),
+    waitingOn: opts.humanChecks.map((c) => `${c.name}: ${c.description || (c.state === 'pending' ? 'not approved yet' : 'failed')}`),
+    ignored: w.ignored,
+  };
+}
+
+function skipReason(w: PrWork, alreadyHandled: boolean): Pick<PrSweepSkip, 'reason' | 'why'> {
+  if (alreadyHandled) {
+    return {
+      reason: 'already-tried',
+      why: `A fixer already had ${describePrWork(w)} in this exact state; the sweep starts another once the PR changes, or Fix PRs now starts one at once.`,
+    };
+  }
+  if (w.ciStillRunning) {
+    return {
+      reason: 'ci-running',
+      why: `${count(w.snap.failingChecks.length, 'check')} failed while others still run; the sweep waits for CI to finish before fixing.`,
+    };
+  }
+  if (w.snap.mergeable === 'UNKNOWN') {
+    return { reason: 'merge-unknown', why: 'GitHub is still working out whether the PR merges cleanly; the sweep asks again shortly.' };
+  }
+  const tail = 'the PR merges cleanly and no review thread or comment needs an answer.';
+  if (w.snap.pendingChecks.length) return { reason: 'ci-running', why: `Nothing for a fixer yet: CI is still running, ${tail}` };
+  return { reason: 'idle', why: `Nothing for a fixer: ${w.snap.finishedChecks ? 'CI passes' : 'no CI check has reported'}, ${tail}` };
+}
+
+export function sameSweepSkip(a: Omit<PrSweepSkip, 'since'>, b: Omit<PrSweepSkip, 'since'>): boolean {
+  const key = (s: Omit<PrSweepSkip, 'since'>) => JSON.stringify([s.headSha, s.reason, s.why, s.waitingOn, s.ignored]);
+  return key(a) === key(b);
 }

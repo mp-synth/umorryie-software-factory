@@ -7,6 +7,7 @@ import {
   type InitiativeSettings,
   type InitiativeSummary,
   type Message,
+  type PrSweepSkip,
   type Project,
   type Rule,
   type Run,
@@ -17,7 +18,7 @@ import {
 import { json, sql } from './db.ts';
 import { emitChange, emitRunEvent } from './events.ts';
 
-const JSON_COLUMNS = new Set(['planJson', 'settings', 'guidance', 'acceptance', 'dependsOn', 'data', 'copyFiles', 'referenceDirs']);
+const JSON_COLUMNS = new Set(['planJson', 'settings', 'guidance', 'acceptance', 'dependsOn', 'data', 'copyFiles', 'referenceDirs', 'prSweepSkip']);
 
 function prepare(patch: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -210,11 +211,17 @@ export async function nextTicketSeq(initiativeId: string): Promise<number> {
 
 export async function claimPrSweep(ticketId: string, fingerprint: string): Promise<Ticket | null> {
   const [row] = await sql<Ticket[]>`
-    update tickets set pr_sweep_claimed_at = now(), pr_sweep_fingerprint = ${fingerprint}, updated_at = now()
+    update tickets set pr_sweep_claimed_at = now(), pr_sweep_fingerprint = ${fingerprint}, pr_sweep_skip = null, updated_at = now()
     where id = ${ticketId}
       and (pr_sweep_claimed_at is null or pr_sweep_claimed_at < now() - make_interval(mins => ${PR_SWEEP_CLAIM_MINUTES}))
     returning *`;
   return touchTicket(row);
+}
+
+/** Leaves updated_at alone: CI polling reads it as the time the PR last changed. */
+export async function setPrSweepSkip(ticketId: string, skip: PrSweepSkip): Promise<void> {
+  const [row] = await sql<Ticket[]>`update tickets set pr_sweep_skip = ${json(skip)} where id = ${ticketId} returning *`;
+  touchTicket(row);
 }
 
 export async function releasePrSweepClaim(ticketId: string, opts: { forgetState: boolean }): Promise<boolean> {

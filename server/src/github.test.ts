@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, splitFailingChecks, type CheckRun } from './github.ts';
+import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, humanChecksFrom, splitFailingChecks, type CheckRun } from './github.ts';
 
 test('starts every factory comment with the automation prefix and keeps the loop marker', () => {
   const body = factoryCommentBody('Fixed the lint error.');
@@ -56,4 +56,19 @@ test('derives the CI state of a PR, red before pending before green', () => {
   assert.equal(ciStateOf({ failingChecks: [], pendingChecks: ['lint'], finishedChecks: 2 }), 'pending');
   assert.equal(ciStateOf({ failingChecks: [], pendingChecks: [], finishedChecks: 2 }), 'green');
   assert.equal(ciStateOf({ failingChecks: [], pendingChecks: [], finishedChecks: 0 }), 'none');
+});
+
+test('lists the checks only people turn green that still wait, newest run per name', () => {
+  const checks = humanChecksFrom([
+    { name: 'Code review gate', bucket: 'fail', startedAt: '2026-01-01T10:00:00Z' },
+    { name: 'Code review gate', bucket: 'pass', startedAt: '2026-01-01T11:00:00Z' },
+    { name: 'Code review', bucket: 'pending', description: 'needs review from @growth', link: 'https://x/1' },
+    { name: 'Meticulous Tests', bucket: 'fail', description: 'Visual differences in 3 of 90 screens' },
+    { name: 'Meticulous Checks', bucket: 'pass' },
+    { name: 'lint', bucket: 'fail' },
+  ]);
+  assert.deepEqual(checks, [
+    { name: 'Code review', state: 'pending', description: 'needs review from @growth', url: 'https://x/1' },
+    { name: 'Meticulous Tests', state: 'failing', description: 'Visual differences in 3 of 90 screens', url: null },
+  ]);
 });
