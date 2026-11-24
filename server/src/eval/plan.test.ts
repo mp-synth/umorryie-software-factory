@@ -24,14 +24,20 @@ test('the cohort is deterministic', () => {
 });
 
 test('one arm without --compare, two with it, the first on the factory file by default', () => {
-  assert.deepEqual(planArms(null, null), [{ id: 'A', roleFile: null }]);
-  assert.deepEqual(planArms('/x.md', '/y.md'), [
-    { id: 'A', roleFile: '/x.md' },
-    { id: 'B', roleFile: '/y.md' },
+  const arm = (id: string, roleFile: string | null, model: string | null = null, effort: string | null = null) => ({ id, roleFile, model, effort });
+  assert.deepEqual(planArms({ roleFile: null }), [arm('A', null)]);
+  assert.deepEqual(planArms({ roleFile: '/x.md', compare: '/y.md' }), [arm('A', '/x.md'), arm('B', '/y.md')]);
+  assert.deepEqual(planArms({ roleFile: null, compare: '/y.md' }), [arm('A', null), arm('B', '/y.md')]);
+});
+
+test('a compared model or effort makes arm B, which keeps everything else from arm A', () => {
+  assert.deepEqual(planArms({ roleFile: '/x.md', model: 'opus', compareModel: 'sonnet' }), [
+    { id: 'A', roleFile: '/x.md', model: 'opus', effort: null },
+    { id: 'B', roleFile: '/x.md', model: 'sonnet', effort: null },
   ]);
-  assert.deepEqual(planArms(null, '/y.md'), [
-    { id: 'A', roleFile: null },
-    { id: 'B', roleFile: '/y.md' },
+  assert.deepEqual(planArms({ roleFile: null, effort: 'high', compareEffort: 'medium' }), [
+    { id: 'A', roleFile: null, model: null, effort: 'high' },
+    { id: 'B', roleFile: null, model: null, effort: 'medium' },
   ]);
 });
 

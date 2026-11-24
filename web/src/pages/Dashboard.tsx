@@ -6,6 +6,7 @@ import type { InitiativeSummary, Run } from '@factory/shared';
 import { api } from '@/lib/api';
 import { poolNote, poolSize, useCapacity, useNow } from '@/lib/live';
 import { runKind, isNotArchived } from '@/lib/status';
+import { addDays, weekStartUtc } from '@/lib/usage';
 import { ago, cn, money, pad2, runDuration } from '@/lib/utils';
 import { InitiativePill } from '@/components/StatusPill';
 import { useRunDock } from '@/components/RunDock';
@@ -30,9 +31,13 @@ export function Dashboard() {
       attention: live.filter((i) => i.attention).length,
       tickets,
       shipped,
-      cost: list.reduce((a, i) => a + i.costUsd, 0),
     };
   }, [list]);
+  const weekStart = weekStartUtc();
+  const { data: week } = useQuery({
+    queryKey: ['usage', 'summary', weekStart.toISOString()],
+    queryFn: () => api.usage(weekStart, addDays(weekStart, 7)),
+  });
 
   const filtered = list.filter((i) =>
     filter === 'all' ? true : filter === 'active' ? !['done', 'archived'].includes(i.status) : i.status === filter,
@@ -65,7 +70,7 @@ export function Dashboard() {
         <Stat icon={<Activity />} label="Agents running" value={running.length} sub={poolSub} live={running.length > 0} />
         <Stat icon={<BellRing />} label="Waiting on you" value={stats.attention} tone={stats.attention ? 'attention' : undefined} />
         <Stat icon={<Rocket />} label="Tickets approved" value={`${stats.shipped}/${stats.tickets}`} />
-        <Stat icon={<CircleDollarSign />} label="Agent spend" value={money(stats.cost)} sub="API-equivalent" />
+        <Stat icon={<CircleDollarSign />} label="Agent spend this week" value={week ? money(week.costUsd) : '—'} sub="since Monday 00:00 UTC · details" to="/usage" />
       </div>
 
       {attention.length > 0 && (
@@ -165,17 +170,26 @@ export function Dashboard() {
   );
 }
 
-function Stat({ icon, label, value, sub, live, tone }: { icon: ReactNode; label: string; value: ReactNode; sub?: string; live?: boolean; tone?: 'attention' }) {
-  return (
-    <div className={cn('card relative overflow-hidden px-4 py-3.5', tone === 'attention' && 'border-amber-400/30')}>
+function Stat({ icon, label, value, sub, live, tone, to }: { icon: ReactNode; label: string; value: ReactNode; sub?: string; live?: boolean; tone?: 'attention'; to?: string }) {
+  const body = (
+    <>
       <div className="flex items-center gap-2 text-2xs text-zinc-500 [&>svg]:h-3.5 [&>svg]:w-3.5">
         {icon}
         {label}
         {live && <LiveDot className="ml-auto" />}
+        {to && <ArrowRight className="ml-auto opacity-0 transition-opacity group-hover:opacity-100" />}
       </div>
       <div className={cn('mt-1.5 font-mono text-2xl font-medium tabular-nums tracking-tight', tone === 'attention' ? 'text-amber-200' : 'text-zinc-100')}>{value}</div>
       {sub && <div className="text-2xs text-zinc-600">{sub}</div>}
-    </div>
+    </>
+  );
+  const className = cn('card relative overflow-hidden px-4 py-3.5', tone === 'attention' && 'border-amber-400/30');
+  return to ? (
+    <Link to={to} className={cn(className, 'group block transition-colors hover:border-line-strong hover:bg-surface-2/40')}>
+      {body}
+    </Link>
+  ) : (
+    <div className={className}>{body}</div>
   );
 }
 

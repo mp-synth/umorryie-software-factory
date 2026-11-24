@@ -9,7 +9,7 @@ import type { SpoolOffsets } from './spool.ts';
 
 process.env.CLAUDE_BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fake-claude.mjs');
 
-const { attachAgent, buildArgs, startAgent, startDetachedAgent } = await import('./claude.ts');
+const { attachAgent, buildArgs, isolatedAgentEnv, isProductionVariable, startAgent, startDetachedAgent } = await import('./claude.ts');
 const { LeftRunning, readExit, removeSpool } = await import('./spool.ts');
 
 const spec = (scenario: string, timeoutMs = 10_000): AgentSpec => ({
@@ -158,6 +158,21 @@ test("starts every session without Claude's auto memory, whatever the repo env f
   const { seen, handle } = await environmentOf({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0', TMPDIR: '/somewhere/shared' });
   assert.equal(seen.autoMemoryOff, '1');
   assert.equal(seen.tmpdir, handle.scratchDir);
+});
+
+test('names production variables by their PROD, PRD, PRODUCTION or LIVE word, not by a longer word that starts with one', () => {
+  const production = ['PROD_DB_URL', 'DB_PROD_URL', 'API_PRD_KEY', 'MONGO_PRODUCTION_URI', 'LIVE_API_KEY', 'STRIPE_KEY_LIVE', 'prod-token', 'PROD2_HOST', 'PROD'];
+  const other = ['PRODUCT_ID', 'PRODUCTS_URL', 'PRODUCER_NAME', 'DELIVERY_ID', 'LIVERELOAD_PORT', 'OLIVE_HOST', 'DEV_DB_URL', 'REPRODUCE_SEED'];
+  assert.deepEqual(production.filter((n) => !isProductionVariable(n)), []);
+  assert.deepEqual(other.filter(isProductionVariable), []);
+});
+
+test("drops production variables from the agent's environment, whatever the repo env files say", () => {
+  const env = isolatedAgentEnv({ env: { DB_PROD_URL: 'mongodb://prod', LIVE_API_KEY: 'sk_live', DEV_DB_URL: 'mongodb://dev', PRODUCT_ID: '42' } }, null);
+  assert.equal(env.DB_PROD_URL, undefined);
+  assert.equal(env.LIVE_API_KEY, undefined);
+  assert.equal(env.DEV_DB_URL, 'mongodb://dev');
+  assert.equal(env.PRODUCT_ID, '42');
 });
 
 const spools: string[] = [];

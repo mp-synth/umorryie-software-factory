@@ -2,9 +2,21 @@ import type { EvalCase, EvalRole } from './fixtures.ts';
 
 export const DEFAULT_REPEATS = 2;
 
+/** One configuration under test. A null model or effort is the run's own (`--model`, the role's effort). */
 export interface Arm {
   id: string;
   roleFile: string | null;
+  model: string | null;
+  effort: string | null;
+}
+
+export interface ArmOptions {
+  roleFile: string | null;
+  model?: string | null;
+  effort?: string | null;
+  compare?: string | null;
+  compareModel?: string | null;
+  compareEffort?: string | null;
 }
 
 export interface PlannedTask {
@@ -29,8 +41,14 @@ export function parseRepeats(value: string | undefined): number {
   return repeats;
 }
 
-export function planArms(roleFile: string | null, compare: string | null): Arm[] {
-  return [{ id: 'A', roleFile }, ...(compare ? [{ id: 'B', roleFile: compare }] : [])];
+/**
+ * Arm A is the configuration as given; arm B exists when anything is compared, and differs from A
+ * only in what is compared: another role file, another model or another effort.
+ */
+export function planArms(o: ArmOptions): Arm[] {
+  const a: Arm = { id: 'A', roleFile: o.roleFile, model: o.model ?? null, effort: o.effort ?? null };
+  if (!o.compare && !o.compareModel && !o.compareEffort) return [a];
+  return [a, { id: 'B', roleFile: o.compare ?? a.roleFile, model: o.compareModel ?? a.model, effort: o.compareEffort ?? a.effort }];
 }
 
 export function planCohort(caseNames: string[], armIds: string[], repeats: number): PlannedTask[] {

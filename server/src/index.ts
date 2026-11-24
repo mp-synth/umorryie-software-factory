@@ -7,9 +7,12 @@ import { config } from './config.ts';
 import { migrate, sql } from './db.ts';
 import { recoverOnStartup, releaseRuns, startScheduler } from './pipeline/engine.ts';
 import { routes } from './routes.ts';
+import { startLiveServices } from './live-services.ts';
 import { lockHeldMessage, takeServerLock } from './server-lock.ts';
 import { loadLoginShellPath } from './shell-env.ts';
 import { stopSignals } from './stop-signals.ts';
+import { recordDiscoveryUsageWith } from './discovery.ts';
+import { backfillUsage, recordDiscoveryUsage } from './usage.ts';
 
 function stopAfterLosingTheLock(): never {
   console.error('[server] another factory server now holds this database; this one stops at once and leaves the running agents to it');
@@ -20,6 +23,9 @@ async function main(): Promise<void> {
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? 'warn' },
     bodyLimit: 5 * 1024 * 1024,
+    // An open UI tab holds /api/stream forever; without this a SIGTERM waits on
+    // it until a second signal. Runs are released before app.close().
+    forceCloseConnections: true,
   });
 
   process.on('unhandledRejection', (reason) => {
@@ -34,6 +40,7 @@ async function main(): Promise<void> {
 
   await migrate();
   if (!(await loadLoginShellPath())) console.warn('[shell] could not read your login shell PATH; repo commands use the server PATH');
+  startLiveServices();
   await recoverOnStartup();
   await app.register(routes);
 
@@ -48,6 +55,10 @@ async function main(): Promise<void> {
 
   await app.listen({ port: config.port, host: config.host });
   startScheduler();
+  recordDiscoveryUsageWith(recordDiscoveryUsage);
+  backfillUsage()
+    .then((n) => n && console.log(`[usage] recorded ${n} agent session(s) from their transcripts`))
+    .catch((err) => console.error('[usage] backfill failed:', (err as Error).message));
 
   console.log(`\n  ▲ Software Factory  http://localhost:${config.port}`);
   console.log(`    state     ${config.home}`);

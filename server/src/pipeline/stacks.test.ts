@@ -97,3 +97,22 @@ test('reports a sibling that cannot join because another PR already sits on its 
   assert.deepEqual(step, { kind: 'taken', parent: 10, top: 11 });
   assert.match(stackStepMessage(step, [10, 13])!, /^#13 targets the branch of #10 but can't join its GitHub stack: #11 already sits on top of it/);
 });
+
+test('makes the stack again from the chain when closed PRs left in it block the line', () => {
+  const stack = { number: 99, pullRequests: [20990, 20991, 20993, 20996, 20997], closed: [20996, 20997], merged: [] };
+  const step = nextStackStep([20990, 20991, 20993, 20998], { pr: 20993, stack });
+  assert.deepEqual(step, { kind: 'restack', stack: 99, prs: [20990, 20991, 20993, 20998], closed: [20996, 20997] });
+  assert.equal(
+    stackStepMessage(step, [20990, 20991, 20993, 20998]),
+    'Made the GitHub stack again as #20990 → #20991 → #20993 → #20998: closed #20996 → #20997 were still in it, so nothing could stack above them.',
+  );
+});
+
+test('never restacks around a merged PR, a PR outside the chain, or a stack with nothing closed', () => {
+  const merged = { number: 99, pullRequests: [10, 11, 12], closed: [12], merged: [10] };
+  assert.equal(nextStackStep([10, 11, 13], { pr: 11, stack: merged }).kind, 'taken');
+  const foreign = { number: 99, pullRequests: [10, 50, 12], closed: [12], merged: [] };
+  assert.equal(nextStackStep([10, 11, 13], { pr: 10, stack: foreign }).kind, 'taken');
+  const clean = { number: 99, pullRequests: [10, 11], closed: [], merged: [] };
+  assert.equal(nextStackStep([10, 13], { pr: 10, stack: clean }).kind, 'taken');
+});

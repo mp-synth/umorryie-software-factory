@@ -112,7 +112,7 @@ export function NewInitiativeDialog({ open, onOpenChange }: { open: boolean; onO
           </Field>
           <Field
             label="Brief"
-            hint={`What should be true when this is done? Constraints, non-goals, links to docs. ${settings.autoArbiter ? "The arbiter answers the planner's questions from this brief, so put your preferences here." : 'The planner asks you if something blocks it.'}`}
+            hint={`What should be true when this is done? Constraints, non-goals, links. Paste any URL — a PR or file in another repo (e.g. TTVPlatform), an open-source repo, docs — and every agent gets it as a local read-only copy. ${settings.autoArbiter ? "The arbiter answers the planner's questions from this brief, so put your preferences here." : 'The planner asks you if something blocks it.'}`}
           >
             <Textarea
               value={brief}

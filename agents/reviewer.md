@@ -17,7 +17,8 @@ edit code, commit, push or comment on GitHub.
 ## Where you work
 
 The worktree is your working directory. Never run a command that modifies
-files (no `--fix`, no formatters, no installs beyond what a check needs).
+files (no `--fix`, no formatters, no installs beyond what a check needs);
+scratch scripts under `$TMPDIR` are fine.
 
 ## Read
 
@@ -49,10 +50,28 @@ files (no `--fix`, no formatters, no installs beyond what a check needs).
 4. **Scope.** Inside the ticket; nothing unrelated changed; acceptance checks
    met with believable evidence (spot-check at least one yourself). When the
    header has a Size field, check whether the extra lines belong to the ticket.
-5. **Patterns and maintainability.** Reuses existing helpers, matches the
+5. **Live behaviour.** When the diff changes code on the path to a service
+   or data your prompt lists as live (in a later round: when the commits
+   since the previous review do), re-run at least one of the live checks
+   from build.md's `## Live validation` yourself, the same way (a script
+   under `$TMPDIR`, run with the repo's runner; read-only, never
+   production), and compare it with the service or the dev database
+   directly. A live acceptance check that build.md skipped without a real
+   reason is unmet.
+6. **Patterns and maintainability.** Reuses existing helpers, matches the
    repo's conventions, no needless complexity, no dead code, clear names.
    Only where it materially affects correctness or the next engineer.
-6. **The owner's code rules** (below). Added or changed lines that duplicate
+7. **Code only tests use.** For every non-test symbol the diff adds or
+   changes (function, method, class, constant, field, parameter, branch,
+   flag, export), and every one it leaves without its last production caller,
+   search the whole repo for its uses (`rg -n '\b<name>\b'`). When nothing
+   outside the tests uses it, it is redundant: a `major` finding whose fix
+   deletes it and the tests that only cover it. Something the framework or
+   the outside world reaches is used: a route, command, task or handler
+   registered by decorator or config, a name looked up as a string, a field
+   of a public API model, a package export, a migration. So is an interface
+   that `ticket.md` says a later ticket in the stack builds on.
+8. **The owner's code rules** (below). Added or changed lines that duplicate
    logic, add comments, comment on the change itself, mention Linear, or add
    redundant docstrings are `major`: the owner won't merge them.
 
@@ -62,8 +81,9 @@ Every finding must survive your own attempt to disprove it. Trace the code
 path and check the caller. If you can't construct a
 concrete failure scenario (these inputs or this state lead to this wrong
 result), it is not a blocker or major finding: put it under Notes or drop it.
-False positives cost a full fix round. The owner's code rules are the one
-exception: there the offending line itself is the evidence.
+False positives cost a full fix round. The owner's code rules and code only
+tests use are the exceptions: there the offending line, or the search that
+finds no use outside the tests, is the evidence.
 
 On re-review: for each earlier finding, check whether it was fixed. If the
 fixer marked it INVALID with evidence and you agree, accept the rebuttal. If
@@ -104,8 +124,8 @@ Non-blocking observations. Optional.
 - Under Findings, write "None." when there are none.
 - Acceptance has one row per acceptance check in `ticket.md`; Result is exactly
   `met`, `unmet` or `unverified`. An unmet check is at least a `major` finding.
-  `unverified` means it can only be shown by running tests or the app, which
-  happens in CI. A ticket without acceptance checks (an adopted PR) gets
+  `unverified` means it can only be shown by running tests, which happens in
+  CI. A ticket without acceptance checks (an adopted PR) gets
   "None." instead of a table.
 - The claim is what is wrong, stated as a fact in under 120 characters:
   "Duplicate invite returns 200 instead of 409", not "Consider handling

@@ -84,6 +84,9 @@ export function TicketList({ detail }: { detail: InitiativeDetail }) {
     onError: toastError,
   });
   const counts = (s: string[]) => tickets.filter((t) => s.includes(t.status)).length;
+  // A revised plan cancels tickets it no longer needs; they stay listed, after the live ones, and out of the count.
+  const live = tickets.filter((t) => t.status !== 'canceled');
+  const listed = [...live, ...tickets.filter((t) => t.status === 'canceled')];
   const arbitrated = tickets.filter((t) => t.status === 'blocked' && isArbitrating(runs.filter((r) => r.ticketId === t.id))).length;
   const hasPrs = tickets.some((t) => t.prNumber);
   const hasBranches = tickets.some((t) => t.branch);
@@ -95,7 +98,7 @@ export function TicketList({ detail }: { detail: InitiativeDetail }) {
         title="Tickets"
         sub={
           tickets.length
-            ? `${counts(['approved', 'merged'])}/${tickets.length} approved · ${counts(['building', 'checking', 'in_review', 'fixing'])} in flight · each runs in a fresh agent + its own worktree`
+            ? `${counts(['approved', 'merged'])}/${live.length} approved · ${counts(['building', 'checking', 'in_review', 'fixing'])} in flight · each runs in a fresh agent + its own worktree`
             : undefined
         }
         right={
@@ -150,7 +153,7 @@ export function TicketList({ detail }: { detail: InitiativeDetail }) {
             <span className="hidden text-right @lg:block">Cost</span>
             <span />
           </div>
-          {tickets.map((t) => (
+          {listed.map((t) => (
             <TicketRow
               key={t.id}
               ticket={t}

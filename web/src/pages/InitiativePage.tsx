@@ -85,7 +85,10 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
   });
   const isFeature = i.kind !== 'open-prs';
   const hasOpenPrs = detail.tickets.some((t) => t.prNumber && t.prState !== 'MERGED' && t.prState !== 'CLOSED');
-  const drafts = detail.tickets.filter((t) => t.prNumber && t.prState === 'OPEN' && t.prDraft === true).sort((a, b) => a.seq - b.seq);
+  // Open PRs not known to be ready: drafts, and ones the PR sync has not looked at yet (the server asks GitHub before each).
+  const drafts = detail.tickets
+    .filter((t) => t.prNumber && t.prState === 'OPEN' && t.prDraft !== false && t.status !== 'merged' && t.status !== 'canceled')
+    .sort((a, b) => a.seq - b.seq);
   const markReady = useMutation({
     mutationFn: () => api.bulk(i.id, 'ready-prs'),
     onSuccess: ({ count }) => toast.success(count ? `Marked ${count} PR${count > 1 ? 's' : ''} ready for review` : 'No draft PR left: they are all ready for review'),

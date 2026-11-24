@@ -120,7 +120,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   gateTimeoutMinutes: 20,
   sweepOpenPrs: true,
   resumeInterruptedRuns: true,
-  prNoiseCommentAuthors: ['github-actions', 'alwaysmeticulous', 'codecov', 'codecov-commenter', 'sonarqubecloud', 'sonarcloud', 'vercel', 'netlify', 'linear'],
+  prNoiseCommentAuthors: ['github-actions', 'alwaysmeticulous', 'meticulous', 'codecov', 'codecov-commenter', 'sonarqubecloud', 'sonarcloud', 'vercel', 'netlify', 'linear'],
 };
 
 export const PR_SWEEP_INTERVAL_MINUTES = 15;
@@ -353,10 +353,68 @@ export interface InitiativeDetail {
 }
 
 export type ChangeEvent = {
-  type: 'project' | 'initiative' | 'ticket' | 'run' | 'message' | 'settings';
+  type: 'project' | 'initiative' | 'ticket' | 'run' | 'message' | 'settings' | 'usage';
   id: string;
   initiativeId?: string | null;
 };
+
+/** Tokens one agent session sent and received, as billed: cache writes and reads are separate prices. */
+export interface UsageTokens {
+  input: number;
+  cacheWrite: number;
+  cacheRead: number;
+  output: number;
+}
+
+/**
+ * One agent session in the usage ledger. It outlives its run: resetting or deleting an
+ * initiative removes runs, never the money they spent.
+ */
+export interface UsageSession {
+  sessionId: string;
+  runId: string | null;
+  initiativeId: string | null;
+  kind: string;
+  label: string | null;
+  model: string | null;
+  effort: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  requests: number;
+  tokens: UsageTokens;
+  costUsd: number;
+  /** What the claude CLI itself reported, when it got to report (a killed agent reports nothing). */
+  reportedCostUsd: number | null;
+  /** 'transcript': priced from every API response in the session's transcript; 'cli': only the CLI's own total was available. */
+  pricedFrom: 'transcript' | 'cli';
+  runStatus: string | null;
+  verdict: string | null;
+}
+
+export interface UsageBucket {
+  key: string;
+  costUsd: number;
+  sessions: number;
+}
+
+export interface UsageSummary {
+  from: string;
+  to: string;
+  costUsd: number;
+  sessions: number;
+  tokens: UsageTokens;
+  /** One entry per UTC day in the range, empty days included. */
+  byDay: UsageBucket[];
+  byKind: UsageBucket[];
+  byModel: UsageBucket[];
+}
+
+export interface UsageWeek {
+  /** Monday 00:00 UTC. */
+  weekStart: string;
+  costUsd: number;
+  sessions: number;
+}
 
 export type MachinePressure = 'ok' | 'load' | 'memory';
 

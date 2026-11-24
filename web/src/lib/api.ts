@@ -15,6 +15,9 @@ import type {
   Run,
   RunEvent,
   Ticket,
+  UsageSession,
+  UsageSummary,
+  UsageWeek,
 } from '@factory/shared';
 
 export class ApiError extends Error {
@@ -120,4 +123,13 @@ export const api = {
   run: (id: string) => get<Run>(`/api/runs/${id}`),
   runEvents: (id: string) => get<RunEvent[]>(`/api/runs/${id}/events`),
   cancelRun: (id: string) => post(`/api/runs/${id}/cancel`),
+  liveRuns: (streamId: string, body: { watch: { id: string; after: number }[]; unwatch: string[] }) =>
+    post<{ ok: true }>(`/api/stream/${streamId}/runs`, body),
+  usage: (from: Date, to: Date) => get<UsageSummary>(`/api/usage?${range(from, to)}`),
+  usageSessions: (from: Date, to: Date) => get<UsageSession[]>(`/api/usage/sessions?${range(from, to)}`),
+  usageWeeks: () => get<UsageWeek[]>('/api/usage/weeks'),
 };
+
+function range(from: Date, to: Date): string {
+  return new URLSearchParams({ from: from.toISOString(), to: to.toISOString() }).toString();
+}

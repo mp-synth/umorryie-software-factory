@@ -53,6 +53,16 @@ export function stoppedOnPurposeMark(): string {
   return path.join(config.home, 'stopped-on-purpose');
 }
 
+/** Per-ticket build count and the PR a rebuild keeps; outside the ticket folder, which a reset wipes. */
+export function rebuildStateFile(i: Initiative, ticketId: string): string {
+  return path.join(initiativeDir(i), 'rebuilds', `${ticketId}.json`);
+}
+
+/** Read-only checkouts of the project's base branches at origin's commit, shared by its initiatives. */
+export function baseCheckoutsDir(p: Project): string {
+  return path.join(config.home, 'worktrees', slugify(p.name, 30), '_base');
+}
+
 export function worktreePath(p: Project, i: Initiative, t: Ticket): string {
   return path.join(config.home, 'worktrees', slugify(p.name, 30), initiativeFolder(i), `${seqLabel(t.seq)}-${t.key}`);
 }

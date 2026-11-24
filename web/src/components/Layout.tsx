@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Activity, Factory, FolderGit2, LayoutDashboard, Plus, Settings2 } from 'lucide-react';
+import { Activity, CircleDollarSign, Factory, FolderGit2, LayoutDashboard, Plus, Settings2 } from 'lucide-react';
 import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { api } from '@/lib/api';
@@ -23,6 +23,7 @@ export function Layout() {
     { to: '/', label: 'Dashboard', icon: LayoutDashboard, badge: attention ? { n: attention, tone: 'bg-amber-400/15 text-amber-300' } : null },
     { to: '/agents', label: 'Agents', icon: Activity, badge: running ? { n: running, tone: 'bg-cyan-400/15 text-cyan-300' } : null },
     { to: '/projects', label: 'Projects', icon: FolderGit2, badge: null },
+    { to: '/usage', label: 'Usage', icon: CircleDollarSign, badge: null },
     { to: '/settings', label: 'Settings', icon: Settings2, badge: null },
   ];
 

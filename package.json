@@ -17,6 +17,7 @@
     "dev": "pnpm db:up && concurrently -k -n server,web -c magenta,cyan \"pnpm --filter @factory/server dev\" \"pnpm --filter @factory/web dev\"",
     "build": "pnpm --filter @factory/web build",
     "start": "pnpm db:up && pnpm build && pnpm --filter @factory/server start",
+    "service": "bash scripts/service.sh",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test"
   },

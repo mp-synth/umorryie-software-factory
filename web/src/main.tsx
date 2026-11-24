@@ -14,6 +14,7 @@ import { Dashboard } from './pages/Dashboard';
 import { InitiativePage } from './pages/InitiativePage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { UsagePage } from './pages/UsagePage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -29,6 +30,7 @@ const router = createBrowserRouter([
       { path: '/i/:id', element: <InitiativePage /> },
       { path: '/agents', element: <AgentsPage /> },
       { path: '/projects', element: <ProjectsPage /> },
+      { path: '/usage', element: <UsagePage /> },
       { path: '/settings', element: <SettingsPage /> },
     ],
   },

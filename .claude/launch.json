@@ -2,16 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "factory-server",
+      "name": "factory-web-check",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@factory/server", "dev"],
-      "port": 4317
-    },
-    {
-      "name": "factory-web",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@factory/web", "dev"],
-      "port": 5173
+      "runtimeArgs": ["--filter", "@factory/web", "exec", "vite", "--port", "5174", "--strictPort"],
+      "port": 5174
     }
   ]
 }

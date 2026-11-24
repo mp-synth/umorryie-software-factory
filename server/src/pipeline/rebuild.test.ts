@@ -45,3 +45,9 @@ test('stops rebuilding after the third build', () => {
   const second = ticket('per-video', `${wanted}-v2`);
   assert.equal(rebuildBlocker(second, wanted, [second]), null);
 });
+
+test('a rebuilt ticket that kept its branch still stops after the build limit', () => {
+  const ticket = { key: 'videos', branch: 'factory/i/04-videos' };
+  assert.equal(rebuildBlocker(ticket, 'factory/i/04-videos', [], 2), null);
+  assert.match(rebuildBlocker(ticket, 'factory/i/04-videos', [], 3) ?? '', /already built 3 times/);
+});

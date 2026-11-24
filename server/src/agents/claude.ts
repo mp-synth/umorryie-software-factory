@@ -114,8 +114,18 @@ export function makeScratchDir(): string | null {
   return null;
 }
 
+const PRODUCTION_VARIABLE = /(^|[^A-Z0-9])(PROD|PRD|PRODUCTION|LIVE)\d*([^A-Z0-9]|$)/i;
+
+export function isProductionVariable(name: string): boolean {
+  return PRODUCTION_VARIABLE.test(name);
+}
+
+function withoutProductionVariables(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => !isProductionVariable(name)));
+}
+
 export function isolatedAgentEnv(spec: Pick<AgentSpec, 'env'>, scratchDir: string | null): NodeJS.ProcessEnv {
-  return { ...freshAgentEnv(), ...spec.env, ...CONTEXT_FREE_SESSION, ...(scratchDir ? { TMPDIR: scratchDir } : {}) };
+  return { ...withoutProductionVariables({ ...freshAgentEnv(), ...spec.env }), ...CONTEXT_FREE_SESSION, ...(scratchDir ? { TMPDIR: scratchDir } : {}) };
 }
 
 function truncate(s: string, n: number): string {

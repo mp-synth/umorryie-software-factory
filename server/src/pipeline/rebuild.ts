@@ -13,10 +13,12 @@ export function earlierBranches(wanted: string, branch: string): string[] {
 
 type Dependent = Pick<Ticket, 'key' | 'dependsOn' | 'branch' | 'status'>;
 
-export function rebuildBlocker(ticket: Pick<Ticket, 'key' | 'branch'> & { prHeadRef?: string | null }, wanted: string, all: Dependent[]): string | null {
+// `builds` counts every build of the ticket: a rebuilt ticket keeps its branch (and PR), so the branch
+// name alone no longer tells how often it was built.
+export function rebuildBlocker(ticket: Pick<Ticket, 'key' | 'branch'> & { prHeadRef?: string | null }, wanted: string, all: Dependent[], builds = 1): string | null {
   if (ticket.prHeadRef) return 'It is your own PR, so the factory never rebuilds it: rewriting its history is your call.';
   const started = all.filter((t) => t.dependsOn.includes(ticket.key) && t.branch && t.status !== 'canceled');
   if (started.length) return `It is not rebuilt automatically because ${started.map((t) => t.key).join(', ')} already build on its branch.`;
-  if (buildNumber(wanted, ticket.branch ?? wanted) >= MAX_BUILDS) return `It is not rebuilt automatically because it was already built ${MAX_BUILDS} times.`;
+  if (Math.max(buildNumber(wanted, ticket.branch ?? wanted), builds) >= MAX_BUILDS) return `It is not rebuilt automatically because it was already built ${MAX_BUILDS} times.`;
   return null;
 }

@@ -112,6 +112,9 @@ verdict per finding inside its single reply.
   the failure and after it to confirm they pass. Run no other tests, even
   when the repo's docs say to: the rest run in CI on the PR.
 - Then run the checks command from your prompt; it must pass.
+- When a fix changes behaviour that reaches a live dev service your prompt
+  lists, re-run the matching live check from build.md's `## Live validation`
+  (read-only, never production) and put its result under `## Validation`.
 - Commits: one per logical fix (items that are the same fix share one), in
   the repo's style (default `fix: <summary>`), staging explicit paths. Run the
   repo's formatter on the files you changed; when it reformats lines you

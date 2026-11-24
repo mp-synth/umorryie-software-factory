@@ -2,19 +2,28 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ACTIVE_TICKET_STATUSES, DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, SIDE_RUN_KINDS, isSideRun, type AppSettings, type CapacityStatus, type Initiative, type MachinePressure, type Message, type Project, type Rule, type RuleRole, type RuleScope, type Run, type RunKind, type Ticket } from '@factory/shared';
 import { agentEnvironment, type AgentEnvironment, type Redact } from '../agent-env.ts';
+import { agentLiveServicesNote } from '../live-services.ts';
 import { ROOT, config } from '../config.ts';
 import { sql } from '../db.ts';
 import { emitChange } from '../events.ts';
 import { repoShellEnv } from '../shell-env.ts';
-import { attachAgent, claudeVersion, startDetachedAgent, type AgentResult, type AgentSink, type AgentSpec, type DetachedAgentHandle } from '../agents/claude.ts';
+import { recordRunUsage } from '../usage.ts';
+import { attachAgent, claudeVersion, isProductionVariable, startDetachedAgent, type AgentResult, type AgentSink, type AgentSpec, type DetachedAgentHandle } from '../agents/claude.ts';
 import { LeftRunning, abandonSpool, followCommand, launchSpooled, removeSpool, spoolFate, wasLaunched, type CommandOutcome, type SpoolHandle, type SpoolOffsets } from '../agents/spool.ts';
 import * as gitx from '../git.ts';
 import * as gh from '../github.ts';
 import * as repo from '../repo.ts';
+import { baseCheckout } from './base-checkout.ts';
+import { readRebuildState, stateAfterReset, writeRebuildState, type ReusedPr } from './pr-reuse.ts';
+import { CI_POLL_MS, CiHeadsSeen, ciSettledRed, ciWorthPolling } from './ci-poll.ts';
+import { BASE_WATCH_MS, BaseHeads, MERGEABILITY_RECHECK_MS, MergeabilityRechecks, SWEEP_AFTER_BASE_MOVE_MS, parseLsRemote } from './base-watch.ts';
+import { SweepSchedule } from './sweep-schedule.ts';
 import {
   arbiterDir,
   askDir,
+  baseCheckoutsDir,
   branchName,
+  rebuildStateFile,
   initiativeDir,
   planRoundDir,
   readIfExists,
@@ -36,6 +45,7 @@ import {
   writeTicket,
 } from './files.ts';
 import { dependencyReady } from './readiness.ts';
+import { removeLinks, resolveLinks } from './links.ts';
 import { mergedTicketCleanups } from './cleanup.ts';
 import { gateBody } from './gate-output.ts';
 import { gateResult, parseAcceptance, reviewComment } from './verification.ts';
@@ -59,13 +69,14 @@ import { seqLabel, ticketLabel } from './labels.ts';
 import { adoptablePrs, adoptedTicket, remoteBranchOf } from './adopted-prs.ts';
 import { pullRequestText } from './pull-request.ts';
 import { earlierBranches, rebuildBlocker } from './rebuild.ts';
+import { planTicketSeqs, renameCanceledKeys, replanAwaitsAnswers, revisePlannedTickets, wasApproved } from './replan.ts';
 import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, section, slugify, stackDependencies, topoOrder, validatePlan } from './plan.ts';
 import { sizeNote } from './size.ts';
 import { malformedVerdictReason, outputFailure, parseVerdict } from './verdict.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
 import { describeIgnored, describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
-import { MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, ruleFile, type AgentKind } from './role-prompt.ts';
+import { BASE_COMMIT_FIELD, MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, ruleFile, type AgentKind } from './role-prompt.ts';
 import { hasHumanPrItems, isSteering, oneLine, parseProposedRules, renderTimeline, retroSummary, withLearnedRule, withoutLearnedRule } from './retro.ts';
 import { parseRoutes, renderTicketsForSteering, routeBlocker, routeReason, routesByTicket } from './steer.ts';
 import { HELD_REASON, INTERRUPTED_REASON, ORPHAN_INITIATIVE_STATUSES, ORPHAN_REASON, orphanRunKind, restingInitiativeStatus, restingTicketStatus, shouldResumeInterrupted, startupFate, type StartupFate } from './recovery.ts';
@@ -216,18 +227,13 @@ function copyExisting(fromDir: string, toDir: string, names: string[]): void {
   }
 }
 
-let cachedGhUser: string | null = null;
-async function ghUserOnce(): Promise<string | null> {
-  cachedGhUser ??= await gh.ghUser();
-  return cachedGhUser;
-}
-
 export async function enqueue(opts: {
   kind: RunKind;
   initiativeId: string;
   ticketId?: string | null;
   trigger: 'auto' | 'manual';
   question?: string;
+  replan?: boolean;
 }): Promise<Run> {
   const init = await mustInitiative(opts.initiativeId);
   const s = repo.initiativeSettings(init);
@@ -243,8 +249,8 @@ export async function enqueue(opts: {
 
   if (!ticketId) {
     if (opts.kind === 'plan') {
-      if (['in_progress', 'done'].includes(init.status)) {
-        throw new PipelineError('the plan is approved and tickets exist; reset the initiative to plan again');
+      if (['in_progress', 'done'].includes(init.status) && !opts.replan) {
+        throw new PipelineError('the plan is approved and tickets exist; send feedback to revise it, or reset the initiative to plan again');
       }
       round = init.planRound + 1;
       model = s.models.plan;
@@ -450,6 +456,7 @@ async function tick(): Promise<void> {
 export function startScheduler(): void {
   setInterval(() => void tick(), 1500).unref();
   setInterval(() => void autoSyncPrs(), 5 * 60_000).unref();
+  setInterval(() => void pollRunningCi(), CI_POLL_MS).unref();
   const sweepInBackground = async () => {
     try {
       if ((await repo.getAppSettings()).sweepOpenPrs) await sweepOpenPrs();
@@ -459,6 +466,7 @@ export function startScheduler(): void {
   };
   setInterval(sweepInBackground, PR_SWEEP_INTERVAL_MINUTES * 60_000).unref();
   setTimeout(sweepInBackground, 60_000).unref();
+  setInterval(() => void watchBases(), BASE_WATCH_MS).unref();
   kick();
 }
 
@@ -578,7 +586,8 @@ async function revertAfterStop(run: StoppedStep, reason: string | null, failed =
   if (!run.ticketId) {
     const init = await repo.getInitiative(run.initiativeId);
     if (!init) return;
-    await repo.updateInitiative(init.id, { status: restingInitiativeStatus(run.kind, !!init.planJson, failed) });
+    if (run.kind === 'plan' && (await hasApprovedTickets(init.id))) await resumeApprovedPlan(init.id);
+    else await repo.updateInitiative(init.id, { status: restingInitiativeStatus(run.kind, !!init.planJson, failed) });
     if (reason) await systemMessage(run, reason);
     return;
   }
@@ -602,11 +611,15 @@ function environmentNote(environment: AgentEnvironment, referenceDirs: string[])
     lines.push(`Reference checkouts you may read for the source of what this repo integrates with (never edit them): ${referenceDirs.join(', ')}`);
   }
   const names = Object.keys(environment.vars);
-  if (names.length) {
+  const usable = names.filter((n) => !isProductionVariable(n));
+  if (usable.length) {
     lines.push(
-      `Your shell already has these variables from the repo's env files: ${names.join(', ')}. Use them as $NAME in commands; never print, echo, log, write or commit their values.`,
+      `Your shell already has these variables from the repo's env files: ${usable.join(', ')}. Use them as $NAME in commands; never print, echo, log, write or commit their values.`,
     );
   }
+  const production = names.filter(isProductionVariable);
+  if (production.length) lines.push(`Production variables removed from your shell, and off limits: ${production.join(', ')}.`);
+  lines.push(...agentLiveServicesNote());
   return lines;
 }
 
@@ -729,8 +742,55 @@ async function collectAgent(run: Run, handle: DetachedAgentHandle, snapshot: Age
     summary: result.resultText?.trim().slice(0, 500) ?? null,
     headSha: diffsTicket ? await gitx.headSha(cwd) : null,
   });
+  noteUsage(run.id);
   const worktreeChanges = snapshot.worktreeBefore ? gitx.worktreeChanges(snapshot.worktreeBefore, await gitx.worktreeState(cwd)) : [];
   return { output, result, worktreeChanges };
+}
+
+function linksDir(init: Initiative): string {
+  return path.join(initiativeDir(init), 'links');
+}
+
+function linkMirrorsRoot(): string {
+  return path.join(config.home, 'link-mirrors');
+}
+
+function siblingDirs(repoPath: string): string[] {
+  const parent = path.dirname(repoPath);
+  try {
+    return fs.readdirSync(parent, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => path.join(parent, d.name));
+  } catch {
+    return [];
+  }
+}
+
+// Every URL in the brief, the project notes and the owner's messages becomes a local
+// read-only copy before the agent starts: GitHub PRs, files, commits and repos as
+// checkouts at the exact commit (with the PR's description and diff), other pages as
+// text. Never blocks the run: what can't be fetched is listed for the agent to try.
+async function linkedReferences(run: Run, init: Initiative, project: Project): Promise<string | null> {
+  try {
+    const messages = await repo.listMessages(init.id);
+    const { file, links, dropped } = await resolveLinks(
+      { pinned: [init.brief, project.notes ?? ''], messages: messages.filter((m) => m.author === 'human' && m.kind !== 'event').map((m) => m.body) },
+      {
+        dir: linksDir(init),
+        mirrorsRoot: linkMirrorsRoot(),
+        projectRepo: project.repoPath,
+        localCandidates: [...(project.referenceDirs ?? []), ...siblingDirs(project.repoPath)],
+      },
+    );
+    if (!file) return null;
+    const failed = links.filter((l) => l.error);
+    await log(
+      run,
+      `Linked references: ${links.length - failed.length} of ${links.length} fetched${failed.length ? ` (could not fetch ${failed.map((l) => l.url).join(', ')})` : ''}${dropped.length ? ` (over the limit, not fetched: ${dropped.join(', ')})` : ''} · ${file}`,
+    );
+    return file;
+  } catch (err) {
+    await log(run, `Could not fetch the linked references: ${(err as Error).message}`);
+    return null;
+  }
 }
 
 async function runAgent<K extends AgentKind>(
@@ -755,10 +815,15 @@ async function runAgent<K extends AgentKind>(
   const guidance = await writeRepoGuidance(opts.cwd, opts.runDir);
   const init = await mustInitiative(run.initiativeId);
   const project = await mustProject(init.projectId);
+  const links = await linkedReferences(run, init, project);
   const spec = projectAgentSpec(project, app, {
     kind: opts.kind,
     cwd: opts.cwd,
-    prompt: guidance ? `${opts.prompt}\nRepo guidance (rules Claude Code doesn't load by itself; read it before you start): ${guidance}` : opts.prompt,
+    prompt: [
+      opts.prompt,
+      ...(guidance ? [`Repo guidance (rules Claude Code doesn't load by itself; read it before you start): ${guidance}`] : []),
+      ...(links ? [`Links the owner gave (PRs, code in other repos, pages), fetched as local read-only copies; read the ones that bear on your task before you start: ${links}`] : []),
+    ].join('\n'),
     model,
     effort: run.effort,
     roleFile: opts.roleFile,
@@ -861,18 +926,22 @@ async function runPlan(run: Run): Promise<void> {
   if (lastReview?.outputMd && (!lastPlan || ts(lastReview.queuedAt) > ts(lastPlan.queuedAt)) && parseVerdict('plan_review', lastReview.verdict) === 'REVISE') {
     inputs.push(write(path.join(dir, 'plan-review.md'), lastReview.outputMd));
   }
+  if (lastPlan?.outputMd && lastPlan.outputMd !== init.planMd && replanAwaitsAnswers(lastPlan, init.approvedAt)) {
+    inputs.push(write(path.join(dir, 'planner-questions.md'), lastPlan.outputMd));
+  }
   const errorsFile = path.join(dir, 'plan-errors.md');
   if (fs.existsSync(errorsFile)) inputs.push(errorsFile);
   const feedback = await repo.pendingFeedback(init.id, null);
   if (feedback.length) inputs.push(writeFeedback(dir, feedback, 'the plan'));
+  inputs.push(...(await writeApprovedTickets(init, dir)));
 
   const planMd = path.join(dir, 'plan.md');
   const planJson = path.join(dir, 'plan.json');
+  const base = await readOnlyBase(run, init, project);
   const prompt = header(
     `Factory step: plan. Initiative: ${init.title}`,
     [
-      ['Main checkout (read-only)', project.repoPath],
-      ['Base branch', init.baseBranch],
+      ...base.fields,
       ['Round', String(run.round)],
       ['Checks command', checksCommandIn(project, null)],
       ['Limits', `at most ${s.maxTickets} tickets`],
@@ -881,7 +950,7 @@ async function runPlan(run: Run): Promise<void> {
     [planMd, planJson],
     'Reply with one line: the first line of plan.md, then " · <n> tickets".',
   );
-  await runAgent(run, { kind: 'plan', cwd: project.repoPath, prompt, runDir: dir, outputPath: planMd }, { feedbackIds: feedback.map((f) => f.id) });
+  await runAgent(run, { kind: 'plan', cwd: base.cwd, prompt, runDir: dir, outputPath: planMd }, { feedbackIds: feedback.map((f) => f.id) });
 }
 
 async function afterPlan(run: Run, step: StepResult, state: StepStates['plan']): Promise<void> {
@@ -896,11 +965,20 @@ async function afterPlan(run: Run, step: StepResult, state: StepStates['plan']):
   const planVerdict = parseVerdict('plan', output);
   if (!planVerdict) return failMalformedVerdict(run, output);
   await repo.consumeFeedback(state.feedbackIds, run.id);
+  const existingTickets = await repo.listTickets(init.id);
+  const replanning = existingTickets.some(wasApproved);
 
   if (planVerdict === 'BLOCKED') {
     await finish(run, 'succeeded');
+    const questions = section(output, 'Blocked') ?? output;
+    if (replanning) {
+      await repo.updateInitiative(init.id, { planRound: run.round });
+      await resumeApprovedPlan(init.id);
+      await agentMessage(run, `**The planner needs answers before it can revise the plan.** The approved plan stays in force and no new ticket starts; your reply goes to the planner.\n\n${questions}`);
+      return;
+    }
     await repo.updateInitiative(init.id, { status: 'needs_input', planMd: output, planVerdict: verdict, planRound: run.round });
-    await agentMessage(run, `**The planner needs answers before it can plan.**\n\n${section(output, 'Blocked') ?? output}`);
+    await agentMessage(run, `**The planner needs answers before it can plan.**\n\n${questions}`);
     return;
   }
 
@@ -910,36 +988,41 @@ async function afterPlan(run: Run, step: StepResult, state: StepStates['plan']):
   } catch {
     raw = null;
   }
+  const canceledKeys = new Set(existingTickets.filter((t) => t.status === 'canceled').map((t) => t.key));
+  const renaming = renameCanceledKeys(raw, canceledKeys, new Set(existingTickets.map((t) => t.key)));
+  raw = renaming.raw;
   const { plan, order, errors } = raw ? validatePlan(raw, s.maxTickets) : { errors: ['plan.json is missing or not valid JSON'] };
   if (!plan || !order || errors.length) {
     await finish(run, 'failed', { error: `plan.json rejected: ${errors.slice(0, 5).join('; ')}` });
     const previousRejections = await sql<{ n: number }[]>`
       select count(*)::int as n from runs where initiative_id = ${init.id} and kind = 'plan' and status = 'failed' and error like 'plan.json rejected%'
         and queued_at > coalesce((select max(queued_at) from runs where initiative_id = ${init.id} and kind = 'plan' and status = 'succeeded'), 'epoch')`;
+    const errorList = errors.map((e) => `- ${e}`).join('\n');
     if ((previousRejections[0]?.n ?? 0) <= 2) {
-      await repo.updateInitiative(init.id, { planRound: run.round, planMd: output });
+      await repo.updateInitiative(init.id, { planRound: run.round, ...(replanning ? {} : { planMd: output }) });
       const next = await repo.getInitiative(init.id);
-      write(
-        path.join(planRoundDir(next!, run.round + 1), 'plan-errors.md'),
-        `# plan.json was rejected\n\nFix every error and write both files again.\n\n${errors.map((e) => `- ${e}`).join('\n')}\n`,
-      );
-      await repo.updateInitiative(init.id, { status: 'draft' });
+      write(path.join(planRoundDir(next!, run.round + 1), 'plan-errors.md'), `# plan.json was rejected\n\nFix every error and write both files again.\n\n${errorList}\n`);
+      if (!replanning) await repo.updateInitiative(init.id, { status: 'draft' });
       await systemMessage(run, `plan.json was rejected (${errors.length} errors); a fresh planner will fix it.`);
-      await enqueue({ kind: 'plan', initiativeId: init.id, trigger: 'auto' });
+      await enqueue({ kind: 'plan', initiativeId: init.id, trigger: 'auto', replan: replanning });
+    } else if (replanning) {
+      await resumeApprovedPlan(init.id);
+      await systemMessage(run, `The planner produced an invalid plan.json three times, so the approved plan stays in force:\n\n${errorList}`);
     } else {
       await repo.updateInitiative(init.id, { status: 'failed' });
-      await systemMessage(run, `The planner produced an invalid plan.json three times:\n\n${errors.map((e) => `- ${e}`).join('\n')}`);
+      await systemMessage(run, `The planner produced an invalid plan.json three times:\n\n${errorList}`);
     }
     return;
   }
 
+  const seqs = planTicketSeqs(order, existingTickets);
   await sql.begin(async (tx) => {
     await tx`delete from tickets where initiative_id = ${init.id} and status = 'proposed'`;
     for (const o of order) {
       const t = plan.tickets.find((x) => x.key === o.key)!;
       await tx`
         insert into tickets (initiative_id, key, seq, wave, title, what, goal, outcome, guidance, acceptance, depends_on, size, status)
-        values (${init.id}, ${t.key}, ${o.seq}, ${o.wave}, ${t.title}, ${t.what}, ${t.goal}, ${t.outcome},
+        values (${init.id}, ${t.key}, ${seqs.get(o.key)!}, ${o.wave}, ${t.title}, ${t.what}, ${t.goal}, ${t.outcome},
           ${tx.json(t.guidance)}, ${tx.json(t.acceptance)}, ${tx.json(t.depends_on)}, ${t.size}, 'proposed')
         on conflict (initiative_id, key) do nothing`;
     }
@@ -956,7 +1039,10 @@ async function afterPlan(run: Run, step: StepResult, state: StepStates['plan']):
     status: s.autoPlanReview ? 'plan_review' : 'awaiting_approval',
   });
   const pathsNote = missing.length ? `\n\n${missing.length} path${missing.length > 1 ? 's' : ''} named in ticket guidance not found at the base (see plan-paths.md).` : '';
-  await agentMessage(run, `**Plan round ${run.round} is ready** — ${plan.tickets.length} tickets.\n\n${plan.summary.map((b) => `- ${b}`).join('\n')}${pathsNote}`);
+  const renameNote = renaming.renamed.length
+    ? `\n\n${renaming.renamed.map(([from, to]) => `\`${from}\` is the key of a canceled ticket, so the new ticket is \`${to}\`.`).join(' ')}`
+    : '';
+  await agentMessage(run, `**Plan round ${run.round} is ready** — ${plan.tickets.length} tickets.\n\n${plan.summary.map((b) => `- ${b}`).join('\n')}${pathsNote}${renameNote}`);
   if (s.autoPlanReview) await enqueue({ kind: 'plan_review', initiativeId: init.id, trigger: 'auto' });
 }
 
@@ -976,20 +1062,25 @@ async function runPlanReview(run: Run): Promise<void> {
   }
   const pathsFile = path.join(dir, 'plan-paths.md');
   if (fs.existsSync(pathsFile)) inputs.push(pathsFile);
+  const approvedTickets = await writeApprovedTickets(init, dir);
+  inputs.push(...approvedTickets);
   const out = path.join(dir, 'plan-review.md');
+  const base = await readOnlyBase(run, init, project);
   const prompt = header(
     `Factory step: plan-review. Initiative: ${init.title}`,
     [
-      ['Main checkout (read-only)', project.repoPath],
-      ['Base branch', init.baseBranch],
+      ...base.fields,
       ['Plan round', String(init.planRound)],
       ['Ticket limit', String(s.maxTickets)],
+      ...(approvedTickets.length
+        ? [['Re-plan', 'this revises an approved plan; tickets.md lists the tickets already approved. A ticket the revision does not mean to change keeps its text word for word, and merged tickets stay as they are.'] as [string, string]]
+        : []),
     ],
     inputs,
     [out],
     'Reply with one line: the first line of plan-review.md.',
   );
-  await runAgent(run, { kind: 'plan_review', cwd: project.repoPath, prompt, runDir: dir, outputPath: out }, {});
+  await runAgent(run, { kind: 'plan_review', cwd: base.cwd, prompt, runDir: dir, outputPath: out }, {});
 }
 
 async function afterPlanReview(run: Run, step: StepResult): Promise<void> {
@@ -1016,11 +1107,91 @@ async function afterPlanReview(run: Run, step: StepResult): Promise<void> {
   }
 }
 
-async function startApprovedPlan(initiativeId: string, approval: Pick<Message, 'author' | 'body'> & { runId?: string }): Promise<void> {
-  await sql`update tickets set status = 'todo', updated_at = now() where initiative_id = ${initiativeId} and status = 'proposed'`;
-  await repo.updateInitiative(initiativeId, { status: 'in_progress', approvedAt: new Date().toISOString() });
-  await repo.addMessage({ initiativeId, kind: 'approval', ...approval });
-  await startReadyTickets(initiativeId);
+const applyingRevisedPlans = new Set<string>();
+
+// Returns false when another approval claimed the plan first.
+async function startApprovedPlan(init: Initiative, approval: Pick<Message, 'author' | 'body'> & { runId?: string }): Promise<boolean> {
+  await refreshPrStates(init);
+  if (!(await repo.moveInitiativeStatus(init.id, init.status, 'in_progress'))) return false;
+  applyingRevisedPlans.add(init.id);
+  let revised: string[];
+  try {
+    revised = await applyRevisedPlan(init);
+    await sql`update tickets set status = 'todo', updated_at = now() where initiative_id = ${init.id} and status = 'proposed'`;
+  } finally {
+    applyingRevisedPlans.delete(init.id);
+  }
+  await repo.updateInitiative(init.id, { approvedAt: new Date().toISOString() });
+  await repo.addMessage({ initiativeId: init.id, kind: 'approval', ...approval });
+  if (revised.length) await systemMessage({ initiativeId: init.id }, `The revised plan replaces the earlier one:\n\n${revised.map((l) => `- ${l}`).join('\n')}`);
+  await startReadyTickets(init.id);
+  return true;
+}
+
+// A plan revised after approval: rebuild the started tickets whose text changed (and the
+// ones stacked on them), restart unstarted ones from their new text, drop the rest.
+// Each revised ticket gets its new text, as a proposed ticket, before anything else touches it.
+async function applyRevisedPlan(init: Initiative): Promise<string[]> {
+  const { plan, order } = init.planJson ? validatePlan(init.planJson, repo.initiativeSettings(init).maxTickets) : {};
+  if (!plan || !order) return [];
+  const { keep, rebuild, restart, drop } = revisePlannedTickets(plan.tickets, order, await repo.listTickets(init.id));
+  if (!rebuild.length && !restart.length && !drop.length) return [];
+  const project = await mustProject(init.projectId);
+  const notes: string[] = [];
+  const reviseText = (t: Ticket): Promise<Ticket> => {
+    const { spec, order: o } = keep.find((k) => k.ticket.id === t.id)!;
+    return repo.updateTicket(t.id, {
+      title: spec.title,
+      what: spec.what,
+      goal: spec.goal,
+      outcome: spec.outcome,
+      guidance: spec.guidance,
+      acceptance: spec.acceptance,
+      dependsOn: spec.depends_on,
+      size: spec.size,
+      wave: o.wave,
+      status: 'proposed',
+      blockedReason: null,
+    });
+  };
+  const closeOldPr = async (t: Ticket, why: string): Promise<string> => {
+    if (!t.prNumber) return '';
+    const live = await gh.prSnapshot(project.repoPath, t.prNumber).catch(() => null);
+    if (!live) return `, but ${t.prUrl} could not be read, so it was left as is`;
+    if (live.state !== 'OPEN') return '';
+    try {
+      await gh.closePr(project.repoPath, t.prNumber, why);
+      await repo.updateTicket(t.id, { prState: 'CLOSED' });
+      return `, ${t.prUrl} closed`;
+    } catch (err) {
+      return `, but ${t.prUrl} could not be closed (${(err as Error).message})`;
+    }
+  };
+
+  for (const t of drop) {
+    await cancelActive({ initiativeId: init.id, ticketId: t.id });
+    await gitx.removeWorktree(project.repoPath, t.worktreePath, t.branch);
+    const closed = await closeOldPr(t, 'Closed: the revised plan no longer needs this change.');
+    await repo.updateTicket(t.id, { status: 'canceled', worktreePath: null });
+    notes.push(`${ticketLabel(t)}: dropped${closed}.`);
+  }
+  for (const t of [...rebuild].sort((a, b) => b.seq - a.seq)) {
+    const updated = await reviseText(t);
+    await resetTicket(t.id);
+    write(
+      path.join(ticketRoundDir(init, updated, 1), 'rebuild.md'),
+      [
+        '# Build this ticket again from its base',
+        '',
+        'The owner revised the plan after this ticket was built: its text changed, or a ticket it builds on was rebuilt or dropped.',
+        'The factory removed its local branch. Build the ticket as it reads now, from its base; when you are done, the factory puts your result on top of the PR this ticket already has, as one new commit.',
+      ].join('\n'),
+    );
+    const kept = t.prUrl && t.prState === 'OPEN' ? `; ${t.prUrl} stays open and gets the rebuilt code` : '';
+    notes.push(`${ticketLabel(updated)}: rebuilt from its base to the revised ticket${kept}.`);
+  }
+  for (const t of restart) notes.push(`${ticketLabel(await reviseText(t))}: starts from the revised text.`);
+  return notes;
 }
 
 export async function approvePlan(initiativeId: string, note?: string): Promise<void> {
@@ -1030,19 +1201,21 @@ export async function approvePlan(initiativeId: string, note?: string): Promise<
   }
   if (await activeRunFor(init.id, null, ['plan', 'plan_review'])) throw new PipelineError('a planning agent is still running');
   await stopArbiterFor(init.id, null);
-  await startApprovedPlan(init.id, { author: 'human', body: note?.trim() ? `Approved the plan. ${note.trim()}` : 'Approved the plan.' });
+  const started = await startApprovedPlan(init, { author: 'human', body: note?.trim() ? `Approved the plan. ${note.trim()}` : 'Approved the plan.' });
+  if (!started) throw new PipelineError('the plan was approved already', 409);
 }
 
 export async function requestPlanChanges(initiativeId: string, feedback: string): Promise<void> {
   const init = await mustInitiative(initiativeId);
   await repo.addMessage({ initiativeId: init.id, author: 'human', kind: 'feedback', body: feedback });
-  await enqueue({ kind: 'plan', initiativeId: init.id, trigger: 'manual' });
+  await enqueue({ kind: 'plan', initiativeId: init.id, trigger: 'manual', replan: LIVE_INITIATIVE_STATUSES.includes(init.status) });
 }
 
 export async function startReadyTickets(initiativeId: string, manual = false): Promise<number> {
   const init = await mustInitiative(initiativeId);
   if (init.status !== 'in_progress') return 0;
   if (!manual && !repo.initiativeSettings(init).autoExecute) return 0;
+  if (applyingRevisedPlans.has(init.id) || (await replanInFlight(init))) return 0;
   const tickets = await repo.listTickets(init.id);
   let started = 0;
   for (const t of tickets) {
@@ -1142,6 +1315,28 @@ async function prepareWorktree(run: Run, init: Initiative, project: Project, tic
   await concludeSetup(run, setup, marker);
 }
 
+/** Where a step without a ticket worktree reads the repo: a checkout of the base branch at origin's commit, or the main checkout when that can't be made. */
+async function readOnlyBase(run: Run, init: Initiative, project: Project): Promise<{ cwd: string; fields: [string, string][] }> {
+  try {
+    const base = await baseCheckout(project.repoPath, baseCheckoutsDir(project), init.baseBranch, {
+      heavy: (work) => heavyLocalWork(run, 'check out the base branch', work),
+      copyFiles: project.copyFiles ?? [],
+      inUse: async () => (await sql<{ cwd: string }[]>`select cwd from runs where status in ('queued', 'running') and cwd is not null`).map((r) => r.cwd),
+    });
+    return {
+      cwd: base.dir,
+      fields: [
+        ['Base checkout (read-only)', base.dir],
+        ['Base branch', init.baseBranch],
+        [BASE_COMMIT_FIELD, `${base.ref} at ${base.sha.slice(0, 12)}, fetched just now. The main checkout may be older, so read the base checkout`],
+      ],
+    };
+  } catch (err) {
+    await log(run, `Could not check out ${init.baseBranch} as origin has it, so this step reads the main checkout: ${(err as Error).message}`);
+    return { cwd: project.repoPath, fields: [['Main checkout (read-only)', project.repoPath], ['Base branch', init.baseBranch]] };
+  }
+}
+
 async function fetchPrHead(project: Project, ticket: Ticket): Promise<void> {
   const head = ticket.prHeadRef!;
   const fetch = () => gitx.fetchOrigin(project.repoPath, { refs: [gitx.trackingRefspec(head)] });
@@ -1198,8 +1393,11 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
   const parentBranch = stackBase(ticket, await repo.listTickets(init.id))?.branch;
   const baseRef = parentBranch ?? (await gitx.resolveBaseRef(project.repoPath, init.baseBranch));
   const prBase = parentBranch ?? init.baseBranch;
-  const started = await startedWorktreeBranch(run, project, wt, baseRef, branchName(init, ticket));
-  const branch = started ?? (await uniqueBranch(project.repoPath, branchName(init, ticket)));
+  // A rebuilt ticket keeps the branch of the PR it already has, built again from the base here.
+  const reuse = readRebuildState(rebuildStateFile(init, ticket.id)).reuse;
+  const started = await startedWorktreeBranch(run, project, wt, baseRef, reuse?.branch ?? branchName(init, ticket));
+  if (!started && reuse) await gitx.removeWorktree(project.repoPath, null, reuse.branch);
+  const branch = started ?? reuse?.branch ?? (await uniqueBranch(project.repoPath, branchName(init, ticket)));
   await log(run, started ? `Carrying on with the worktree an earlier attempt started on ${branch}` : `Creating worktree ${wt} on ${branch} from ${baseRef}`);
   if (started) await gitx.checkOutAgain(wt, checkout);
   else await gitx.ensureWorktree(project.repoPath, wt, branch, baseRef, checkout);
@@ -1454,6 +1652,10 @@ async function publish(run: Run, init: Initiative, project: Project, ticket: Tic
     return false;
   }
   const remoteBranch = remoteBranchOf(ticket)!;
+  const stateFile = rebuildStateFile(init, ticket.id);
+  const rebuilt = readRebuildState(stateFile);
+  const reuse = rebuilt.reuse?.branch === remoteBranch ? rebuilt.reuse : null;
+  if (reuse) await carryOntoKeptPr(run, project, ticket, reuse);
   const pushed = await gitx.push(ticket.worktreePath!, ticket.branch!, remoteBranch);
   if (pushed.code !== 0) {
     const why = (pushed.stderr || pushed.stdout).trim().slice(0, 1000);
@@ -1472,12 +1674,15 @@ async function publish(run: Run, init: Initiative, project: Project, ticket: Tic
     return true;
   }
   const found = await gh.findPr(ticket.worktreePath!, ticket.branch!);
-  if (found && found.state === 'OPEN') {
-    await stackPr(run, init, await repo.updateTicket(ticket.id, { prNumber: found.number, prUrl: found.url, prState: found.state }), ticket.worktreePath!);
-    return true;
-  }
   const build = await repo.latestRun(init.id, ticket.id, 'execute');
   const { title, body } = pullRequestText(build?.outputMd, ticket);
+  if (reuse) writeRebuildState(stateFile, { ...rebuilt, reuse: null });
+  if (found && found.state === 'OPEN') {
+    const linked = await repo.updateTicket(ticket.id, { prNumber: found.number, prUrl: found.url, prState: found.state });
+    if (reuse?.prNumber === found.number) await describeRebuiltPr(run, init, linked, { title, body });
+    await stackPr(run, init, linked, ticket.worktreePath!);
+    return true;
+  }
   const { pr, error } = await gh.createPr(ticket.worktreePath!, { base: ticket.baseRef ?? init.baseBranch, head: ticket.branch!, title, body });
   if (pr) {
     const opened = await repo.updateTicket(ticket.id, { prNumber: pr.number, prUrl: pr.url, prState: 'OPEN', prDraft: true });
@@ -1509,6 +1714,11 @@ async function applyStackStep(cwd: string, step: StackStep): Promise<number | nu
       return step.stack;
     case 'taken':
       return null;
+    case 'restack': {
+      const kept = await gh.unstack(cwd, step.stack);
+      if (kept.length) throw new Error(`GitHub kept ${kept.map((n) => `#${n}`).join(', ')} in stack ${step.stack} (merged or queued for merge), so it can't be made again`);
+      return (await gh.createStack(cwd, step.prs)).number;
+    }
   }
 }
 
@@ -1535,6 +1745,32 @@ async function stackPr(scope: MessageScope, init: Initiative, ticket: Ticket, cw
     const why = `${ticketLabel(ticket)}: could not link the PR into a GitHub stack: ${(err as Error).message}`;
     if (background) console.warn('[stackPr]', why);
     else await systemMessage(scope, why);
+  }
+}
+
+// The rebuilt branch starts at the base while the PR's branch still holds the earlier build. One commit
+// on top of the earlier head, holding the rebuilt tree, makes the push a fast-forward: the PR keeps its
+// number, its place in the stack and its discussion, and nothing pushed before is rewritten.
+async function carryOntoKeptPr(run: Run, project: Project, ticket: Ticket, reuse: ReusedPr): Promise<void> {
+  const fetched = await gitx.fetchOrigin(project.repoPath, { refs: [gitx.trackingRefspec(reuse.branch)] });
+  if (fetched.code !== 0) {
+    await log(run, `Could not fetch ${reuse.branch} to keep #${reuse.prNumber}: ${(fetched.stderr || fetched.stdout).trim().slice(0, 300)}`);
+    return;
+  }
+  const build = await repo.latestRun(ticket.initiativeId, ticket.id, 'execute');
+  const { title } = pullRequestText(build?.outputMd, ticket);
+  const message = `${title}\n\nThe ticket was built again from its base. This commit puts the rebuilt code on top of the PR's earlier commits, replacing their changes, so the PR keeps its history.`;
+  const carried = await gitx.carryTreeOnto(ticket.worktreePath!, `origin/${reuse.branch}`, message);
+  if (carried) await log(run, `Put the rebuilt code on top of ${reuse.branch} as ${carried.slice(0, 10)}, so #${reuse.prNumber} stays the PR.`);
+}
+
+async function describeRebuiltPr(run: Run, init: Initiative, ticket: Ticket, text: { title: string; body: string }): Promise<void> {
+  try {
+    await gh.editPr(ticket.worktreePath!, ticket.prNumber!, text);
+    await gh.retargetPr(ticket.worktreePath!, ticket.prNumber!, ticket.baseRef ?? init.baseBranch);
+    await systemMessage(run, `${ticketLabel(ticket)} was rebuilt on its existing PR ${ticket.prUrl}, with a new title and description.`);
+  } catch (err) {
+    await systemMessage(run, `${ticketLabel(ticket)}: the rebuilt code is on ${ticket.prUrl}, but its title, description or base could not be updated: ${(err as Error).message}`);
   }
 }
 
@@ -1658,7 +1894,7 @@ function fixedAt(fix: Run | undefined): number | null {
   return fix ? ts(fix.queuedAt) : null;
 }
 
-async function recordCi(ticket: Ticket, snap: gh.PrSnapshot): Promise<void> {
+async function recordCi(ticket: Ticket, snap: Pick<gh.PrSnapshot, 'headRefOid' | 'failingChecks' | 'pendingChecks' | 'finishedChecks'>): Promise<void> {
   const ciState = gh.ciStateOf(snap);
   if (ticket.ciState === ciState && ticket.ciHeadSha === snap.headRefOid) return;
   await repo.updateTicket(ticket.id, { ciState, ciHeadSha: snap.headRefOid });
@@ -1670,10 +1906,9 @@ async function pendingPrWork(cwd: string, ticket: Ticket, lastFixAt: number | nu
   const snap = await gh.prSnapshot(cwd, prNumber);
   if (!snap || snap.state !== 'OPEN') return null;
   await recordCi(ticket, snap);
-  const me = await ghUserOnce();
-  const threads = (await gh.unresolvedThreads(cwd, prNumber, me)) ?? [];
+  const threads = (await gh.unresolvedThreads(cwd, prNumber)) ?? [];
   const app = await repo.getAppSettings();
-  return prWorkFrom(snap, threads, { me, lastFixAt, noiseCommentAuthors: app.prNoiseCommentAuthors });
+  return prWorkFrom(snap, threads, { lastFixAt, noiseCommentAuthors: app.prNoiseCommentAuthors });
 }
 
 interface FixWork {
@@ -1736,7 +1971,8 @@ async function collectFixInputs(run: Run, init: Initiative, project: Project, ti
     pr.threads.forEach((t, n) => {
       const label = `T${n + 1}`;
       items.threads.push({ label, id: t.id, rootCommentId: t.rootCommentId, rootAuthor: t.rootAuthor, rootIsBot: t.rootIsBot });
-      parts.push(`## Review thread ${label}: ${t.path}${t.line ? `:${t.line}` : ''}\n${t.comments.map((c) => `> **${c.author}:** ${c.body.replace(/\n/g, '\n> ')}`).join('\n>\n')}`);
+      const outdated = t.outdated ? ' (outdated: the lines it was left on have changed since; check whether the current code still has the problem)' : '';
+      parts.push(`## Review thread ${label}: ${t.path}${t.line ? `:${t.line}` : ''}${outdated}\n${t.comments.map((c) => `> **${c.author}:** ${c.body.replace(/\n/g, '\n> ')}`).join('\n>\n')}`);
     });
     pr.comments.forEach((c, n) => {
       const label = `C${n + 1}`;
@@ -1876,7 +2112,7 @@ async function afterFix(run: Run, step: StepResult, state: StepStates['fix']): P
 }
 
 async function rebuildTicket(run: Run, init: Initiative, ticket: Ticket, why: string): Promise<void> {
-  const blocker = rebuildBlocker(ticket, branchName(init, ticket), await repo.listTickets(init.id));
+  const blocker = rebuildBlocker(ticket, branchName(init, ticket), await repo.listTickets(init.id), readRebuildState(rebuildStateFile(init, ticket.id)).builds);
   if (blocker) {
     await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: `${why}\n\n${blocker}`.slice(0, 2000) });
     await systemMessage(run, `${ticketLabel(ticket)} needs a rebuild. ${blocker}`);
@@ -1890,7 +2126,7 @@ async function rebuildTicket(run: Run, init: Initiative, ticket: Ticket, why: st
       '# Build this ticket again from its base',
       '',
       'A fixer found that the previous build could only be repaired by rewriting commits that were already pushed,',
-      'so the factory removed its branch. You start on a fresh branch, and the factory closes the old PR once yours opens.',
+      'so the factory removed its local branch. You start again from the base; the factory puts your result on top of the PR this ticket already has, as one new commit.',
       '',
       '## Why',
       why,
@@ -2154,8 +2390,9 @@ async function ownerHistory(init: Initiative, ticket: Ticket | null, dir: string
   return said.length ? [write(path.join(dir, 'owner-history.md'), renderOwnerHistory(said))] : [];
 }
 
-async function planArbitration(init: Initiative, project: Project, dir: string): Promise<Arbitration> {
+async function planArbitration(run: Run, init: Initiative, project: Project, dir: string): Promise<Arbitration> {
   const s = repo.initiativeSettings(init);
+  const base = await readOnlyBase(run, init, project);
   const review = await repo.latestRun(init.id, null, 'plan_review');
   const currentReview = review?.outputMd && review.round === init.planRound ? review : null;
   const stopped = await repo.lastStoppedStep(init.id, null);
@@ -2167,10 +2404,9 @@ async function planArbitration(init: Initiative, project: Project, dir: string):
   });
   const approvable = init.status === 'awaiting_approval' && init.planJson;
   return {
-    cwd: project.repoPath,
+    cwd: base.cwd,
     fields: [
-      ['Main checkout (read-only)', project.repoPath],
-      ['Base branch', init.baseBranch],
+      ...base.fields,
       ['Plan round', String(init.planRound)],
       ['Ticket limit', String(s.maxTickets)],
     ],
@@ -2228,7 +2464,7 @@ async function runArbitrate(run: Run): Promise<void> {
     return;
   }
   const dir = arbiterDir(init, ticket, run.id);
-  const arbitration = ticket ? await ticketArbitration(init, project, ticket, dir) : await planArbitration(init, project, dir);
+  const arbitration = ticket ? await ticketArbitration(init, project, ticket, dir) : await planArbitration(run, init, project, dir);
   const out = path.join(dir, 'decision.md');
   const prompt = header(
     `Factory step: arbitrate. Initiative: ${init.title}${ticket ? ` · Ticket: ${ticketLabel(ticket)} (key ${ticket.key})` : ''}`,
@@ -2264,7 +2500,8 @@ async function applyPlanDecision(run: Run, decision: Decision, text: DecisionTex
   const init = await mustInitiative(run.initiativeId);
   if (!waitsForOwner(init, null)) return systemMessage(run, `The plan: ${OWNER_ACTED_FIRST}`);
   if (decision === 'APPROVE' && !arbitration.approveBlocker) {
-    return startApprovedPlan(init.id, { author: 'agent', runId: run.id, body: `**Arbiter approved the plan.** ${text.reason}` });
+    await startApprovedPlan(init, { author: 'agent', runId: run.id, body: `**Arbiter approved the plan.** ${text.reason}` });
+    return;
   }
   if (decision === 'RETRY') {
     await agentMessage(run, arbiterInstructions('Arbiter sent the plan back to a fresh planner', text), 'feedback');
@@ -2321,9 +2558,36 @@ const FEEDBACK_STARTS_A_FIX_IN: Ticket['status'][] = ['built', 'changes_requeste
 export async function steerInitiative(initiativeId: string, body: string): Promise<void> {
   const init = await mustInitiative(initiativeId);
   if (!LIVE_INITIATIVE_STATUSES.includes(init.status)) return requestPlanChanges(init.id, body);
+  const replan = await replanInFlight(init);
+  if (replan === 'awaiting_answers') return requestPlanChanges(init.id, body);
   await repo.addMessage({ initiativeId: init.id, author: 'human', kind: 'feedback', body });
-  if (await activeRunFor(init.id, null, ['steer'])) return;
+  if (replan === 'planning' || (await activeRunFor(init.id, null, ['steer']))) return;
   await enqueue({ kind: 'steer', initiativeId: init.id, trigger: 'manual' });
+}
+
+// While a planner revises the approved plan, or waits for the owner's answers, no ticket starts
+// and the owner's messages are for the planner. A planner still at work leaves them pending for the next one.
+async function replanInFlight(init: Initiative): Promise<'planning' | 'awaiting_answers' | null> {
+  if (await activeRunFor(init.id, null, ['plan', 'plan_review'])) return 'planning';
+  const [lastPlan] = await sql<Run[]>`
+    select * from runs where initiative_id = ${init.id} and ticket_id is null and kind = 'plan' order by queued_at desc limit 1`;
+  return replanAwaitsAnswers(lastPlan ?? null, init.approvedAt) ? 'awaiting_answers' : null;
+}
+
+async function hasApprovedTickets(initiativeId: string): Promise<boolean> {
+  return (await repo.listTickets(initiativeId)).some(wasApproved);
+}
+
+// A re-plan that ends without a revised plan to approve leaves the tickets on the plan they were approved under.
+async function resumeApprovedPlan(initiativeId: string): Promise<void> {
+  await repo.updateInitiative(initiativeId, { status: 'in_progress' });
+  await refreshInitiativeStatus(initiativeId);
+  await startReadyTickets(initiativeId);
+}
+
+async function writeApprovedTickets(init: Initiative, dir: string): Promise<string[]> {
+  const approved = (await repo.listTickets(init.id)).filter(wasApproved);
+  return approved.length ? [write(path.join(dir, 'tickets.md'), renderTicketsForSteering(approved, init.baseBranch))] : [];
 }
 
 async function runSteer(run: Run): Promise<void> {
@@ -2337,11 +2601,11 @@ async function runSteer(run: Run): Promise<void> {
   const dir = steerDir(init, run.id);
   const tickets = (await repo.listTickets(init.id)).filter((t) => t.status !== 'canceled');
   const out = path.join(dir, 'route.md');
+  const base = await readOnlyBase(run, init, project);
   const prompt = header(
     `Factory step: steer. Initiative: ${init.title}`,
     [
-      ['Main checkout (read-only)', project.repoPath],
-      ['Base branch', init.baseBranch],
+      ...base.fields,
       ["Initiative folder (every ticket's files)", initiativeDir(init)],
     ],
     [
@@ -2353,13 +2617,14 @@ async function runSteer(run: Run): Promise<void> {
     [out],
     'Reply with one line: the first line of route.md.',
   );
-  await runAgent(run, { kind: 'steer', cwd: project.repoPath, prompt, runDir: dir, outputPath: out }, { feedbackIds: feedback.map((f) => f.id) });
+  await runAgent(run, { kind: 'steer', cwd: base.cwd, prompt, runDir: dir, outputPath: out }, { feedbackIds: feedback.map((f) => f.id) });
 }
 
 async function afterSteer(run: Run, step: StepResult, state: StepStates['steer']): Promise<void> {
   if (await stoppedEarly(run, step, 'route.md')) return;
   const verdict = parseVerdict('steer', step.output);
   if (!verdict) return failMalformedVerdict(run, step.output);
+  if (verdict === 'REPLAN') return replanFromSteer(run, step.output!, state.feedbackIds);
   await repo.consumeFeedback(state.feedbackIds, run.id);
   await finish(run, 'succeeded');
   const init = await mustInitiative(run.initiativeId);
@@ -2388,6 +2653,26 @@ async function afterSteer(run: Run, step: StepResult, state: StepStates['steer']
   const reason = routeReason(step.output!);
   const head = sent ? `**Routed your feedback to ${sent} ticket${sent > 1 ? 's' : ''}.**` : '**Your feedback went to no ticket.**';
   await agentMessage(run, [[head, reason].filter(Boolean).join(' '), outcome.join('\n')].filter(Boolean).join('\n\n'));
+}
+
+// The feedback stays pending, so the planner reads it as binding feedback on the plan.
+async function replanFromSteer(run: Run, output: string, feedbackIds: string[]): Promise<void> {
+  await finish(run, 'succeeded');
+  const reason = routeReason(output);
+  try {
+    await enqueue({ kind: 'plan', initiativeId: run.initiativeId, trigger: 'auto', replan: true });
+  } catch (err) {
+    await repo.consumeFeedback(feedbackIds, run.id);
+    await agentMessage(run, `**Your feedback changes the plan, but the planner could not start:** ${(err as Error).message}`);
+    return;
+  }
+  await agentMessage(
+    run,
+    [
+      `**Your feedback changes the plan, so a fresh planner revises it.** ${reason}`,
+      'Steps already running finish, and no new ticket starts until the revised plan is approved. Then tickets whose text changed are rebuilt from their base, the ones stacked on them too, and tickets the plan drops are canceled with their PRs closed.',
+    ].join('\n\n'),
+  );
 }
 
 async function actOnRoutedFeedback(init: Initiative, ticket: Ticket): Promise<string> {
@@ -2690,10 +2975,13 @@ export async function resetTicket(ticketId: string): Promise<void> {
   const init = await mustInitiative(t.initiativeId);
   const project = await mustProject(init.projectId);
   await cancelActive({ initiativeId: init.id, ticketId: t.id });
+  const stateFile = rebuildStateFile(init, t.id);
+  const rebuilt = stateAfterReset(readRebuildState(stateFile), t);
+  writeRebuildState(stateFile, rebuilt);
   await gitx.removeWorktree(project.repoPath, t.worktreePath, t.branch);
   fs.rmSync(ticketDir(init, t), { recursive: true, force: true });
   await repo.updateTicket(t.id, {
-    status: init.status === 'in_progress' || init.status === 'done' ? 'todo' : 'proposed',
+    status: t.status !== 'proposed' && LIVE_INITIATIVE_STATUSES.includes(init.status) ? 'todo' : 'proposed',
     round: 0,
     branch: null,
     baseRef: null,
@@ -2711,7 +2999,7 @@ export async function resetTicket(ticketId: string): Promise<void> {
   });
   await systemMessage(
     { initiativeId: init.id, ticketId: t.id },
-    `Reset ${ticketLabel(t)}: removed its local worktree and branch.${t.prUrl ? ` The old PR (${t.prUrl}) stays open until the rebuilt ticket opens its own, which closes it.` : ''}`,
+    `Reset ${ticketLabel(t)}: removed its local worktree and branch.${rebuilt.reuse ? ` Its PR (${rebuilt.reuse.prUrl ?? `#${rebuilt.reuse.prNumber}`}) stays open: the rebuilt code lands on it as one new commit.` : ''}`,
   );
   await refreshInitiativeStatus(init.id);
 }
@@ -2750,6 +3038,7 @@ export async function resetInitiative(initiativeId: string): Promise<void> {
   await cancelActive({ initiativeId: init.id });
   for (const t of await repo.listTickets(init.id)) await gitx.removeWorktree(project.repoPath, t.worktreePath, t.branch);
   await sql`delete from tickets where initiative_id = ${init.id}`;
+  await removeLinks(linksDir(init), linkMirrorsRoot()).catch(() => undefined);
   fs.rmSync(initiativeDir(init), { recursive: true, force: true });
   await repo.updateInitiative(init.id, { status: 'draft', planMd: null, planJson: null, planVerdict: null, planRound: 0, approvedAt: null });
   await systemMessage({ initiativeId: init.id }, 'Reset to draft: plan, tickets, worktrees and local branches removed. Pushed branches and PRs were left as is.');
@@ -2760,6 +3049,7 @@ export async function deleteInitiative(initiativeId: string): Promise<void> {
   const project = await repo.getProject(init.projectId);
   await cancelActive({ initiativeId: init.id });
   if (project) for (const t of await repo.listTickets(init.id)) await gitx.removeWorktree(project.repoPath, t.worktreePath, t.branch);
+  await removeLinks(linksDir(init), linkMirrorsRoot()).catch(() => undefined);
   fs.rmSync(initiativeDir(init), { recursive: true, force: true });
   await repo.deleteInitiative(init.id);
 }
@@ -2830,10 +3120,16 @@ async function markPrsReady(init: Initiative): Promise<number> {
   return marked;
 }
 
-export async function syncPrs(initiativeId: string): Promise<number> {
-  const init = await mustInitiative(initiativeId);
-  const tickets = (await repo.listTickets(initiativeId)).filter((t) => t.prNumber && !['merged', 'canceled'].includes(t.status));
-  let changed = 0;
+interface PrRead {
+  ticket: Ticket;
+  snap: gh.PrSnapshot;
+  cwd: string;
+  changed: boolean;
+}
+
+async function refreshPrStates(init: Initiative): Promise<PrRead[]> {
+  const tickets = (await repo.listTickets(init.id)).filter((t) => t.prNumber && !['merged', 'canceled'].includes(t.status));
+  const reads: PrRead[] = [];
   for (const t of tickets) {
     const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : (await mustProject(init.projectId)).repoPath;
     const snap = await gh.prSnapshot(cwd, t.prNumber!);
@@ -2843,20 +3139,71 @@ export async function syncPrs(initiativeId: string): Promise<number> {
     if (snap.state === 'OPEN' && snap.isDraft !== t.prDraft) patch.prDraft = snap.isDraft;
     if (snap.state === 'MERGED') Object.assign(patch, { status: 'merged', ciState: null, ciHeadSha: null });
     if (snap.state === 'CLOSED' && t.prHeadRef) patch.status = 'canceled';
-    if (Object.keys(patch).length) {
+    const changed = Object.keys(patch).length > 0;
+    if (changed) {
       await repo.updateTicket(t.id, patch);
-      changed++;
-      if (patch.status) await systemMessage({ initiativeId, ticketId: t.id }, `${ticketLabel(t)} was ${patch.status === 'merged' ? 'merged' : 'closed'}.`);
+      if (patch.status) await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)} was ${patch.status === 'merged' ? 'merged' : 'closed'}.`);
     }
-    if (snap.state === 'OPEN') await recordCi(t, snap);
-    if (snap.state === 'OPEN') await stackPr({ initiativeId, ticketId: t.id }, init, t, cwd, { background: true });
+    reads.push({ ticket: t, snap, cwd, changed });
   }
+  return reads;
+}
+
+export async function syncPrs(initiativeId: string): Promise<number> {
+  const init = await mustInitiative(initiativeId);
+  const reads = await refreshPrStates(init);
+  for (const { ticket: t, snap, cwd } of reads.filter((r) => r.snap.state === 'OPEN')) {
+    await recordCi(t, snap);
+    await stackPr({ initiativeId, ticketId: t.id }, init, t, cwd, { background: true });
+  }
+  const changed = reads.filter((r) => r.changed).length;
   await cleanUpMergedTickets(initiativeId);
   await refreshInitiativeStatus(initiativeId);
   await startReadyTickets(initiativeId);
   void syncStack(initiativeId).then(() => advanceAutoMerge(initiativeId));
   void startDueRetros(initiativeId);
   return changed;
+}
+
+// Head commit per ticket whose settled red CI the poll already handed to the PR sweep.
+const ciHandedOver = new Map<string, string>();
+const ciHeadsSeen = new CiHeadsSeen();
+let pollingCi = false;
+
+/**
+ * Between the 5-minute PR syncs, PRs whose CI is still running are checked every minute: a green
+ * result unblocks dependents waiting for it, and a red one that has finished goes to the PR sweep at
+ * once instead of at its next 15-minute pass. The sweep does the same work either way, only sooner.
+ */
+async function pollRunningCi(): Promise<void> {
+  if (pollingCi) return;
+  pollingCi = true;
+  try {
+    const open = await sql<Ticket[]>`
+      select t.* from tickets t join initiatives i on i.id = t.initiative_id
+      where i.status in ('in_progress','done') and t.pr_number is not null and t.pr_state = 'OPEN'
+        and t.status not in ('merged','canceled')`;
+    const settledRed = new Set<string>();
+    for (const t of open.filter((x) => ciWorthPolling(x, ciHandedOver.get(x.id), ciHeadsSeen.since(x.id, x.ciHeadSha)))) {
+      const project = await repo.getProject((await mustInitiative(t.initiativeId)).projectId);
+      if (!project) continue;
+      const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;
+      const snap = await gh.prCi(cwd, t.prNumber!).catch(() => null);
+      if (!snap || snap.state !== 'OPEN') continue;
+      await recordCi(t, snap);
+      if (ciSettledRed(snap, ciHandedOver.get(t.id))) {
+        ciHandedOver.set(t.id, snap.headRefOid);
+        settledRed.add(t.initiativeId);
+      }
+    }
+    if (settledRed.size && (await repo.getAppSettings()).sweepOpenPrs) {
+      for (const initiativeId of settledRed) void sweepOpenPrs({ initiativeId }).catch((err) => console.warn('[ci-poll]', (err as Error).message));
+    }
+  } catch (err) {
+    console.warn('[ci-poll]', (err as Error).message);
+  } finally {
+    pollingCi = false;
+  }
 }
 
 async function autoSyncPrs(): Promise<void> {
@@ -3081,7 +3428,46 @@ async function settleSweepClaims(): Promise<void> {
 
 interface SweepScope {
   initiativeId?: string;
+  projectId?: string;
   manual?: boolean;
+}
+
+const baseHeads = new BaseHeads();
+const mergeabilityRechecks = new MergeabilityRechecks();
+const sweeps = new SweepSchedule();
+let watchingBases = false;
+
+// Every minute: has the base branch of any open PR moved on GitHub? A merged PR moves it, and
+// that is when other PRs start to conflict. Sweep that repo's open PRs a minute later (GitHub
+// needs a moment to work out mergeability) instead of at the next 15-minute sweep.
+async function watchBases(): Promise<void> {
+  if (watchingBases || serverExit) return;
+  watchingBases = true;
+  try {
+    if (!(await repo.getAppSettings()).sweepOpenPrs) return;
+    const rows = await sql<{ projectId: string; repoPath: string; base: string }[]>`
+      select distinct i.project_id, p.repo_path, coalesce(t.base_ref, i.base_branch) as base
+      from tickets t join initiatives i on i.id = t.initiative_id join projects p on p.id = i.project_id
+      where i.status in ('in_progress','done') and t.pr_number is not null and t.pr_state = 'OPEN'`;
+    const byProject = new Map<string, { repoPath: string; bases: string[] }>();
+    for (const r of rows) {
+      const p = byProject.get(r.projectId) ?? { repoPath: r.repoPath, bases: [] };
+      p.bases.push(r.base);
+      byProject.set(r.projectId, p);
+    }
+    for (const [projectId, { repoPath, bases }] of byProject) {
+      const listed = await gitx.git(repoPath, ['ls-remote', 'origin', ...bases.map((b) => `refs/heads/${b}`)], 20_000);
+      if (listed.code !== 0) continue;
+      const moved = baseHeads.moved(repoPath, parseLsRemote(listed.stdout));
+      if (!moved.length) continue;
+      console.log(`[pr-sweep] ${moved.join(', ')} moved in ${repoPath}; sweeping its open PRs in ${SWEEP_AFTER_BASE_MOVE_MS / 1000} s`);
+      sweeps.schedule(`project:${projectId}`, SWEEP_AFTER_BASE_MOVE_MS, () => sweepOpenPrs({ projectId }));
+    }
+  } catch (err) {
+    console.warn('[pr-sweep] base watch:', (err as Error).message);
+  } finally {
+    watchingBases = false;
+  }
 }
 
 const SETTLED_STATUSES: Ticket['status'][] = ['built', 'changes_requested', 'approved'];
@@ -3094,6 +3480,14 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
   const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;
   const lastFix = (await lastRuns(t.id)).find((r) => r.kind === 'fix');
   const work = await pendingPrWork(cwd, t, fixedAt(lastFix));
+  if (work && !hasPrWork(work) && work.snap.mergeable === 'UNKNOWN') {
+    // GitHub has not worked out whether the PR still merges (its base just moved): ask again soon.
+    if (mergeabilityRechecks.another(t.id, work.snap.headRefOid)) {
+      sweeps.schedule(t.initiativeId, MERGEABILITY_RECHECK_MS, () => sweepOpenPrs({ initiativeId: t.initiativeId }));
+    }
+    return false;
+  }
+  if (work) mergeabilityRechecks.known(t.id);
   if (!work || !hasPrWork(work)) return false;
   const fingerprint = prWorkFingerprint(work);
   if (!manual && fingerprint === t.prSweepFingerprint) return false;
@@ -3108,11 +3502,8 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
   return true;
 }
 
-const sweepingInitiatives = new Set<string>();
-
 async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: boolean): Promise<number> {
-  if (sweepingInitiatives.has(initiativeId)) return 0;
-  sweepingInitiatives.add(initiativeId);
+  if (!sweeps.begin(initiativeId, manual)) return 0;
   let started = 0;
   try {
     for (const t of tickets) {
@@ -3123,7 +3514,8 @@ async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: 
       }
     }
   } finally {
-    sweepingInitiatives.delete(initiativeId);
+    const again = sweeps.end(initiativeId);
+    if (again) void sweepOpenPrs({ initiativeId, manual: again.manual }).catch((err) => console.error('[pr-sweep]', err));
   }
   return started;
 }
@@ -3170,7 +3562,9 @@ async function adoptOpenPrs(project: Project): Promise<void> {
 async function adoptPrsFor(scope: SweepScope): Promise<void> {
   const init = scope.initiativeId ? await mustInitiative(scope.initiativeId) : null;
   if (init && init.kind !== 'open-prs') return;
-  const projects = init ? [await mustProject(init.projectId)] : await repo.listProjects();
+  const projects = init
+    ? [await mustProject(init.projectId)]
+    : (await repo.listProjects()).filter((p) => !scope.projectId || p.id === scope.projectId);
   await Promise.all(projects.map((p) => adoptOpenPrs(p).catch((err) => console.warn('[pr-sweep]', `${p.name}: ${(err as Error).message}`))));
 }
 
@@ -3183,6 +3577,7 @@ export async function sweepOpenPrs(scope: SweepScope = {}): Promise<number> {
     where i.status in ('in_progress','done') and t.pr_number is not null and t.branch is not null
       and t.status in ${sql(statuses)} and t.pr_sweep_claimed_at is null
       ${scope.initiativeId ? sql`and t.initiative_id = ${scope.initiativeId}` : sql``}
+      ${scope.projectId ? sql`and i.project_id = ${scope.projectId}` : sql``}
     order by t.initiative_id, t.seq`;
   const perInitiative = new Map<string, Ticket[]>();
   for (const t of candidates) perInitiative.set(t.initiativeId, [...(perInitiative.get(t.initiativeId) ?? []), t]);
@@ -3260,7 +3655,13 @@ async function markInterrupted(run: Run, error: string): Promise<Run> {
   const [row] = await sql<Run[]>`
     update runs set status = 'interrupted', finished_at = now(), pid = null, error = ${error} where id = ${run.id} returning *`;
   await repo.addRunEvent(run.id, 'system', { text: `Interrupted: ${error}.` });
+  noteUsage(run.id);
   return row;
+}
+
+// The usage ledger reads the agent's transcript; it never holds up the pipeline.
+function noteUsage(runId: string): void {
+  recordRunUsage(runId).catch((err) => console.error('[usage]', (err as Error).message));
 }
 
 async function holdForOwner(run: Run): Promise<void> {

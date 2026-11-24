@@ -69,12 +69,22 @@ export async function createPr(
 export interface PrStack {
   number: number;
   pullRequests: number[];
+  /** PRs still in the stack that were closed without merging: GitHub keeps them, and nothing can stack above them. */
+  closed?: number[];
+  merged?: number[];
 }
 
 const API_VERSION = ['-H', 'X-GitHub-Api-Version: 2026-03-10'];
 
-function toStack(d: { number: number; pull_requests: { number: number }[] }): PrStack {
-  return { number: d.number, pullRequests: d.pull_requests.map((p) => p.number) };
+type StackPr = { number: number; state?: string; merged_at?: string | null };
+
+function toStack(d: { number: number; pull_requests: StackPr[] }): PrStack {
+  return {
+    number: d.number,
+    pullRequests: d.pull_requests.map((p) => p.number),
+    closed: d.pull_requests.filter((p) => p.state === 'closed' && !p.merged_at).map((p) => p.number),
+    merged: d.pull_requests.filter((p) => !!p.merged_at).map((p) => p.number),
+  };
 }
 
 async function stacksApi(cwd: string, args: string[], body?: unknown): Promise<string> {
@@ -94,6 +104,20 @@ export async function createStack(cwd: string, prs: number[]): Promise<PrStack> 
 
 export async function addToStack(cwd: string, stack: number, prs: number[]): Promise<PrStack> {
   return toStack(JSON.parse(await stacksApi(cwd, ['-X', 'POST', `repos/{owner}/{repo}/stacks/${stack}/add`], { pull_requests: prs })));
+}
+
+/**
+ * Takes every unmerged PR out of a stack. The API can't remove single PRs; a stack left empty is dissolved.
+ * Returns the PRs GitHub kept (merged or queued for merge), so an empty list means the stack is gone.
+ */
+export async function unstack(cwd: string, stack: number): Promise<number[]> {
+  const out = (await stacksApi(cwd, ['-X', 'POST', `repos/{owner}/{repo}/stacks/${stack}/unstack`])).trim();
+  return out ? toStack(JSON.parse(out)).pullRequests : [];
+}
+
+export async function editPr(cwd: string, prNumber: number, edit: { title: string; body: string }): Promise<void> {
+  const r = await gh(cwd, ['pr', 'edit', String(prNumber), '--title', edit.title, '--body-file', '-'], edit.body);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh pr edit exited ${r.code}`);
 }
 
 export interface MergeStatus {
@@ -257,6 +281,30 @@ export function ciStateOf(snap: Pick<PrSnapshot, 'failingChecks' | 'pendingCheck
   return snap.finishedChecks ? 'green' : 'none';
 }
 
+export type PrCi = Pick<PrSnapshot, 'state' | 'headRefOid' | 'failingChecks' | 'supersededChecks' | 'pendingChecks' | 'finishedChecks'>;
+
+function ciOf(d: { state: string; headRefOid: string; statusCheckRollup?: CheckRun[] | null }): PrCi {
+  const checks = (d.statusCheckRollup ?? []).filter((c) => !CHECKS_ONLY_HUMANS_TURN_GREEN.test(c.name ?? c.context ?? ''));
+  const { failing, superseded } = splitFailingChecks(checks);
+  const pendingChecks = checks
+    .filter((c) => ['IN_PROGRESS', 'QUEUED', 'PENDING', 'WAITING'].includes((c.status ?? c.state ?? '').toUpperCase()))
+    .map((c) => c.name ?? c.context ?? 'check');
+  return {
+    state: d.state,
+    headRefOid: d.headRefOid,
+    failingChecks: failing,
+    supersededChecks: superseded,
+    pendingChecks,
+    finishedChecks: checks.length - pendingChecks.length,
+  };
+}
+
+/** Only a PR's head and checks, for polling CI without fetching its comments and reviews. */
+export async function prCi(cwd: string, prNumber: number): Promise<PrCi | null> {
+  const r = await gh(cwd, ['pr', 'view', String(prNumber), '--json', 'state,headRefOid,statusCheckRollup']);
+  return r.code === 0 ? ciOf(JSON.parse(r.stdout)) : null;
+}
+
 export async function prSnapshot(cwd: string, prNumber: number): Promise<PrSnapshot | null> {
   const r = await gh(cwd, [
     'pr', 'view', String(prNumber), '--json',
@@ -264,24 +312,14 @@ export async function prSnapshot(cwd: string, prNumber: number): Promise<PrSnaps
   ]);
   if (r.code !== 0) return null;
   const d = JSON.parse(r.stdout);
-  const checks: CheckRun[] = ((d.statusCheckRollup ?? []) as CheckRun[]).filter((c) => !CHECKS_ONLY_HUMANS_TURN_GREEN.test(c.name ?? c.context ?? ''));
-  const { failing, superseded } = splitFailingChecks(checks);
-  const pendingChecks = checks
-    .filter((c) => ['IN_PROGRESS', 'QUEUED', 'PENDING', 'WAITING'].includes((c.status ?? c.state ?? '').toUpperCase()))
-    .map((c) => c.name ?? c.context ?? 'check');
   const notMarker = (body: string) => !body.includes(FACTORY_MARKER);
   return {
+    ...ciOf(d),
     number: d.number,
     url: d.url,
-    state: d.state,
     isDraft: d.isDraft,
     mergeable: d.mergeable,
     baseRefName: d.baseRefName,
-    headRefOid: d.headRefOid,
-    failingChecks: failing,
-    supersededChecks: superseded,
-    pendingChecks,
-    finishedChecks: checks.length - pendingChecks.length,
     comments: (d.comments ?? [])
       .filter((c: { body: string }) => notMarker(c.body))
       .map((c: { author?: { login: string }; body: string; createdAt: string; url: string }) => ({
@@ -309,7 +347,9 @@ export interface ReviewThread {
   path: string;
   line: number | null;
   outdated: boolean;
+  /** The factory wrote the newest comment, so the thread waits for its reviewer. */
   awaitingReviewer: boolean;
+  lastCommentAt: string;
   comments: { author: string; body: string }[];
 }
 
@@ -319,14 +359,14 @@ interface ThreadNode {
   isOutdated: boolean;
   path: string;
   line: number | null;
-  comments: { nodes: { databaseId: number; author?: { login: string; __typename?: string }; body: string }[] };
+  comments: { nodes: { databaseId: number; author?: { login: string; __typename?: string }; body: string; createdAt: string }[] };
 }
 
-export async function unresolvedThreads(cwd: string, prNumber: number, me: string | null): Promise<ReviewThread[] | null> {
+export async function unresolvedThreads(cwd: string, prNumber: number): Promise<ReviewThread[] | null> {
   const repo = await gh(cwd, ['repo', 'view', '--json', 'owner,name']);
   if (repo.code !== 0) return null;
   const { owner, name } = JSON.parse(repo.stdout) as { owner: { login: string }; name: string };
-  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:50){nodes{databaseId author{login __typename} body}}}}}}}`;
+  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:50){nodes{databaseId author{login __typename} body createdAt}}}}}}}`;
   const r = await gh(cwd, [
     'api', 'graphql', '-f', `query=${query}`, '-F', `owner=${owner.login}`, '-F', `name=${name}`, '-F', `number=${prNumber}`,
   ]);
@@ -345,7 +385,8 @@ export async function unresolvedThreads(cwd: string, prNumber: number, me: strin
         path: t.path,
         line: t.line,
         outdated: t.isOutdated,
-        awaitingReviewer: last.body.includes(FACTORY_MARKER) || (!!me && last.author?.login === me),
+        awaitingReviewer: last.body.includes(FACTORY_MARKER),
+        lastCommentAt: last.createdAt,
         comments: all
           .filter((c) => !c.body.includes(FACTORY_MARKER))
           .map((c) => ({ author: c.author?.login ?? 'unknown', body: c.body })),

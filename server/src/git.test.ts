@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { catchUpWith, checkOutAgain, countsTowardSize, diffLines, ensureWorktree, fetchOrigin, git, linesInNumstat, restoreHistoryFrom, untouchedWorktreeBranch, waitForEarlierCheckout, withRepoLock, worktreeChanges, worktreeState } from './git.ts';
+import { carryTreeOnto, catchUpWith, checkOutAgain, countsTowardSize, diffLines, ensureWorktree, fetchOrigin, git, linesInNumstat, restoreHistoryFrom, untouchedWorktreeBranch, waitForEarlierCheckout, withRepoLock, worktreeChanges, worktreeState } from './git.ts';
 
 async function run(cwd: string, ...args: string[]): Promise<string> {
   const r = await git(cwd, args);
@@ -369,4 +369,33 @@ test('fetchOrigin shares one fetch between callers that ask while it still waits
   assert.equal((await first).code, 0);
   assert.equal((await otherRefs).code, 0);
   assert.notEqual(fetchOrigin(dir, { refs: ['main'] }), first);
+});
+
+test('carryTreeOnto lands a rebuild on the PR branch it replaces as a fast-forward, keeping both histories', async () => {
+  const { dir } = await repoWithBase();
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-carry-remote-'));
+  await run(remote, 'init', '--quiet', '--bare');
+  await run(dir, 'remote', 'add', 'origin', remote);
+  await run(dir, 'push', '--quiet', 'origin', 'main');
+  await run(dir, 'checkout', '--quiet', '-b', 'factory/i/04-videos');
+  await commitFile(dir, 'videos.py', 'old = "summaries"\n', 'feat: the first build');
+  await run(dir, 'push', '--quiet', 'origin', 'factory/i/04-videos');
+  const earlier = await run(dir, 'rev-parse', 'HEAD');
+
+  await run(dir, 'checkout', '--quiet', 'main');
+  await run(dir, 'branch', '--quiet', '-D', 'factory/i/04-videos');
+  await run(dir, 'checkout', '--quiet', '-b', 'factory/i/04-videos', 'main');
+  await commitFile(dir, 'videos.py', 'new = "get_assets_by_id"\n', 'feat: the rebuild');
+  const rebuilt = await run(dir, 'rev-parse', 'HEAD');
+  assert.notEqual((await git(dir, ['push', 'origin', 'factory/i/04-videos'])).code, 0, 'a plain push of the rebuild is rejected');
+
+  await run(dir, 'fetch', '--quiet', 'origin');
+  const carried = await carryTreeOnto(dir, 'origin/factory/i/04-videos', 'Rebuild the videos ticket');
+  assert.ok(carried);
+  assert.equal(await run(dir, 'rev-parse', 'HEAD'), carried);
+  assert.equal((await run(dir, 'rev-list', '--parents', '-n', '1', 'HEAD')).split(' ').slice(1).join(' '), `${rebuilt} ${earlier}`);
+  assert.equal(await run(dir, 'rev-parse', 'HEAD^{tree}'), await run(dir, 'rev-parse', `${rebuilt}^{tree}`), 'the tree is the rebuild’s');
+  assert.equal((await git(dir, ['push', 'origin', 'factory/i/04-videos'])).code, 0, 'the push is a fast-forward');
+  assert.equal(await run(dir, 'diff', 'main...HEAD', '--', 'videos.py').then((d) => d.includes('+new = "get_assets_by_id"')), true);
+  assert.equal(await carryTreeOnto(dir, 'origin/factory/i/04-videos', 'again'), null, 'nothing to carry once the remote head is in HEAD’s history');
 });

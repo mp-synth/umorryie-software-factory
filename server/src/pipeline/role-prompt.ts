@@ -134,12 +134,17 @@ export function rolePrompt(kind: AgentKind, roleFile = ROLE_FILES[kind], project
   return parts.join('\n\n');
 }
 
+export const INPUTS_LABEL = 'Inputs';
+export const OUTPUT_LABEL = 'Output';
+export const OUTPUTS_LABEL = 'Outputs';
+export const BASE_COMMIT_FIELD = 'Base commit';
+
 export function header(title: string, fields: [string, string | null | undefined][], inputs: string[], outputs: string[], reply: string): string {
   const lines = [title];
   for (const [k, v] of fields) if (v) lines.push(`${k}: ${v}`);
-  lines.push('Inputs:');
+  lines.push(`${INPUTS_LABEL}:`);
   for (const i of inputs) lines.push(`- ${i}`);
-  lines.push(outputs.length > 1 ? 'Outputs:' : `Output: ${outputs[0]}`);
+  lines.push(outputs.length > 1 ? `${OUTPUTS_LABEL}:` : `${OUTPUT_LABEL}: ${outputs[0]}`);
   if (outputs.length > 1) for (const o of outputs) lines.push(`- ${o}`);
   lines.push(reply);
   return lines.join('\n');

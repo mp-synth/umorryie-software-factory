@@ -104,8 +104,14 @@ export async function moveInitiativeStatus(id: string, from: Initiative['status'
   return moved.length > 0;
 }
 
+// Spend of an initiative: the usage ledger also holds sessions whose runs a reset deleted and
+// agents that never reported a cost; the runs' own figures cover what the ledger has not read yet.
+const INITIATIVE_COST = (id: string) => sql`greatest(
+  coalesce((select sum(cost_usd) from runs r where r.initiative_id = ${id}), 0),
+  coalesce((select sum(cost_usd) from agent_usage u where u.initiative_id = ${id}), 0))::float8`;
+
 export async function initiativeCost(id: string): Promise<number> {
-  const [{ cost }] = await sql<{ cost: number }[]>`select coalesce(sum(cost_usd), 0)::float8 as cost from runs where initiative_id = ${id}`;
+  const [{ cost }] = await sql<{ cost: number }[]>`select ${INITIATIVE_COST(id)} as cost`;
   return cost;
 }
 
@@ -117,7 +123,9 @@ export async function deleteInitiative(id: string): Promise<void> {
 export async function listInitiativeSummaries(): Promise<InitiativeSummary[]> {
   const rows = await sql<(Initiative & { projectName: string; repoPath: string; costUsd: number; activeRuns: number })[]>`
     select i.*, p.name as project_name, p.repo_path,
-      coalesce((select sum(cost_usd) from runs r where r.initiative_id = i.id), 0)::float8 as cost_usd,
+      greatest(
+        coalesce((select sum(cost_usd) from runs r where r.initiative_id = i.id), 0),
+        coalesce((select sum(cost_usd) from agent_usage u where u.initiative_id = i.id), 0))::float8 as cost_usd,
       (select count(*) from runs r where r.initiative_id = i.id and r.status in ('queued','running'))::int as active_runs
     from initiatives i join projects p on p.id = i.project_id
     order by (i.status = 'archived'), i.updated_at desc`;

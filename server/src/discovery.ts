@@ -198,10 +198,19 @@ async function runDiscovery(dir: string): Promise<EnvironmentSuggestion> {
     () => {},
   );
   const result = await done;
+  discoveryUsage?.(result.sessionId, dir, result.costUsd)?.catch((err) => console.error('[usage]', (err as Error).message));
   if (!result.resultText) {
     throw new Error(`discovery agent ${result.timedOut ? 'timed out' : 'failed'}: ${result.subtype ?? ''} ${result.stderrTail.slice(-400)}`.trim());
   }
   return { source: 'claude', ...resolveDiscovery(parseDiscoveryReply(result.resultText), candidates, siblings), costUsd: result.costUsd };
+}
+
+type DiscoveryUsage = (sessionId: string | null, dir: string, reportedCostUsd: number | null) => Promise<void>;
+let discoveryUsage: DiscoveryUsage | null = null;
+
+/** The server records discovery agents in the usage ledger; tests leave this unset and touch no database. */
+export function recordDiscoveryUsageWith(record: DiscoveryUsage): void {
+  discoveryUsage = record;
 }
 
 const discoveries = new Map<string, Promise<EnvironmentSuggestion>>();

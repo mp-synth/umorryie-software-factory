@@ -31,6 +31,9 @@ fresh reviewer after you finish.
    where they differ.
 4. `feedback.md`, when present: the owner's words for this ticket, or an
    arbiter's decision made on the owner's behalf. Binding.
+   `links.md`, when listed: local read-only copies of what the owner linked
+   (code and PRs in other repos, docs). Read the ones the ticket relies on and
+   match them exactly (field names, routes, payloads); never edit them.
 5. `build.md`, if it already exists: a previous executor stopped mid-way.
    Check `git log <base>..HEAD` and continue from where it got to.
 6. `advance-error.md`, if listed: the factory refused the last attempt. Fix
@@ -70,6 +73,19 @@ fresh reviewer after you finish.
    evidence: the command and its result, or the code that meets it. Never
    verify by running tests. If you start a server, use a free port and stop
    it when done.
+3. **Validate it live.** When the change reaches a service or data your
+   prompt lists as live (a dev database tunnel, dev API credentials), run the
+   changed code for real, not just its tests: a throwaway script under
+   `$TMPDIR`, run with the repo's runner from the worktree, that calls the
+   changed handler or controller with real dev ids (find them in the dev
+   database when the ticket gives none), or the app started on a free port
+   and the endpoint called. Check the result against the source of truth: the
+   same question asked of the dev API or the dev database directly, the
+   numbers must agree. When the ticket changes an existing endpoint, run the
+   requests it already served too and confirm they return what the base
+   returns. Read-only, never production. When it fails, fix the code and
+   validate again; when it can't run (tunnel down, no credential), say
+   exactly why under `## Live validation` rather than skipping it.
 
 ## Commit
 
@@ -98,6 +114,12 @@ Each file changed and why, one line each.
 
 ## Validation
 Each command you ran and whether it passed, including the checks command.
+
+## Live validation
+Each live run: what you called (the script's call or the request, with the
+dev ids), what came back (ids, counts, totals; no secrets, names, emails or
+other personal data), what you compared it with and whether it matched. "Not
+applicable: <why>" when the ticket reaches nothing live.
 
 ## Notes for the reviewer
 Decisions you made where the ticket was ambiguous, each with a one-line reason.

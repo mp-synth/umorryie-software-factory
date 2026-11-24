@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DEFAULT_INITIATIVE_SETTINGS, MAX_MANUAL_AGENTS, MODELS, RULE_ROLES, RULE_SCOPES, type ChangeEvent, type InitiativeDetail, type RunEvent } from '@factory/shared';
+import { DEFAULT_INITIATIVE_SETTINGS, MAX_MANUAL_AGENTS, MODELS, RULE_ROLES, RULE_SCOPES, type InitiativeDetail, type RunEvent } from '@factory/shared';
 import { claudeVersion, resolveClaudeBin } from './agents/claude.ts';
 import { config } from './config.ts';
 import { sql } from './db.ts';
@@ -11,13 +11,23 @@ import * as discovery from './discovery.ts';
 import { bus } from './events.ts';
 import * as gitx from './git.ts';
 import { ghUser } from './github.ts';
+import { liveHub } from './live-hub.ts';
 import * as engine from './pipeline/engine.ts';
 import { slugify } from './pipeline/plan.ts';
 import { renderReport } from './pipeline/report.ts';
 import * as repo from './repo.ts';
+import * as usage from './usage.ts';
 
 const id = z.object({ id: z.string().uuid() });
 const model = z.enum(MODELS);
+const live = liveHub(bus, (runId, after) => repo.listRunEvents(runId, after));
+const usageRange = z
+  .object({ from: z.coerce.date(), to: z.coerce.date() })
+  .refine((r) => r.from < r.to && r.to.getTime() - r.from.getTime() <= 400 * 86_400_000, 'from must come before to, at most 400 days apart');
+const liveRuns = z.object({
+  watch: z.array(z.object({ id: z.string().uuid(), after: z.number().int().min(0) })).max(200).default([]),
+  unwatch: z.array(z.string().uuid()).max(200).default([]),
+});
 
 const settingsPatch = z
   .object({
@@ -114,11 +124,34 @@ export async function routes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/defaults', async () => ({ initiativeSettings: DEFAULT_INITIATIVE_SETTINGS }));
 
+  // Agent spend from the usage ledger, between two instants (the UI asks for UTC weeks).
+  app.get('/api/usage', async (req) => {
+    const { from, to } = usageRange.parse(req.query);
+    return usage.usageSummary(from, to);
+  });
+
+  app.get('/api/usage/sessions', async (req) => {
+    const { from, to } = usageRange.parse(req.query);
+    return usage.usageSessions(from, to);
+  });
+
+  app.get('/api/usage/weeks', async () => usage.usageWeeks());
+
+  // A tab's only live connection: changes, plus the runs it names below (see live-hub.ts).
   app.get('/api/stream', async (req, reply) => {
-    const send = sse(req, reply);
-    const onChange = (e: ChangeEvent) => send('change', e);
-    bus.on('change', onChange);
-    req.raw.on('close', () => bus.off('change', onChange));
+    const stream = live.open(sse(req, reply));
+    req.raw.on('close', () => stream.close());
+  });
+
+  app.post('/api/stream/:sid/runs', async (req, reply) => {
+    const { sid } = z.object({ sid: z.string().uuid() }).parse(req.params);
+    const { watch, unwatch } = liveRuns.parse(req.body ?? {});
+    const stream = live.get(sid);
+    // The tab sees its stream close too, reconnects and names its runs again.
+    if (!stream) return reply.status(404).send({ error: 'that live stream has closed' });
+    for (const runId of unwatch) stream.unwatch(runId);
+    await Promise.all(watch.map((w) => stream.watch(w.id, w.after)));
+    return { ok: true };
   });
 
   app.get('/api/projects', async () => repo.listProjects());
@@ -473,6 +506,8 @@ export async function routes(app: FastifyInstance): Promise<void> {
     return repo.listRunEvents(rid);
   });
 
+  // One connection per run. The UI now watches runs over /api/stream; this stays
+  // for tabs still running a bundle from before that.
   app.get('/api/runs/:id/stream', async (req, reply) => {
     const { id: rid } = id.parse(req.params);
     const { after } = z.object({ after: z.coerce.number().int().min(0).default(0) }).parse(req.query);

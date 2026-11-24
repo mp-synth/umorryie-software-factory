@@ -42,6 +42,30 @@ Or build the UI once and serve everything from the API:
 pnpm start      # http://localhost:4317
 ```
 
+Both stop with the terminal (or Claude session) that started them. To keep
+the factory running on a Mac, install it as launchd jobs instead, from
+the main checkout on `main`:
+
+```bash
+pnpm service install   # API on :4317, UI on :5173 and the watch, now and at every login
+```
+
+They come back after a crash or a reboot and belong to no terminal or session.
+The watch keeps the server on the checkout's code: 20 seconds after the last
+change to the server's files it typechecks the server and restarts it, and
+running agents keep going. It does not restart while the checkout is off
+`main`, in the middle of a merge or rebase, or waiting for `pnpm install`
+after a lockfile change. A change that does not typecheck is logged once and
+retried when the files change again. The UI hot-reloads and `agents/*.md` are
+read at every spawn, so neither needs a restart.
+
+`pnpm service restart` restarts by hand (`restart all` restarts the UI too),
+`pnpm service status` says whether the server is running older code than the
+checkout, `pnpm service logs [web|watch]` follows the logs in
+`~/.software-factory/logs` (rotated at 10 MB), and `pnpm service stop`,
+`start` and `uninstall` do what they say. Run `install` again after you change
+your Node version or PATH.
+
 Then: **Projects → Add project**, pick a repo in the folder browser (or paste
 a path) and a base branch, **New initiative**, write a brief, and watch the
 planner work.
@@ -72,7 +96,9 @@ tickets and one fix round from owner feedback, for about $2.50 of agent time.
 On a GitHub repo the same flow opens stacked draft PRs, posts each review on
 its PR, leaves every PR in draft for you to mark ready (one by one on GitHub, or all at once with
 **More → Make PRs non-draft**), and **Fix all PRs** turns unresolved review
-threads into a fix round (the factory's own comments are ignored). It skips every ticket with nothing
+threads into a fix round. Every comment counts, yours included, unless the factory wrote it (its
+comments carry a hidden marker), its thread is resolved, or the last fix already saw it. A reply on
+an outdated thread counts too; the fixer is told the lines it was left on have changed. It skips every ticket with nothing
 left to act on: no new review findings, failing checks or CI, conflicts, unanswered comments or feedback.
 
 What lands on a PR is written for its reviewer, not for agents. A review is one
@@ -83,6 +109,42 @@ table, notes and earlier-round bookkeeping stay in the factory. A verified fix
 round posts `Fix round N`, its commits and one line per answered top-level
 comment; thread replies are one or two sentences that end in a commit sha or a
 `path:line`. Every agent whose text reaches people follows `agents/writing.md`.
+
+## Links to other repos, PRs and docs
+
+Paste any URL into a brief, a feedback or a note and every agent of that
+initiative gets it as a local, read-only copy, so an EnactServices initiative
+can say "implement the backend for https://github.com/Synthesia-Technologies/TTVPlatform/pull/34521"
+and the planner, executors and reviewers all read the same PR. Before each agent
+starts, the server resolves every link it finds in the brief, the project notes
+and your own messages:
+
+| Link | What the agent gets |
+| --- | --- |
+| GitHub PR in any repo | A checkout at the PR head, plus `pr.md` (title, description, changed files) and `pr.diff`. Rechecked every 10 minutes, so a PR that moves gets a new checkout |
+| GitHub file or folder (`/blob/…`, `/tree/…`, with `#L10-L20`) | A checkout at that branch, tag or sha, and the path and lines to read. Rechecked every hour when it's on a branch |
+| GitHub commit, issue or repo (also open-source ones) | A checkout at the commit or the default branch; for an issue, its text and comments. A repo or issue is rechecked every hour; a commit stays as it is |
+| Anything else (docs, articles, a gist) | The page as text |
+| The project's own repo | Just the path; the agent already works in it |
+
+Everything is listed in `links.md` in the initiative folder, which each agent's
+prompt points to; the agents read it, plan and build in the project's repo only,
+and never edit the checkouts. Each linked GitHub repo has one bare mirror in
+`~/.software-factory/link-mirrors/` that borrows objects from a clone of the same
+repo next to the project (`~/workspace/TTVPlatform`) when there is one, so a
+TTVPlatform PR is ready in seconds and the mirror stays small. The factory never
+writes to your clone, but the mirror depends on it: if the clone moves or
+garbage-collects objects the mirror borrowed, the mirror notices before it hands
+out a checkout and rebuilds itself with its own copy of everything. Without a
+clone, the commit is fetched shallow (two commits deep for a commit link, so its
+diff is right), which needs `git` access to the repo (public repos need nothing).
+PR and issue text comes from `gh`. At most 15 links are fetched: the brief's and
+the notes' first, then those in your newest messages; the rest are listed in
+`links.md` as not fetched. A link that can't be fetched (a private page, a Notion
+doc) is listed with the reason and the agent tries `gh` or WebFetch itself, or
+says it couldn't read it. Fetched text is marked as untrusted, and agents never
+follow instructions found in it. Checkouts are removed with the initiative (on
+reset and delete), and a PR's old checkout is removed when its head moves.
 
 ## The arbiter: you only review PRs
 
@@ -122,7 +184,12 @@ initiative: the fixer works on a local `factory/pr-<n>` worktree that tracks
 the PR's branch, pushes verified fixes to that branch (never force), and never
 rebuilds your PR. Like any initiative, it reviews each fixed branch and posts
 the review on the PR unless you switch that off in its Autopilot card. Archive a project's Open PRs initiative to stop
-adopting from that repo. For each PR, a merge conflict, failing CI that has finished (tests,
+adopting from that repo. The sweep also comes sooner when it matters: the
+factory checks every minute whether the base branch of an open PR moved on
+GitHub (a merge does that, and that is when other PRs start to conflict), and
+sweeps that repo's PRs a minute later. While GitHub has not worked out yet
+whether a PR still merges, the sweep asks again after 45 seconds, up to three
+times. For each PR, a merge conflict, failing CI that has finished (tests,
 lint) or unanswered review comments start a fresh fixer, which goes through
 checks and the verifier like any other fix. A PR being fixed carries a
 "sweep fixing" mark on its ticket row, so the next sweep leaves it alone; the
@@ -162,7 +229,7 @@ initiatives.
 
 | Where | What |
 |---|---|
-| Dashboard | Every initiative with segmented progress, what is waiting on you, agents running now, total spend |
+| Dashboard | Every initiative with segmented progress, what is waiting on you, agents running now, and agent spend this week (since Monday 00:00 UTC), which opens Usage |
 | Initiative → Plan | High-level overview first (goal, summary, success criteria, definition of done), then edge cases, test strategy, risks, assumptions, the plan review and the full plan.md on demand. Paths the plan names that do not exist at the base are listed for the plan reviewer (never a rejection). **Approve & build** or **Request changes** (your words go to a fresh planner as binding feedback). Answer the planner's questions when it is blocked |
 | Initiative → Tickets | One row per ticket: status, verdict, PR, cost. Expand for what/goal/outcome, acceptance checks, guidance, branch/worktree, every agent run, and the latest output. **Run / Review / Fix** per ticket; **Run ready / Review all / Fix all PRs / Sync PRs** in bulk; edit a ticket before it starts; reset a ticket; mark approved/merged. The row shows the lines the ticket changed outside tests, lockfiles and files the repo marks `linguist-generated`, flagged when over 1.5 times its size budget (XS 50, S 200, M 500) |
 | Initiative → Activity | The conversation with the agents. **Ask** starts a read-only advisor that answers from the code; **Feedback** re-plans (before approval), goes to a fresh fixer (per ticket) or, for the whole initiative after approval, to a steering router that splits it across the PRs; **Note** just records |
@@ -171,6 +238,9 @@ initiatives.
 | Sidebar | The theme switcher (system, light or dark) sits next to the live indicator |
 | Live panel | On an initiative page, every agent of the initiative as one log in order, newest at the bottom: running agents stream live, finished ones fold to their header. Collapse it to a rail that still shows who is running, or drag its edge to resize it. Open any run for its details: tool calls with inputs and results, text, thinking, the checks log, cost/tokens/turns, its output file, the exact prompt header, and a `claude --resume` command to continue that session in your terminal. **Stop** kills it. On other pages it appears only for a run you open |
 | Agents | Every run across all initiatives, live |
+| Usage | What the agents spent, week by week (Monday 00:00 UTC): the total with its token split (cache writes, cache reads, output, uncached input), spend per day (click a day for its sessions), per step and per model, every agent session with a link to its run, and the history of earlier weeks |
+
+Spend comes from a usage ledger (`agent_usage`), one row per agent session. Each row is priced from the session's own transcript (`~/.claude/projects/<cwd>/<session>.jsonl`), so every API response counts at Claude API list prices, cache writes and reads separately. Agents that failed, timed out or were stopped count too, as do discovery agents and the sessions of initiatives that were reset or deleted, whose runs are gone. A session is recorded when its agent ends; at startup the server also reads any transcripts it has not recorded yet, so the history goes back as far as Claude Code keeps transcripts (30 days by default). A session whose transcript is already gone keeps the cost the CLI reported. Your own interactive Claude Code sessions are not factory spend and are left out, even though an organization's usage dashboard counts them.
 
 ## How a ticket moves
 
@@ -181,7 +251,7 @@ initiatives.
 | building | Executor is working in `~/.software-factory/worktrees/...` on `factory/<initiative>-<id>/<nn>-<key>` |
 | running checks | The project's checks command runs in the worktree. Red → fixer, which gets the failing lines and the path of the full log. Green → push + draft PR. If the command can't run at all (exit 126/127) the ticket goes to *needs you* instead of burning a fixer round. **Run checks** re-runs it by hand |
 | built | Checked and waiting for review (when auto-review is off) |
-| in review | A fresh reviewer reads `git diff <base>...HEAD` and the initiative's goal, success criteria and definition of done, verifies each finding, answers APPROVE or CHANGES. An over-budget ticket carries a Size note in the review header |
+| in review | A fresh reviewer reads `git diff <base>...HEAD` and the initiative's goal, success criteria and definition of done, verifies each finding, answers APPROVE or CHANGES. Code that only tests use (the PR's own, or code it leaves without a production caller) is a finding to delete it with its tests. An over-budget ticket carries a Size note in the review header |
 | changes requested | Waiting for a fixer (auto-fix runs it unless the round limit is reached) |
 | fixing | A fixer gives every item a verdict before touching code (VALID / PARTIAL / INVALID / UNCONFIRMED / NEEDS-HUMAN): a bug is fixed only after it is traced and gets a test that would fail without the fix (written, not run: CI runs tests, and the fixer re-runs only the tests that failed in the PR's CI, before and after its fix); a claim is rejected only by pointing at the code. Rounds with only failing checks, CI or conflicts get a cheaper mechanical fixer that first checks whether the base branch fails the same way and lists flaky runs for one re-run. Fixes are committed locally; after the checks pass, a fresh **verifier** reads the commits and drafted replies. Approved: the factory pushes, replies in each review thread, answers top-level comments in one summary, and resolves every thread it fixed once the fix is on the PR (bot threads it rejects with a code pointer too; a human's disputed or partly fixed thread stays open for them). Blocked: the branch is reset and a fresh fixer retries once with the findings; a second block pushes nothing and waits for you. When only rewriting pushed commits would fix the branch (someone else's commit in its history), the fixer answers REBUILD: the factory builds the ticket again on a fresh `-vN` branch and closes the old PR once the new one opens, unless another ticket already builds on it or it was built 3 times. When a PR has nothing to act on, no agent is started |
 | approved | The reviewer, or the arbiter over the reviewer's remaining findings, would merge it. The PR stays a draft until you mark it ready. Dependents start (with "Dependents wait for green CI" on, only once the PR's CI is green or has no checks; CI shows on the ticket row) |
@@ -232,6 +302,21 @@ a fresh fixer runs them through checks, the verifier and a push as usual.
 Merged or canceled tickets can't take changes: the router says which part went
 nowhere and needs a follow-up initiative. Before the plan is approved, the same
 box still re-plans.
+
+When your words change the plan rather than code inside a ticket (another
+approach or architecture, a changed API or contract, scope added or dropped),
+the router re-plans instead. A fresh planner revises the plan with your words
+and `tickets.md`, the built tickets with their PRs and diffs. Steps already
+running finish, but no new ticket starts. The revised plan goes through plan
+review and approval as usual. Then:
+
+- tickets whose text is unchanged keep building;
+- tickets whose text changed are rebuilt from their base on a new PR, and so is
+  every ticket stacked on them, with the old PR closed;
+- tickets the plan drops are canceled, with their PRs closed;
+- new tickets start.
+
+Merged tickets stay as they are.
 
 Feedback that arrives while a ticket is busy (building, in review, being fixed)
 is not left behind: once the ticket's last step ends, a fixer picks it up.
@@ -436,7 +521,11 @@ The card also lists every rule active in the project.
 
 `pnpm dev` runs the server without file watching. A restart does not stop the
 agents, so restart as often as you like while you change the factory, or use
-`pnpm --filter @factory/server dev:watch` to restart on every save.
+`pnpm --filter @factory/server dev:watch` to restart on every save. With the
+launchd jobs installed, the watch restarts the server for you once your changes
+typecheck; `pnpm service restart` does the same by hand: it sends the server
+SIGTERM (and a second one if it is still waiting after 30 seconds), and launchd
+starts it again from the checkout.
 
 Only one server runs per database: a second one started with the same
 `DATABASE_URL` exits at once with a message, before it migrates anything or
@@ -505,6 +594,52 @@ or that disagree between repeats are flagged, since they show nothing.
 A real run costs about $0.28 per review task and $0.26 per verify task at the
 measured averages: roughly $4 for the default review cohort (14 tasks) and
 $2.60 for the verify cohort (10), double with `--compare`.
+
+`--compare-model` and `--compare-effort` make the second arm differ in model or
+effort instead of role file (`--effort` sets the first arm's), so a cheaper
+configuration is measured on the same cases, interleaved, with the paired
+difference in the report:
+
+```bash
+pnpm --filter @factory/server eval --role verify --compare-model sonnet --repeats 4
+pnpm --filter @factory/server eval --role review --compare-effort medium --repeats 3
+```
+
+Steps without synthetic cases (the arbiter, steering, the plan reviewer) are
+measured by replaying the real runs they made:
+
+```bash
+pnpm --filter @factory/server replay --kind arbitrate --models fable,opus --repeats 3
+```
+
+Every succeeded run of that kind is re-run once per model and repeat, each in
+its own sandbox that shows only the past: a copy of the initiative folder as it
+stood when the run started (later rounds and the run's own decision left out,
+the initiative's plan.md taken from the round current then), a private git
+repository with the project's branches wound back to that moment, a worktree
+from it for the run's checkout, the main checkout and every other worktree its
+inputs name, and its stored prompt and inputs pointed at those, with today's
+role prompt, tools and environment. GitHub is out of reach (a logged-out `gh`,
+no git credentials), since it shows how things turned out; the linked PR
+checkouts are left out for the same reason. Inputs that could only be copied as
+they are now are listed per case. The report gives, per model, how often it
+reached the original verdict and agreed with itself across repeats, how often
+the models agree with each other and on which cases they differ, and cost and
+time; `outputs/<case>/<model>-<repeat>.md` holds every replay's file. It reads
+the database and never writes it. A step that relied on GitHub state then (a
+PR's CI, its threads) has none now, so compare the models with each other there
+rather than with the original verdict. Eval and replay agents count as "Judge
+evals" in Usage.
+
+Replays run every case once with each model before any repeat, so `--max n`
+(run only the first n) keeps whole cases: with two models, `--max 100` is 50
+cases once each, which compares the models but not their consistency. To cut a
+running replay short, stop it, then rebuild its report from the replays that
+belong to the cut:
+
+```bash
+pnpm --filter @factory/server replay --report --out <dir> --max 100
+```
 
 Layout: `server/` (Fastify + postgres.js, the orchestrator in
 `server/src/pipeline/engine.ts`, the `claude` runner in

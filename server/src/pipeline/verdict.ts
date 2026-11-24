@@ -16,7 +16,7 @@ export const VERDICTS: Record<VerdictKind, VerdictSpec> = {
   fix: { prefix: 'FIX', tokens: ['APPLIED', 'NO-CHANGES', 'NOTHING-TO-DO', 'BLOCKED', 'REBUILD'] },
   verify: { prefix: 'VERDICT', tokens: ['APPROVE', 'BLOCK'] },
   arbitrate: { prefix: 'DECISION', tokens: ['APPROVE', 'RETRY', 'ESCALATE'] },
-  steer: { prefix: 'ROUTE', tokens: ['TICKETS', 'NONE'] },
+  steer: { prefix: 'ROUTE', tokens: ['TICKETS', 'REPLAN', 'NONE'] },
   retro: { prefix: 'RETRO', tokens: ['RULES', 'NO-RULES'] },
 };
 

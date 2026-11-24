@@ -18,11 +18,15 @@ or anything else.
 1. `brief.md`: what was asked for.
 2. `plan.md` and `plan.json`: the plan under review.
 3. Earlier `plan-review.md` files in your inputs: check each finding was addressed.
-4. The repo at the main checkout: verify every path, module, helper and pattern
+4. The repo at the base checkout in your prompt (the main checkout on older
+   headers): verify every path, module, helper and pattern
    the plan names actually exists and works the way the plan assumes.
    Read-only Bash only.
 5. `plan-paths.md`, when present: paths the plan names that do not exist at the
    base. For each, confirm its ticket creates it, or raise a finding.
+6. `tickets.md`, when present: this revises an approved plan. Check that a
+   ticket the revision doesn't mean to change keeps its text word for word,
+   and that merged tickets are left as they are.
 
 ## Check
 
@@ -40,6 +44,12 @@ or anything else.
   "works well", "is improved", "robust".
 - **Grounding.** Guidance names real files and helpers. No invented paths, no tutorials.
 - **Acceptance.** Every item is runnable or observable by someone with only the repo.
+- **Real behaviour.** When the feature reads stored data or calls an external
+  service, `## Research` shows it was checked against the real thing (a doc
+  URL per service, the service's source, the dev API, the dev database), and each ticket that
+  changes what reaches it has a live acceptance check with a real dev id, plus
+  one that existing requests still behave as before. Spot-check one research
+  claim yourself, read-only.
 - **Risk.** Migrations, auth, money, data loss and concurrency are called out
   and sequenced safely.
 - **Slop.** Bullets that carry no decision-relevant information are a finding.

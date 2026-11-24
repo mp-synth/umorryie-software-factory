@@ -16,15 +16,18 @@ import { EFFORT, ROLE_FILES, header } from './pipeline/role-prompt.ts';
 import { outputFailure } from './pipeline/verdict.ts';
 
 const USAGE =
-  'usage: pnpm --filter @factory/server eval --role review|verify [--model opus] [--repeats 2] [--role-file f.md] [--compare f.md] [--cases a,b] [--out dir] [--dry-run]';
+  'usage: pnpm --filter @factory/server eval --role review|verify [--model opus] [--effort high] [--repeats 2] [--role-file f.md] [--compare f.md] [--compare-model sonnet] [--compare-effort medium] [--cases a,b] [--out dir] [--dry-run]';
 
 const { values: opts } = parseArgs({
   options: {
     role: { type: 'string' },
     model: { type: 'string' },
+    effort: { type: 'string' },
     repeats: { type: 'string' },
     'role-file': { type: 'string' },
     compare: { type: 'string' },
+    'compare-model': { type: 'string' },
+    'compare-effort': { type: 'string' },
     cases: { type: 'string' },
     out: { type: 'string' },
     'dry-run': { type: 'boolean', default: false },
@@ -49,7 +52,8 @@ function existingFile(value: string | undefined): string | null {
   return file;
 }
 
-const armLabel = (role: EvalRole, arm: Arm): string => arm.roleFile ?? `agents/${ROLE_FILES[role]}`;
+const armLabel = (role: EvalRole, arm: Arm, model: string): string =>
+  `${arm.roleFile ?? `agents/${ROLE_FILES[role]}`} · ${arm.model ?? model} · ${arm.effort ?? EFFORT[role]}`;
 
 function taskPrompt(role: EvalRole, f: Fixture): string {
   const title = `Factory step: ${role}. Ticket: ${ticketLabel(f.ticket)} (key ${f.ticket.key})`;
@@ -110,8 +114,8 @@ async function runTask(role: EvalRole, model: string, task: PlannedTask, c: Eval
       kind: role,
       cwd: f.worktree,
       prompt: taskPrompt(role, f),
-      model,
-      effort: EFFORT[role],
+      model: arm.model ?? model,
+      effort: arm.effort ?? EFFORT[role],
       roleFile: arm.roleFile ?? undefined,
       addDirs: [f.runDir],
       env: { FACTORY_BASE: f.base, FACTORY_BRANCH: f.branch },
@@ -136,11 +140,18 @@ async function main(): Promise<void> {
   const role = parseRole(opts.role);
   const model = opts.model ?? DEFAULT_INITIATIVE_SETTINGS.models[role];
   const repeats = parseRepeats(opts.repeats);
-  const arms = planArms(existingFile(opts['role-file']), existingFile(opts.compare));
+  const arms = planArms({
+    roleFile: existingFile(opts['role-file']),
+    model: opts.model ?? null,
+    effort: opts.effort ?? null,
+    compare: existingFile(opts.compare),
+    compareModel: opts['compare-model'] ?? null,
+    compareEffort: opts['compare-effort'] ?? null,
+  });
   const cases = selectCases(role, opts.cases ? opts.cases.split(',').map((n) => n.trim()).filter(Boolean) : [], CASES);
   const tasks = planCohort(cases.map((c) => c.name), arms.map((a) => a.id), repeats);
   say(`Eval ${role} with ${model}: ${cases.length} cases x ${repeats} repeats x ${arms.length} arm${arms.length > 1 ? 's' : ''} = ${tasks.length} tasks`);
-  for (const arm of arms) say(`  arm ${arm.id}: ${armLabel(role, arm)}`);
+  for (const arm of arms) say(`  arm ${arm.id}: ${armLabel(role, arm, model)}`);
   if (opts['dry-run']) {
     say('Fixtures (built in the temp directory and removed):');
     for (const c of cases) await describeFixture(c);
@@ -169,7 +180,7 @@ async function main(): Promise<void> {
   } catch (err) {
     failure = err;
   }
-  const report = buildReport({ role, model, repeats, planned: tasks.length, arms: arms.map((a) => ({ id: a.id, label: armLabel(role, a) })), results });
+  const report = buildReport({ role, model, repeats, planned: tasks.length, arms: arms.map((a) => ({ id: a.id, label: armLabel(role, a, model) })), results });
   fs.writeFileSync(path.join(out, 'report.md'), renderMarkdown(report));
   fs.writeFileSync(path.join(out, 'report.json'), renderJson(report));
   say('');

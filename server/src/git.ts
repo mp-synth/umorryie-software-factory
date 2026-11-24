@@ -321,6 +321,22 @@ export async function commitsAhead(worktree: string, base: string): Promise<numb
   return r.code === 0 ? Number(r.stdout.trim()) : 0;
 }
 
+/**
+ * Puts the worktree's current tree on top of `onto` (an earlier head of the same remote branch) as one
+ * commit whose parents are HEAD and `onto`, and moves the branch there. The push that follows is a
+ * fast-forward, so nothing pushed before is rewritten, and the branch's diff is exactly the new tree.
+ * Returns the new commit, or null when `onto` is already in HEAD's history (a plain push works).
+ */
+export async function carryTreeOnto(worktree: string, onto: string, message: string): Promise<string | null> {
+  const head = await revParse(worktree, 'HEAD');
+  const earlier = await revParse(worktree, onto);
+  if (!head || !earlier || (await isAncestor(worktree, earlier, head))) return null;
+  const tree = await gitOut(worktree, ['rev-parse', 'HEAD^{tree}']);
+  const commit = await gitOut(worktree, ['commit-tree', tree, '-p', head, '-p', earlier, '-m', message]);
+  await gitOut(worktree, ['merge', '--ff-only', '--quiet', commit]);
+  return commit;
+}
+
 export async function isAncestor(cwd: string, ancestor: string, descendant: string): Promise<boolean> {
   return (await git(cwd, ['merge-base', '--is-ancestor', ancestor, descendant])).code === 0;
 }
