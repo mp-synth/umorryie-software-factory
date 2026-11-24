@@ -24,12 +24,12 @@ import {
   Undo2,
   Wrench,
 } from 'lucide-react';
-import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { PR_SWEEP_CLAIM_MINUTES, overSizeBudget, type InitiativeDetail, type Run, type Ticket } from '@factory/shared';
 import { api, type BulkAction, type TicketAction } from '@/lib/api';
 import { useNow } from '@/lib/live';
-import { runKind, isArbitrating, isRunInFlight } from '@/lib/status';
+import { runKind, isArbitrating, isRunInFlight, replacedRunIds } from '@/lib/status';
 import { copyWithToast, toastError } from '@/lib/toasts';
 import { ago, cn, copy, money, pad2, runDuration, shortPath } from '@/lib/utils';
 import { Markdown } from './Markdown';
@@ -480,6 +480,7 @@ function CopyChip({ value, display, icon }: { value: string; display?: string; i
 function RunTimeline({ runs }: { runs: Run[] }) {
   const dock = useRunDock();
   const now = useNow(1000, runs.some((r) => r.status === 'running'));
+  const replaced = useMemo(() => replacedRunIds(runs), [runs]);
   return (
     <div>
       <div className="section-title mb-1.5">Agent runs</div>
@@ -488,7 +489,11 @@ function RunTimeline({ runs }: { runs: Run[] }) {
           const k = runKind[r.kind];
           return (
             <li key={r.id}>
-              <button onClick={() => dock.watch(r.id)} className="group relative flex w-full items-center gap-3 rounded-lg px-0 py-1 text-left">
+              <button
+                onClick={() => dock.watch(r.id)}
+                title={replaced.has(r.id) ? `A later ${k.agent.toLowerCase()} run replaced this one` : undefined}
+                className={cn('group relative flex w-full items-center gap-3 rounded-lg px-0 py-1 text-left', replaced.has(r.id) && 'opacity-50 hover:opacity-80')}
+              >
                 <span className={cn('relative z-10 grid h-6 w-6 place-items-center rounded-full border border-line bg-surface', k.color)}>
                   <k.icon className="h-3 w-3" />
                 </span>
@@ -496,7 +501,7 @@ function RunTimeline({ runs }: { runs: Run[] }) {
                   {k.agent}
                   {r.round > 0 && r.kind !== 'gate' && <span className="text-zinc-600"> · R{r.round}</span>}
                 </span>
-                <RunPill status={r.status} />
+                <RunPill status={r.status} replaced={replaced.has(r.id)} />
                 <VerdictPill verdict={r.verdict} />
                 <span className="ml-auto flex items-center gap-3 font-mono text-2xs tabular-nums text-zinc-500">
                   {r.model && <span className="hidden @sm:inline">{r.model}</span>}

@@ -99,6 +99,17 @@ export const isRunInFlight = (r: { status: RunStatus }): boolean => r.status ===
 
 export const isArbitrating = (runs: { kind: RunKind; status: RunStatus }[]): boolean => runs.some((r) => r.kind === 'arbitrate' && isRunInFlight(r));
 
+type ReplaceableRun = { id: string; kind: RunKind; status: RunStatus; ticketId: string | null; queuedAt: string; startedAt: string | null };
+
+/** Ids of failed or interrupted runs that a later run of the same agent, on the same ticket, has replaced. */
+export function replacedRunIds(runs: ReplaceableRun[]): Set<string> {
+  const scope = (r: ReplaceableRun) => `${r.ticketId ?? ''}:${r.kind}`;
+  const at = (r: ReplaceableRun) => Date.parse(r.startedAt ?? r.queuedAt);
+  const latest = new Map<string, number>();
+  for (const r of runs) latest.set(scope(r), Math.max(latest.get(scope(r)) ?? -Infinity, at(r)));
+  return new Set(runs.filter((r) => (r.status === 'failed' || r.status === 'interrupted') && latest.get(scope(r))! > at(r)).map((r) => r.id));
+}
+
 export const isNotArchived = (i: { status: InitiativeStatus }): boolean => i.status !== 'archived';
 
 export const findSucceededRun = <R extends { kind: RunKind; status: RunStatus }>(runs: R[], kind: RunKind): R | undefined =>

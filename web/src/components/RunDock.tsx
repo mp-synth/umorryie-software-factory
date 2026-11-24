@@ -36,7 +36,7 @@ import { Link, useMatch, useSearchParams } from 'react-router-dom';
 import type { Run, RunEvent } from '@factory/shared';
 import { api } from '@/lib/api';
 import { useNow, useRunEvents } from '@/lib/live';
-import { runKind, isRunInFlight } from '@/lib/status';
+import { runKind, isRunInFlight, replacedRunIds } from '@/lib/status';
 import { copyWithToast, toastError, toastSuccess } from '@/lib/toasts';
 import { cn, money, pad2, runDuration, shortPath, tokens } from '@/lib/utils';
 import { Markdown } from './Markdown';
@@ -342,6 +342,7 @@ const Feed = forwardRef<FeedHandle, { runs: Run[]; onDetails: (id: string) => vo
   const { scroller, content, atBottom, release, toBottom, onScroll, onWheel } = useStickToBottom();
 
   const newest = runs[runs.length - 1]?.id;
+  const replaced = useMemo(() => replacedRunIds(runs), [runs]);
   const streaming = new Set(runs.filter((r) => r.status === 'running').slice(-MAX_AUTO_STREAMS).map((r) => r.id));
   const isOpen = (r: Run) => toggled[r.id] ?? (streaming.has(r.id) || r.id === newest);
 
@@ -361,6 +362,7 @@ const Feed = forwardRef<FeedHandle, { runs: Run[]; onDetails: (id: string) => vo
             <RunBlock
               key={r.id}
               run={r}
+              replaced={replaced.has(r.id)}
               open={isOpen(r)}
               onToggle={() => {
                 release();
@@ -383,13 +385,18 @@ const Feed = forwardRef<FeedHandle, { runs: Run[]; onDetails: (id: string) => vo
   );
 });
 
-function RunBlock({ run, open, onToggle, onDetails }: { run: Run; open: boolean; onToggle: () => void; onDetails: () => void }) {
+function RunBlock({ run, replaced, open, onToggle, onDetails }: { run: Run; replaced: boolean; open: boolean; onToggle: () => void; onDetails: () => void }) {
   const k = runKind[run.kind];
   const now = useNow(1000, run.status === 'running');
   return (
     <section id={`feed-${run.id}`} className="scroll-mt-1">
       <div className="sticky top-0 z-[1] flex items-center gap-1 border-b border-line/70 bg-drawer/95 pr-2 backdrop-blur">
-        <button onClick={onToggle} aria-expanded={open} className="flex min-w-0 flex-1 items-center gap-2.5 py-2 pl-3 text-left">
+        <button
+          onClick={onToggle}
+          aria-expanded={open}
+          title={replaced ? `A later ${k.agent.toLowerCase()} run replaced this one` : undefined}
+          className={cn('flex min-w-0 flex-1 items-center gap-2.5 py-2 pl-3 text-left', replaced && 'opacity-50 hover:opacity-80')}
+        >
           <ChevronRight className={cn('h-3 w-3 shrink-0 text-zinc-600 transition-transform', open && 'rotate-90')} />
           <span className={cn('grid h-6 w-6 shrink-0 place-items-center rounded-md border border-line bg-surface-2', k.color)}>
             <k.icon className="h-3.5 w-3.5" />
@@ -401,7 +408,7 @@ function RunBlock({ run, open, onToggle, onDetails }: { run: Run; open: boolean;
             </span>
             <span className="block truncate text-2xs text-zinc-500">{run.ticketSeq ? runLabel(run) : 'Whole initiative'}</span>
           </span>
-          <RunPill status={run.status} />
+          <RunPill status={run.status} replaced={replaced} />
           <VerdictPill verdict={run.verdict} />
           <span className="w-11 shrink-0 text-right font-mono text-2xs tabular-nums text-zinc-500">{run.status === 'queued' ? '' : runDuration(run, now)}</span>
         </button>

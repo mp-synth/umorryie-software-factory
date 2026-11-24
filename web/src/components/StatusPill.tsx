@@ -20,10 +20,11 @@ export function TicketPill({ status }: { status: TicketStatus }) {
   );
 }
 
-export function RunPill({ status }: { status: RunStatus }) {
+/** `replaced`: a later run of the same agent took over, so a failure here no longer needs attention. */
+export function RunPill({ status, replaced }: { status: RunStatus; replaced?: boolean }) {
   const s = runStatus[status] ?? { label: status, tone: 'neutral' as const };
   return (
-    <Pill tone={s.tone} live={s.live}>
+    <Pill tone={replaced ? 'muted' : s.tone} live={s.live}>
       {s.label}
     </Pill>
   );
