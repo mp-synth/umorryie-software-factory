@@ -197,11 +197,27 @@ export async function openPrsInitiative(projectId: string): Promise<Initiative |
   return i ? normalizeInitiative(i) : null;
 }
 
-export async function trackedPrNumbers(projectId: string): Promise<Set<number>> {
+export interface TrackedPrs {
+  prNumbers: Set<number>;
+  initiatives: Pick<Initiative, 'id' | 'slug'>[];
+}
+
+/** What a project's live initiatives still look after: archiving an initiative, or canceling a ticket, lets go of its PRs. */
+export async function trackedPrs(projectId: string): Promise<TrackedPrs> {
+  const initiatives = await sql<Pick<Initiative, 'id' | 'slug'>[]>`
+    select id, slug from initiatives where project_id = ${projectId} and status <> 'archived'`;
   const rows = await sql<{ prNumber: number }[]>`
     select t.pr_number from tickets t join initiatives i on i.id = t.initiative_id
-    where i.project_id = ${projectId} and t.pr_number is not null`;
-  return new Set(rows.map((r) => r.prNumber));
+    where i.project_id = ${projectId} and i.status <> 'archived' and t.pr_number is not null and t.status not in ('merged', 'canceled')`;
+  return { prNumbers: new Set(rows.map((r) => r.prNumber)), initiatives };
+}
+
+/** Puts a canceled ticket back to work, such as an adopted PR that was closed and opened again. */
+export async function reopenTicket(initiativeId: string, key: string, patch: Partial<Ticket>): Promise<Ticket | null> {
+  const [row] = await sql<Ticket[]>`
+    update tickets set ${sql(prepare(patch))}, updated_at = now()
+    where initiative_id = ${initiativeId} and key = ${key} and status = 'canceled' returning *`;
+  return touchTicket(row);
 }
 
 export async function nextTicketSeq(initiativeId: string): Promise<number> {

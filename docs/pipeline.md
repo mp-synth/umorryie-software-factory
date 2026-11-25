@@ -145,9 +145,10 @@ that lands after you acted is not applied. While it decides, the ticket shows
 it as waiting on you.
 
 Every 15 minutes a PR sweep does the same on its own for every open factory PR
-across all initiatives, and for every open PR you opened yourself in a
-project's GitHub repo. Those are adopted into the project's **Open PRs**
-initiative: the fixer works on a local `factory/pr-<n>` worktree that tracks
+across all initiatives, and for every other open PR you opened in a
+project's GitHub repo: one opened outside the factory, or one an archived or
+deleted initiative left behind. Those are adopted into the project's **Open PRs**
+initiative, and one closed and opened again goes back to its ticket there: the fixer works on a local `factory/pr-<n>` worktree that tracks
 the PR's branch, pushes verified fixes to that branch (never force), and never
 rebuilds your PR. Like any initiative, it reviews each fixed branch and posts
 the review on the PR unless you switch that off in its Autopilot card. Archive a project's Open PRs initiative to stop

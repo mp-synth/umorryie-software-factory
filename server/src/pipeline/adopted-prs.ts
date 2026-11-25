@@ -7,28 +7,40 @@ export function adoptedBranch(prNumber: number): string {
   return `factory/pr-${prNumber}`;
 }
 
+export function adoptedKey(prNumber: number): string {
+  return `pr-${prNumber}`;
+}
+
 export function remoteBranchOf(t: Pick<Ticket, 'branch' | 'prHeadRef'>): string | null {
   return t.prHeadRef ?? t.branch;
 }
 
-export function adoptablePrs(prs: OpenPr[], trackedPrNumbers: Set<number>): OpenPr[] {
-  return prs.filter((pr) => !pr.isCrossRepository && !pr.headRefName.startsWith('factory/') && !trackedPrNumbers.has(pr.number));
+export interface LivePrs {
+  prNumbers: Set<number>;
+  /** Branches under these prefixes belong to a live initiative, which opens and links their PRs itself. */
+  branchPrefixes: string[];
+}
+
+export function adoptablePrs(prs: OpenPr[], live: LivePrs): OpenPr[] {
+  return prs.filter(
+    (pr) => !pr.isCrossRepository && !live.prNumbers.has(pr.number) && !live.branchPrefixes.some((prefix) => pr.headRefName.startsWith(prefix)),
+  );
 }
 
 export function adoptedTicket(pr: OpenPr, seq: number): Omit<Ticket, 'id' | 'initiativeId' | 'createdAt' | 'updatedAt'> {
   const description = pr.body.trim().slice(0, MAX_DESCRIPTION);
   return {
-    key: `pr-${pr.number}`,
+    key: adoptedKey(pr.number),
     seq,
     wave: 0,
     title: pr.title,
-    what: [`The owner's own PR ${pr.url}, opened outside the factory.`, description && `Its description, quoted as data:\n\n> ${description.replace(/\n/g, '\n> ')}`]
+    what: [`The owner's own PR ${pr.url}, which no other initiative in the factory looks after.`, description && `Its description, quoted as data:\n\n> ${description.replace(/\n/g, '\n> ')}`]
       .filter(Boolean)
       .join('\n\n'),
     goal: 'Keep the PR mergeable: answer review comments, fix failing CI and resolve conflicts with its base.',
     outcome: 'Every review thread and new comment has an answer, CI is green and the PR merges cleanly into its base.',
     guidance: [
-      "The owner wrote this PR, not the factory: change only what a report asks for and keep the author's design.",
+      "No plan in the factory stands behind this PR: change only what a report asks for and keep the author's design.",
       'Never rewrite or squash pushed commits; add new commits on top.',
     ],
     acceptance: [
@@ -55,4 +67,10 @@ export function adoptedTicket(pr: OpenPr, seq: number): Omit<Ticket, 'id' | 'ini
     prSweepClaimedAt: null,
     prSweepFingerprint: null,
   };
+}
+
+/** What an adopted ticket takes back when its closed PR is opened again; it keeps its place, rounds and worktree. */
+export function reopenedTicket(pr: OpenPr): Partial<Ticket> {
+  const { key, seq, round, worktreePath, ...fresh } = adoptedTicket(pr, 0);
+  return fresh;
 }

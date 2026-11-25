@@ -24,6 +24,7 @@ import {
   baseCheckoutsDir,
   branchName,
   rebuildStateFile,
+  initiativeBranchPrefix,
   initiativeDir,
   planRoundDir,
   readIfExists,
@@ -66,7 +67,7 @@ import {
   type DecisionText,
 } from './arbiter.ts';
 import { ticketLabel } from './labels.ts';
-import { adoptablePrs, adoptedTicket, remoteBranchOf } from './adopted-prs.ts';
+import { adoptablePrs, adoptedKey, adoptedTicket, remoteBranchOf, reopenedTicket } from './adopted-prs.ts';
 import { pullRequestText } from './pull-request.ts';
 import { earlierBranches, rebuildBlocker, startedAbove } from './rebuild.ts';
 import { planTicketSeqs, renameCanceledKeys, replanAwaitsAnswers, revisePlannedTickets, wasApproved } from './replan.ts';
@@ -3713,7 +3714,7 @@ async function createOpenPrsInitiative(project: Project): Promise<Initiative> {
       projectId: project.id,
       slug: slugify(`open prs ${project.name}`, 32),
       title: `Open PRs · ${project.name}`,
-      brief: `PRs you opened in ${project.name} outside the factory. Every sweep adopts new ones, and a fresh fixer answers their review comments and fixes failing CI and conflicts on their own branches. Archive this initiative to stop adopting PRs from this repo.`,
+      brief: `PRs you opened in ${project.name} that no other initiative looks after: opened outside the factory, or left behind by an archived or deleted one. Every sweep adopts new ones, and a fresh fixer answers their review comments and fixes failing CI and conflicts on their own branches. Archive this initiative to stop adopting PRs from this repo.`,
       baseBranch: project.defaultBranch,
       settings: DEFAULT_INITIATIVE_SETTINGS,
     });
@@ -3729,17 +3730,21 @@ async function adoptOpenPrs(project: Project): Promise<void> {
   if (!gitx.isGithubUrl(project.remoteUrl)) return;
   const existing = await repo.openPrsInitiative(project.id);
   if (existing?.status === 'archived') return;
-  const fresh = adoptablePrs(await gh.myOpenPrs(project.repoPath), await repo.trackedPrNumbers(project.id));
+  const tracked = await repo.trackedPrs(project.id);
+  const live = { prNumbers: tracked.prNumbers, branchPrefixes: tracked.initiatives.map(initiativeBranchPrefix) };
+  const fresh = adoptablePrs(await gh.myOpenPrs(project.repoPath), live);
   if (!fresh.length) return;
   const inbox = existing ?? (await createOpenPrsInitiative(project));
   let seq = await repo.nextTicketSeq(inbox.id);
   for (const pr of fresh) {
-    const t = await repo.insertTicketIfNew({ initiativeId: inbox.id, ...adoptedTicket(pr, seq) });
+    const adopted = await repo.insertTicketIfNew({ initiativeId: inbox.id, ...adoptedTicket(pr, seq) });
+    if (adopted) seq++;
+    const t = adopted ?? (await repo.reopenTicket(inbox.id, adoptedKey(pr.number), reopenedTicket(pr)));
     if (!t) continue;
-    seq++;
+    const pickedUp = adopted ? `Adopted ${pr.url} (\`${pr.headRefName}\`).` : `${pr.url} (\`${pr.headRefName}\`) is open again.`;
     await systemMessage(
       { initiativeId: inbox.id, ticketId: t.id },
-      `Adopted ${pr.url} (\`${pr.headRefName}\`). The PR sweep fixes its review comments, failing CI and conflicts on that branch.`,
+      `${pickedUp} The PR sweep fixes its review comments, failing CI and conflicts on that branch.`,
     );
   }
   await refreshInitiativeStatus(inbox.id);

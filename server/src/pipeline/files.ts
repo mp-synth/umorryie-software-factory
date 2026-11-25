@@ -5,7 +5,7 @@ import { config } from '../config.ts';
 import { seqLabel, ticketLabel } from './labels.ts';
 import { slugify } from './plan.ts';
 
-function initiativeFolder(i: Initiative): string {
+function initiativeFolder(i: Pick<Initiative, 'id' | 'slug'>): string {
   return `${i.slug}-${i.id.slice(0, 8)}`;
 }
 
@@ -68,7 +68,12 @@ export function worktreePath(p: Project, i: Initiative, t: Ticket): string {
 }
 
 export function branchName(i: Initiative, t: Ticket): string {
-  return `factory/${initiativeFolder(i)}/${seqLabel(t.seq)}-${t.key}`;
+  return `${initiativeBranchPrefix(i)}${seqLabel(t.seq)}-${t.key}`;
+}
+
+/** Every branch the initiative builds, rebuilds included, starts with this. */
+export function initiativeBranchPrefix(i: Pick<Initiative, 'id' | 'slug'>): string {
+  return `factory/${initiativeFolder(i)}/`;
 }
 
 export function write(file: string, content: string): string {
