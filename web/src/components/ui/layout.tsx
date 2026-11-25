@@ -118,7 +118,11 @@ export function Stat({
         {to && !live && <ArrowUpRight className="ml-auto text-ink-tertiary opacity-0 transition-opacity group-hover:opacity-100" />}
       </div>
       <div className={cn('numeric heading mt-2.5 text-2xl', tone ? TONE[tone].ink : 'text-ink')}>{value}</div>
-      {sub && <div className="mt-1 truncate text-xs text-ink-tertiary">{sub}</div>}
+      {sub && (
+        <div className="mt-1 line-clamp-2 text-xs text-ink-tertiary" title={typeof sub === 'string' ? sub : undefined}>
+          {sub}
+        </div>
+      )}
     </>
   );
   const className = cn('block min-w-0 rounded-xl border bg-panel px-4 py-3.5 shadow-xs', tone === 'warn' ? 'border-tone-warn-line' : 'border-line-subtle');
