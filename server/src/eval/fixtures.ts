@@ -76,6 +76,7 @@ const ticketRecord = (spec: TicketSpec): Ticket => ({
   guidance: spec.guidance,
   acceptance: spec.acceptance,
   dependsOn: [],
+  needs: [],
   size: 'S',
   status: 'in_review',
   round: 1,

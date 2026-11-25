@@ -249,7 +249,7 @@ initiatives.
 | Initiative → Tickets | One row per ticket: status, verdict, PR, cost. Expand for what/goal/outcome, acceptance checks, guidance, branch/worktree, every agent run, and the latest output. **Run / Review / Fix** per ticket; **Run ready / Review all / Fix all PRs / Sync PRs** in bulk; edit a ticket before it starts; reset a ticket; mark approved/merged. The row shows the lines the ticket changed outside tests, lockfiles and files the repo marks `linguist-generated`, flagged when over 1.5 times its size budget (XS 50, S 200, M 500) |
 | Initiative → Activity | The conversation with the agents. **Ask** starts a read-only advisor that answers from the code; **Feedback** re-plans (before approval), goes to a fresh fixer (per ticket) or, for the whole initiative after approval, to a steering router that splits it across the PRs; **Note** just records |
 | Initiative → Learned rules | Rules a retro proposed from your steering: **Accept**, **Edit** or **Reject**, and the rules active in the project with **Retire** |
-| Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs, hold dependents until CI is green, the arbiter deciding for you, a retro once a steered PR merges or queues; round limits, arbiter decisions in a row, parallelism and the model per step (Fable 5.2, Opus 5.5, Sonnet 5.5 or Haiku 5.5, each pinned to that version and run with the 1M context window) |
+| Initiative → Autopilot | Which steps run by themselves: plan review, build after approval, review after build, auto-fix, push & open draft PRs, post reviews on PRs, start dependents once the ticket below is built, hold dependents until CI is green, the arbiter deciding for you, a retro once a steered PR merges or queues; round limits, arbiter decisions in a row, parallelism and the model per step (Fable 5.2, Opus 5.5, Sonnet 5.5 or Haiku 5.5, each pinned to that version and run with the 1M context window) |
 | Sidebar | The theme switcher (system, light or dark) sits next to the live indicator |
 | Live panel | On an initiative page, every agent of the initiative as one log in order, newest at the bottom: running agents stream live, finished ones fold to their header. Collapse it to a rail that still shows who is running, or drag its edge to resize it. Open any run for its details: tool calls with inputs and results, text, thinking, the checks log, cost/tokens/turns, its output file, the exact prompt header, and a `claude --resume` command to continue that session in your terminal. **Stop** kills it. On other pages it appears only for a run you open |
 | Agents | Every run across all initiatives, live |
@@ -262,24 +262,43 @@ Spend comes from a usage ledger (`agent_usage`), one row per agent session. Each
 | Status | Meaning |
 |---|---|
 | proposed | In a plan you haven't approved |
-| to do | Approved; starts when its dependencies are approved (or press Run) |
+| to do | Approved; starts once the ticket it stacks on is built and its PR is open (with **Dependents start once the ticket below is built** off: once it is approved), or press Run |
 | building | Executor is working in `~/.software-factory/worktrees/...` on `factory/<initiative>-<id>/<nn>-<key>` |
 | running checks | The project's checks command runs in the worktree. Red → fixer, which gets the failing lines and the path of the full log. Green → push + draft PR. If the command can't run at all (exit 126/127) the ticket goes to *needs you* instead of burning a fixer round. **Run checks** re-runs it by hand |
-| built | Checked and waiting for review (when auto-review is off) |
+| built | Checked and waiting for review: auto-review is off, or this is a stacked ticket whose first review waits until the ticket below is approved and its latest code is merged in (the activity feed says which) |
 | in review | A fresh reviewer reads `git diff <base>...HEAD` and the initiative's goal, success criteria and definition of done, verifies each finding, answers APPROVE or CHANGES. Code that only tests use (the PR's own, or code it leaves without a production caller) is a finding to delete it with its tests. An over-budget ticket carries a Size note in the review header |
 | changes requested | Waiting for a fixer (auto-fix runs it unless the round limit is reached) |
 | fixing | A fixer gives every item a verdict before touching code (VALID / PARTIAL / INVALID / UNCONFIRMED / NEEDS-HUMAN): a bug is fixed only after it is traced and gets a test that would fail without the fix (written, not run: CI runs tests, and the fixer re-runs only the tests that failed in the PR's CI, before and after its fix); a claim is rejected only by pointing at the code. Rounds with only failing checks, CI or conflicts get a cheaper mechanical fixer that first checks whether the base branch fails the same way and lists flaky runs for one re-run. Fixes are committed locally; after the checks pass, a fresh **verifier** reads the commits and drafted replies. Approved: the factory pushes, replies in each review thread, answers top-level comments in one summary, and resolves every thread it fixed once the fix is on the PR (bot threads it rejects with a code pointer too; a human's disputed or partly fixed thread stays open for them). Blocked: the branch is reset and a fresh fixer retries once with the findings; a second block pushes nothing and waits for you. When only rewriting pushed commits would fix the branch (someone else's commit in its history), the fixer answers REBUILD: the factory builds the ticket again on a fresh `-vN` branch and closes the old PR once the new one opens, unless another ticket already builds on it or it was built 3 times. When a PR has nothing to act on, no agent is started |
-| approved | The reviewer, or the arbiter over the reviewer's remaining findings, would merge it. The PR stays a draft until you mark it ready. Dependents start (with "Dependents wait for green CI" on, only once the PR's CI is green or has no checks; CI shows on the ticket row) |
+| approved | The reviewer, or the arbiter over the reviewer's remaining findings, would merge it. The PR stays a draft until you mark it ready. Tickets stacked on it that waited for approval start, and held reviews above it start (with "Dependents wait for green CI" on, only once the PR's CI is green or has no checks; CI shows on the ticket row) |
 | merged | Seen by Sync PRs (automatic every 5 min) or marked by you. Unblocks dependents. Its local worktree is removed, and its local branch too once no unmerged ticket is stacked on it |
 | needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row. With the arbiter on, it decides first and the row shows **Arbiter deciding**; it stays **Needs you** only when the arbiter escalates or has used its decisions |
 
-Dependent tickets are **stacked**: every group of tickets connected by
-dependencies becomes one line in plan order, so each ticket branches from the
-one just before it and its PR targets that branch. Tickets that need nothing
-from the others branch from the base branch and build in parallel. On GitHub
-the factory links those PRs into a native stacked PR as soon as the PR opens,
-and Sync PRs links any it missed (your own PRs in Open PRs too, when one targets
-another's branch). A stacked ticket's row is marked **stacked**.
+Dependent tickets are **stacked** as a tree. The planner's `depends_on` says
+what each ticket needs; each ticket's branch starts from the one ticket it
+needs and its PR targets that branch, so tickets that need the same ticket
+build side by side on it. A branch has one base, so when a ticket needs two
+tickets that don't build on each other, the later of the two (in plan order)
+stacks on the earlier. Needs another need already brings are dropped. Tickets
+that need nothing from the others branch from the base branch. The plan
+reviewer gets `stacking.md` (what each ticket stacks on, the longest line,
+the most tickets at once), and the plan's overview shows the longest line and
+how many tickets can build at once.
+
+A stacked ticket starts as soon as the ticket below is built and its PR is
+open, from that PR's pushed head, so it is built while the one below is still
+in review. Its first review waits until the ticket below is approved and its
+latest code is merged in, so every review reads its ticket on top of the code
+that merges under it. When the ticket below must be rebuilt from scratch, the
+tickets above it that are not approved yet are reset and start again from its
+new branch. Turn **Dependents start once the ticket below is built** off (in
+Autopilot) to start them only once the ticket below is approved.
+
+On GitHub the factory links stacked PRs into a native stacked PR as soon as the
+PR opens, and Sync PRs links any it missed (your own PRs in Open PRs too, when
+one targets another's branch). A GitHub stack is a single line, so when two
+tickets stack on the same one, the first PR to open joins its stack and the
+other stays a PR on that branch outside the stack; it syncs and retargets the
+same way. A stacked ticket's row is marked **stacked**.
 
 The stack keeps itself in sync. When a PR's branch changes (a verified fix is
 pushed, someone pushes to it, Sync PRs sees a merge), the factory merges it into

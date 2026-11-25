@@ -37,6 +37,7 @@ export function adoptedTicket(pr: OpenPr, seq: number): Omit<Ticket, 'id' | 'ini
       'The branch merges cleanly into its base',
     ],
     dependsOn: [],
+    needs: [],
     size: null,
     status: 'built',
     round: 0,

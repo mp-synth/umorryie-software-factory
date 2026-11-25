@@ -18,7 +18,7 @@ import {
 import { json, sql } from './db.ts';
 import { emitChange, emitRunEvent } from './events.ts';
 
-const JSON_COLUMNS = new Set(['planJson', 'settings', 'guidance', 'acceptance', 'dependsOn', 'data', 'copyFiles', 'referenceDirs', 'prSweepSkip']);
+const JSON_COLUMNS = new Set(['planJson', 'settings', 'guidance', 'acceptance', 'dependsOn', 'needs', 'data', 'copyFiles', 'referenceDirs', 'prSweepSkip']);
 
 function prepare(patch: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};

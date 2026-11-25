@@ -95,7 +95,8 @@ test('syncTarget moves a PR onto the base branch once everything below it merged
 test('reports a sibling that cannot join because another PR already sits on its parent', () => {
   const step = nextStackStep([10, 13], { pr: 10, stack: { number: 99, pullRequests: [10, 11] } });
   assert.deepEqual(step, { kind: 'taken', parent: 10, top: 11 });
-  assert.match(stackStepMessage(step, [10, 13])!, /^#13 targets the branch of #10 but can't join its GitHub stack: #11 already sits on top of it/);
+  assert.match(stackStepMessage(step, [10, 13])!, /^#13 builds on #10 beside #11, which already sits on top of it in its GitHub stack/);
+  assert.match(stackStepMessage(step, [10, 12, 14])!, /^#14 builds on #12, which is outside the GitHub stack of #10, so #14 stays outside it too/);
 });
 
 test('makes the stack again from the chain when closed PRs left in it block the line', () => {

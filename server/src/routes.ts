@@ -38,6 +38,7 @@ const settingsPatch = z
     createPrs: z.boolean(),
     postReviewsToPr: z.boolean(),
     dependentsWaitForCi: z.boolean(),
+    dependentsStartWhenBuilt: z.boolean(),
     autoArbiter: z.boolean(),
     autoMerge: z.boolean(),
     autoRetro: z.boolean(),

@@ -27,6 +27,9 @@ or anything else.
 6. `tickets.md`, when present: this revises an approved plan. Check that a
    ticket the revision doesn't mean to change keeps its text word for word,
    and that merged tickets are left as they are.
+7. `stacking.md`: how the factory will build the tickets: the ticket each
+   stacks on, the longest line, the most tickets at once, and tickets stacked
+   on one they don't need.
 
 ## Check
 
@@ -35,9 +38,18 @@ or anything else.
 - **Slicing.** Vertical slices with an observable outcome, not layers. Each
   fits one reviewable PR; flag any that will clearly exceed its size.
 - **Dependencies.** Missing edges (a ticket needs code another ticket creates)
-  break builds; unneeded edges pull independent tickets into a stack, where
-  they are built and merged one after another. Check both, and that a stack's
-  order is the order a reviewer should read it.
+  break builds; unneeded edges put independent tickets in one line, where
+  they are built and merged one after another. Check both against each
+  ticket's guidance, and that a line's order is the order a reviewer should
+  read it.
+- **Parallel work.** The longest line in `stacking.md` sets how long the
+  initiative takes. When it holds more than half the tickets, or the brief
+  asks for speed or parallel work, look for shared code that could move into
+  a small first ticket so the rest build side by side, and raise it. Flag a
+  ticket stacked on one it doesn't need unless the plan says why. Flag
+  tickets built side by side that edit the same lines (one routes file, one
+  registry) unless the plan says how their PRs merge. When more tickets can
+  build at once than the initiative runs at a time, note it.
 - **Edge cases and tests.** The edge cases that really apply are listed and
   owned by a ticket; the test strategy uses test layers that exist in this repo.
 - **Measurability.** Success criteria and outcomes are measurable. Reject

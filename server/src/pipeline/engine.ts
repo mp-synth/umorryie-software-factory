@@ -44,7 +44,7 @@ import {
   writePlanMd,
   writeTicket,
 } from './files.ts';
-import { dependencyReady } from './readiness.ts';
+import { dependencyReady, hasOpenPr, reviewWaitsFor } from './readiness.ts';
 import { removeLinks, resolveLinks } from './links.ts';
 import { mergedTicketCleanups } from './cleanup.ts';
 import { gateBody } from './gate-output.ts';
@@ -65,12 +65,12 @@ import {
   type Decision,
   type DecisionText,
 } from './arbiter.ts';
-import { seqLabel, ticketLabel } from './labels.ts';
+import { ticketLabel } from './labels.ts';
 import { adoptablePrs, adoptedTicket, remoteBranchOf } from './adopted-prs.ts';
 import { pullRequestText } from './pull-request.ts';
-import { earlierBranches, rebuildBlocker } from './rebuild.ts';
+import { earlierBranches, rebuildBlocker, startedAbove } from './rebuild.ts';
 import { planTicketSeqs, renameCanceledKeys, replanAwaitsAnswers, revisePlannedTickets, wasApproved } from './replan.ts';
-import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, section, slugify, stackDependencies, topoOrder, validatePlan } from './plan.ts';
+import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, renderStacking, section, slugify, validatePlan } from './plan.ts';
 import { sizeNote } from './size.ts';
 import { malformedVerdictReason, outputFailure, parseVerdict } from './verdict.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
@@ -528,6 +528,14 @@ async function wrapUp(run: Run): Promise<void> {
   if (run.ticketId) await releaseSweepClaimIfIdle(run.ticketId).catch((err) => console.warn('[pr-sweep]', err.message));
   await actOnPendingFeedback(run).catch((err) => console.warn('[feedback]', err.message));
   await handOverToArbiter(run).catch((err) => console.warn('[arbiter]', err.message));
+  await syncIfReviewHeld(run).catch((err) => console.warn('[held-reviews]', err.message));
+}
+
+// A ticket whose review was held during its own run could not be synced then (it was busy).
+async function syncIfReviewHeld(run: Run): Promise<void> {
+  if (!run.ticketId || isSideRun(run.kind)) return;
+  const [init, ticket] = await Promise.all([repo.getInitiative(run.initiativeId), repo.getTicket(run.ticketId)]);
+  if (init && ticket && fs.existsSync(heldReviewMarker(init, ticket))) void syncStack(init.id);
 }
 
 async function supervise(run: Run, work: () => Promise<void>): Promise<void> {
@@ -993,8 +1001,8 @@ async function afterPlan(run: Run, step: StepResult, state: StepStates['plan']):
   const canceledKeys = new Set(existingTickets.filter((t) => t.status === 'canceled').map((t) => t.key));
   const renaming = renameCanceledKeys(raw, canceledKeys, new Set(existingTickets.map((t) => t.key)));
   raw = renaming.raw;
-  const { plan, order, errors } = raw ? validatePlan(raw, s.maxTickets) : { errors: ['plan.json is missing or not valid JSON'] };
-  if (!plan || !order || errors.length) {
+  const { plan, stacked, order, errors } = raw ? validatePlan(raw, s.maxTickets) : { errors: ['plan.json is missing or not valid JSON'] };
+  if (!plan || !stacked || !order || errors.length) {
     await finish(run, 'failed', { error: `plan.json rejected: ${errors.slice(0, 5).join('; ')}` });
     const previousRejections = await sql<{ n: number }[]>`
       select count(*)::int as n from runs where initiative_id = ${init.id} and kind = 'plan' and status = 'failed' and error like 'plan.json rejected%'
@@ -1021,11 +1029,12 @@ async function afterPlan(run: Run, step: StepResult, state: StepStates['plan']):
   await sql.begin(async (tx) => {
     await tx`delete from tickets where initiative_id = ${init.id} and status = 'proposed'`;
     for (const o of order) {
-      const t = plan.tickets.find((x) => x.key === o.key)!;
+      const t = stacked.find((x) => x.key === o.key)!;
+      const needs = plan.tickets.find((x) => x.key === o.key)!.depends_on;
       await tx`
-        insert into tickets (initiative_id, key, seq, wave, title, what, goal, outcome, guidance, acceptance, depends_on, size, status)
+        insert into tickets (initiative_id, key, seq, wave, title, what, goal, outcome, guidance, acceptance, depends_on, needs, size, status)
         values (${init.id}, ${t.key}, ${seqs.get(o.key)!}, ${o.wave}, ${t.title}, ${t.what}, ${t.goal}, ${t.outcome},
-          ${tx.json(t.guidance)}, ${tx.json(t.acceptance)}, ${tx.json(t.depends_on)}, ${t.size}, 'proposed')
+          ${tx.json(t.guidance)}, ${tx.json(t.acceptance)}, ${tx.json(t.depends_on)}, ${tx.json(needs)}, ${t.size}, 'proposed')
         on conflict (initiative_id, key) do nothing`;
     }
   });
@@ -1058,6 +1067,11 @@ async function runPlanReview(run: Run): Promise<void> {
     write(path.join(dir, 'plan.md'), init.planMd ?? ''),
     write(path.join(dir, 'plan.json'), JSON.stringify(init.planJson, null, 2)),
   ];
+  const { plan, stacked } = init.planJson ? validatePlan(init.planJson, s.maxTickets) : {};
+  if (plan && stacked) {
+    const asItems = (tickets: { key: string; depends_on: string[] }[]) => tickets.map((t) => ({ key: t.key, dependsOn: t.depends_on }));
+    inputs.push(write(path.join(dir, 'stacking.md'), renderStacking(asItems(plan.tickets), asItems(stacked), s.concurrency)));
+  }
   for (let r = 1; r < init.planRound; r++) {
     const prev = path.join(planRoundDir(init, r), 'plan-review.md');
     if (fs.existsSync(prev)) inputs.push(prev);
@@ -1134,9 +1148,15 @@ async function startApprovedPlan(init: Initiative, approval: Pick<Message, 'auth
 // ones stacked on them), restart unstarted ones from their new text, drop the rest.
 // Each revised ticket gets its new text, as a proposed ticket, before anything else touches it.
 async function applyRevisedPlan(init: Initiative): Promise<string[]> {
-  const { plan, order } = init.planJson ? validatePlan(init.planJson, repo.initiativeSettings(init).maxTickets) : {};
-  if (!plan || !order) return [];
-  const { keep, rebuild, restart, drop } = revisePlannedTickets(plan.tickets, order, await repo.listTickets(init.id));
+  const { plan, stacked, order } = init.planJson ? validatePlan(init.planJson, repo.initiativeSettings(init).maxTickets) : {};
+  if (!plan || !stacked || !order) return [];
+  const needsOf = (key: string) => plan.tickets.find((p) => p.key === key)!.depends_on;
+  const { keep, rebuild, restart, drop } = revisePlannedTickets(stacked, order, await repo.listTickets(init.id));
+  // A kept ticket on the same base keeps building, but what it needs and its wave follow the revision.
+  for (const { ticket, order: o } of keep) {
+    const needs = needsOf(ticket.key);
+    if (ticket.wave !== o.wave || (ticket.needs ?? []).join() !== needs.join()) await repo.updateTicket(ticket.id, { needs, wave: o.wave });
+  }
   if (!rebuild.length && !restart.length && !drop.length) return [];
   const project = await mustProject(init.projectId);
   const notes: string[] = [];
@@ -1150,6 +1170,7 @@ async function applyRevisedPlan(init: Initiative): Promise<string[]> {
       guidance: spec.guidance,
       acceptance: spec.acceptance,
       dependsOn: spec.depends_on,
+      needs: needsOf(t.key),
       size: spec.size,
       wave: o.wave,
       status: 'proposed',
@@ -1219,13 +1240,14 @@ export async function startReadyTickets(initiativeId: string, manual = false): P
   if (!manual && !repo.initiativeSettings(init).autoExecute) return 0;
   if (applyingRevisedPlans.has(init.id) || (await replanInFlight(init))) return 0;
   const tickets = await repo.listTickets(init.id);
+  const s = repo.initiativeSettings(init);
+  const rules = { waitForCi: s.dependentsWaitForCi, startWhenBuilt: s.dependentsStartWhenBuilt };
   let started = 0;
   for (const t of tickets) {
     if (t.status !== 'todo') continue;
-    const waitForCi = repo.initiativeSettings(init).dependentsWaitForCi;
     const ready = t.dependsOn.every((k) => {
       const d = tickets.find((x) => x.key === k);
-      return d && dependencyReady(d, waitForCi);
+      return d && dependencyReady(d, rules);
     });
     if (!ready) continue;
     try {
@@ -1235,7 +1257,121 @@ export async function startReadyTickets(initiativeId: string, manual = false): P
       console.warn('[startReadyTickets]', (err as Error).message);
     }
   }
+  if (s.dependentsStartWhenBuilt) await startHeldReviews(init.id).catch((err) => console.warn('[held-reviews]', (err as Error).message));
   return started;
+}
+
+/**
+ * Why a ticket's first review waits, or null when it can start: the ticket below is not approved
+ * yet (see `reviewWaitsFor`), or its latest pushed code is not merged into this branch yet.
+ */
+async function heldReviewReason(init: Initiative, ticket: Ticket): Promise<string | null> {
+  const s = repo.initiativeSettings(init);
+  const below = stackBase(ticket, await repo.listTickets(init.id));
+  const waitsFor = reviewWaitsFor(ticket, below, s.dependentsStartWhenBuilt);
+  if (waitsFor) return `The review waits until ${ticketLabel(waitsFor)}, the ticket below it, is approved, so it reads this ticket on top of the code that merges under it.`;
+  if (s.dependentsStartWhenBuilt && ticket.lastVerdict === null && below && (await lacksPushedHead(init, ticket, below))) {
+    return `The review waits until the latest code of ${ticketLabel(below)}, the ticket below it, is merged into this branch.`;
+  }
+  return null;
+}
+
+async function lacksPushedHead(init: Initiative, ticket: Ticket, below: Ticket, { fetched = false } = {}): Promise<boolean> {
+  const remote = remoteBranchOf(below);
+  // Stack sync only merges into a ticket with an open PR; without one, nothing could bring the code in.
+  if (!hasOpenPr(below) || !remote || !ticket.worktreePath || !hasOpenPr(ticket)) return false;
+  if (!fetched) await gitx.fetchOrigin((await mustProject(init.projectId)).repoPath, { refs: [gitx.trackingRefspec(remote)] });
+  return !(await gitx.isAncestor(ticket.worktreePath, `origin/${remote}`, 'HEAD'));
+}
+
+/** Marks a ticket whose first review the factory held; only those are started by `startHeldReviews`. */
+function heldReviewMarker(init: Initiative, ticket: Ticket): string {
+  return path.join(ticketDir(init, ticket), 'review-waits.md');
+}
+
+// Enqueues the automatic review of a ticket, unless its first review waits for the ticket below.
+async function enqueueAutoReview(scope: MessageScope, init: Initiative, ticket: Ticket): Promise<void> {
+  const held = await heldReviewReason(init, ticket);
+  if (!held) {
+    fs.rmSync(heldReviewMarker(init, ticket), { force: true });
+    await enqueue({ kind: 'review', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+    return;
+  }
+  write(heldReviewMarker(init, ticket), held);
+  await repo.updateTicket(ticket.id, { status: 'built' });
+  await systemMessage(scope, `${ticketLabel(ticket)} is built. ${held}`);
+  // Stack sync merges the ticket below into this one, then starts the review once nothing holds it.
+  void syncStack(init.id);
+}
+
+const startingHeldReviews = new Set<string>();
+/** Why the last stack sync could not merge into a ticket, by ticket id; cleared by the next sync that works. */
+const stackSyncErrors = new Map<string, string>();
+
+// A held review that stack sync failed to unblock: said once (noted in the marker), so it is never silent.
+async function reportStuckHeldReview(init: Initiative, ticket: Ticket, parent: Ticket): Promise<void> {
+  const why = stackSyncErrors.get(ticket.id);
+  const marker = heldReviewMarker(init, ticket);
+  if (!why || !fs.existsSync(marker) || fs.readFileSync(marker, 'utf8').includes('Stack sync could not merge')) return;
+  const note = `Stack sync could not merge the latest #${parent.prNumber} into its branch (${why}), so its review still waits. Merge it by hand and push, or press Review to review it as it is.`;
+  fs.appendFileSync(marker, `\n\n${note}\n`);
+  await systemMessage({ initiativeId: init.id, ticketId: ticket.id }, `${ticketLabel(ticket)}: ${note}`);
+}
+
+/**
+ * Starts the first review of built tickets whose review waited for the ticket below: once that
+ * ticket is approved and its latest pushed code is merged into theirs (stack sync does the merge).
+ */
+async function startHeldReviews(initiativeId: string, { fromSync = false } = {}): Promise<void> {
+  const init = await mustInitiative(initiativeId);
+  const s = repo.initiativeSettings(init);
+  if (init.status !== 'in_progress' || !s.autoReview || !s.dependentsStartWhenBuilt) return;
+  const project = await mustProject(init.projectId);
+  const all = await repo.listTickets(init.id);
+  const waiting = all.filter(
+    (t) => t.status === 'built' && t.lastVerdict === null && fs.existsSync(heldReviewMarker(init, t)) && t.worktreePath && fs.existsSync(path.join(t.worktreePath, '.git')),
+  );
+  const due = waiting.filter((t) => !reviewWaitsFor(t, stackBase(t, all), true) && !startingHeldReviews.has(t.id));
+  if (!due.length) return;
+  const parents = due.map((t) => stackBase(t, all)).filter((p): p is Ticket => !!p && hasOpenPr(p));
+  if (parents.length) await gitx.fetchOrigin(project.repoPath, { refs: parents.map((p) => gitx.trackingRefspec(remoteBranchOf(p)!)) });
+  for (const t of due) {
+    // Another pass may have picked this ticket up while this one fetched.
+    if (startingHeldReviews.has(t.id)) continue;
+    startingHeldReviews.add(t.id);
+    try {
+      if (!(await ticketIdle(t.id))) continue;
+      const parent = stackBase(t, all);
+      // A held review only starts once the approved ticket below is in this branch; stack sync merges it.
+      if (parent && (await lacksPushedHead(init, t, parent, { fetched: true }))) {
+        if (!fromSync) void syncStack(init.id);
+        else await reportStuckHeldReview(init, t, parent);
+        continue;
+      }
+      const fresh = await mustTicket(t.id);
+      if (fresh.status !== 'built' || fresh.lastVerdict !== null) continue;
+      fs.rmSync(heldReviewMarker(init, t), { force: true });
+      await enqueue({ kind: 'review', initiativeId: init.id, ticketId: t.id, trigger: 'auto' });
+    } catch (err) {
+      console.warn('[held-reviews]', `${ticketLabel(t)}: ${(err as Error).message}`);
+    } finally {
+      startingHeldReviews.delete(t.id);
+    }
+  }
+}
+
+/**
+ * Where a stacked ticket's new branch starts: the pushed head of the ticket below when it has an
+ * open PR (its checks passed there, and a fixer's local commits are not verified until they are
+ * pushed), otherwise that ticket's local branch.
+ */
+async function stackedBaseRef(run: Run, project: Project, parent: Ticket): Promise<string> {
+  const remote = remoteBranchOf(parent);
+  if (!hasOpenPr(parent) || !remote) return parent.branch!;
+  const fetched = await gitx.fetchOrigin(project.repoPath, { refs: [gitx.trackingRefspec(remote)] });
+  if (fetched.code === 0 && (await gitx.refExists(project.repoPath, `origin/${remote}`))) return `origin/${remote}`;
+  await log(run, `Could not fetch origin/${remote}; starting from the local ${parent.branch} instead.`);
+  return parent.branch!;
 }
 
 async function uniqueBranch(repoPath: string, wanted: string): Promise<string> {
@@ -1417,8 +1553,9 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
     return checkedOut;
   }
 
-  const parentBranch = stackBase(ticket, await repo.listTickets(init.id))?.branch;
-  const baseRef = parentBranch ?? (await gitx.resolveBaseRef(project.repoPath, init.baseBranch));
+  const parent = stackBase(ticket, await repo.listTickets(init.id));
+  const parentBranch = parent?.branch;
+  const baseRef = parent && parentBranch ? await stackedBaseRef(run, project, parent) : await gitx.resolveBaseRef(project.repoPath, init.baseBranch);
   const prBase = parentBranch ?? init.baseBranch;
   // A rebuilt ticket keeps the branch of the PR it already has, built again from the base here.
   const reuse = readRebuildState(rebuildStateFile(init, ticket.id)).reuse;
@@ -1653,7 +1790,9 @@ async function afterGate(run: Run, checks: ChecksRun | null): Promise<void> {
         await systemMessage(run, `${ticketLabel(fresh)}: publishing failed: ${(err as Error).message}`);
       }
     }
-    if (s.autoReview) await enqueue({ kind: 'review', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+    if (s.autoReview) await enqueueAutoReview(run, init, await mustTicket(ticket.id));
+    // Tickets stacked on this one may start now that it is built and pushed.
+    if (s.dependentsStartWhenBuilt) await startReadyTickets(init.id);
     return;
   }
   await repo.updateTicket(ticket.id, { gateStatus: 'fail', status: 'changes_requested' });
@@ -2131,7 +2270,7 @@ async function afterFix(run: Run, step: StepResult, state: StepStates['fix']): P
   const fresh = await mustTicket(ticket.id);
   const committed = (await gitx.headSha(ticket.worktreePath!)) !== start;
   if (s.autoReview && reviewAfterFix({ committed, lastVerdict: fresh.lastVerdict })) {
-    await enqueue({ kind: 'review', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+    await enqueueAutoReview(run, init, fresh);
   } else {
     await repo.updateTicket(ticket.id, { status: settledStatus(fresh) });
     await refreshInitiativeStatus(init.id);
@@ -2139,7 +2278,8 @@ async function afterFix(run: Run, step: StepResult, state: StepStates['fix']): P
 }
 
 async function rebuildTicket(run: Run, init: Initiative, ticket: Ticket, why: string): Promise<void> {
-  const blocker = rebuildBlocker(ticket, branchName(init, ticket), await repo.listTickets(init.id), readRebuildState(rebuildStateFile(init, ticket.id)).builds);
+  const all = await repo.listTickets(init.id);
+  const blocker = rebuildBlocker(ticket, branchName(init, ticket), all, readRebuildState(rebuildStateFile(init, ticket.id)).builds);
   if (blocker) {
     await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: `${why}\n\n${blocker}`.slice(0, 2000) });
     await systemMessage(run, `${ticketLabel(ticket)} needs a rebuild. ${blocker}`);
@@ -2160,6 +2300,22 @@ async function rebuildTicket(run: Run, init: Initiative, ticket: Ticket, why: st
       ...(review ? ['', '## The review of the previous build', '', review] : []),
     ].join('\n'),
   );
+  // Tickets that started from its branch start again from the rebuilt one, once it is built. The ticket
+  // itself is reset first: until then it still counts as built, and a child reset to todo could restart
+  // from the old branch.
+  for (const above of startedAbove(ticket.key, all)) {
+    await resetTicket(above.id);
+    write(
+      path.join(ticketRoundDir(init, above, 1), 'rebuild.md'),
+      [
+        '# Build this ticket again from its base',
+        '',
+        `${ticketLabel(ticket)}, which this ticket builds on, was rebuilt from scratch, so the factory removed this ticket's local branch too.`,
+        'Build the ticket as it reads, from its new base; when you are done, the factory puts your result on top of the PR this ticket already has, as one new commit.',
+      ].join('\n'),
+    );
+    await systemMessage(run, `${ticketLabel(above)} starts again once ${ticketLabel(ticket)} is rebuilt, because it was built on the old branch.`);
+  }
   await enqueue({ kind: 'execute', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
 }
 
@@ -2290,7 +2446,7 @@ async function afterVerify(run: Run, step: StepResult, state: StepStates['verify
     await agentMessage(run, `**Verifier approved fix round ${fixes[0].round} on ${ticketLabel(ticket)}.**${pushed ? ' Pushed.' : ''}\n\n${summaryOf(step.output!)}`);
     const fixedFactoryReview = fixDirs.some((d) => fs.existsSync(path.join(d, 'review.md')));
     if ((fixedFactoryReview || fresh.lastVerdict !== 'APPROVE') && s.autoReview) {
-      await enqueue({ kind: 'review', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+      await enqueueAutoReview(run, init, await mustTicket(ticket.id));
     } else {
       await repo.updateTicket(ticket.id, { status: settledStatus(fresh), blockedReason: null });
       await refreshInitiativeStatus(init.id);
@@ -3258,6 +3414,8 @@ async function syncStack(initiativeId: string): Promise<void> {
   } finally {
     stackSyncRerun.delete(initiativeId);
   }
+  // A review held for the ticket below starts once the sync merged that ticket's approved code.
+  await startHeldReviews(initiativeId, { fromSync: true }).catch((err) => console.warn('[held-reviews]', (err as Error).message));
 }
 
 async function syncStackOnce(initiativeId: string): Promise<void> {
@@ -3276,7 +3434,9 @@ async function syncStackOnce(initiativeId: string): Promise<void> {
     syncingWorktrees.set(t.id, work.catch(() => undefined));
     try {
       await work;
+      stackSyncErrors.delete(t.id);
     } catch (err) {
+      stackSyncErrors.set(t.id, (err as Error).message);
       console.warn('[stack-sync]', `${ticketLabel(t)}: ${(err as Error).message}`);
     } finally {
       syncingWorktrees.delete(t.id);
@@ -3286,7 +3446,8 @@ async function syncStackOnce(initiativeId: string): Promise<void> {
 
 async function syncTicket(init: Initiative, ticket: Ticket, all: Ticket[]): Promise<void> {
   const wt = ticket.worktreePath!;
-  if (!(await ticketIdle(ticket.id)) || (await gitx.worktreeState(wt)).tracked) return;
+  if (!(await ticketIdle(ticket.id))) return;
+  if ((await gitx.worktreeState(wt)).tracked) throw new Error(`${wt} has uncommitted changes, so it is left alone`);
   const scope = { initiativeId: init.id, ticketId: ticket.id };
   const own = remoteBranchOf(ticket)!;
   const caughtUp = await gitx.catchUpWith(wt, `origin/${own}`);
@@ -3401,27 +3562,6 @@ async function advanceTicketMerge(init: Initiative, project: Project, ticket: Ti
       );
     case 'wait':
       return;
-  }
-}
-
-async function stackDependentTickets(): Promise<void> {
-  const rows = await sql<{ id: string }[]>`
-    select distinct i.id from initiatives i join tickets t on t.initiative_id = i.id
-    where i.status <> 'archived' and t.status not in ('merged', 'canceled')`;
-  for (const { id } of rows) {
-    const tickets = await repo.listTickets(id);
-    const stacked = stackDependencies(tickets);
-    if (!stacked) continue;
-    const restacked = stacked.filter((t, i) => t.dependsOn.join() !== tickets[i].dependsOn.join());
-    if (!restacked.length) continue;
-    const waves = new Map(topoOrder(stacked)!.map((o) => [o.key, o.wave]));
-    for (const t of stacked) await repo.updateTicket(t.id, { dependsOn: t.dependsOn, wave: waves.get(t.key)! });
-    const seqOf = (key: string) => seqLabel(tickets.find((t) => t.key === key)!.seq);
-    await systemMessage(
-      { initiativeId: id },
-      `Stacked the dependent tickets into one line (${restacked.map((t) => `${seqLabel(t.seq)} on ${seqOf(t.dependsOn[0])}`).join(', ')}), so each builds on the one before it and their PRs form one GitHub stack.`,
-    );
-    void syncStack(id);
   }
 }
 
@@ -3765,7 +3905,6 @@ export async function recoverOnStartup(): Promise<void> {
   const withMergedWorktrees = await sql<{ id: string }[]>`
     select distinct initiative_id as id from tickets where status = 'merged' and worktree_path is not null`;
   for (const r of withMergedWorktrees) await cleanUpMergedTickets(r.id).catch((e) => console.warn('[recover]', e.message));
-  await stackDependentTickets();
   for (const { run, spool } of having('follow')) {
     if (spool) void supervise(run, () => adoptRun(run, spool));
   }

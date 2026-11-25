@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PlanJson } from '@factory/shared';
-import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, section, slugify, stackDependencies, topoOrder, validatePlan } from './plan.ts';
+import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, renderStacking, section, slugify, stackDependencies, stackShape, topoOrder, validatePlan } from './plan.ts';
 
 const ticket = (key: string, depends_on: string[] = []) => ({
   key,
@@ -52,7 +52,7 @@ test('validatePlan accepts a valid plan', () => {
 
 const deps = (items: { key: string; dependsOn: string[] }[]) => Object.fromEntries(stackDependencies(items)!.map((t) => [t.key, t.dependsOn]));
 
-test('stackDependencies chains tickets that fan out from one parent in plan order', () => {
+test('stackDependencies stacks tickets that need the same ticket side by side on it', () => {
   assert.deepEqual(
     deps([
       { key: 'alerts', dependsOn: [] },
@@ -61,11 +61,11 @@ test('stackDependencies chains tickets that fan out from one parent in plan orde
       { key: 'sync', dependsOn: ['alerts', 'cron'] },
       { key: 'credits', dependsOn: ['alerts'] },
     ]),
-    { alerts: [], reads: ['alerts'], cron: ['reads'], sync: ['cron'], credits: ['sync'] },
+    { alerts: [], reads: ['alerts'], cron: ['alerts'], sync: ['cron'], credits: ['alerts'] },
   );
 });
 
-test('stackDependencies keeps independent tickets apart and chains each group on its own', () => {
+test('stackDependencies keeps independent tickets apart', () => {
   assert.deepEqual(
     deps([
       { key: 'a', dependsOn: [] },
@@ -75,7 +75,7 @@ test('stackDependencies keeps independent tickets apart and chains each group on
       { key: 'y', dependsOn: ['x'] },
       { key: 'c', dependsOn: ['a'] },
     ]),
-    { a: [], solo: [], x: [], b: ['a'], y: ['x'], c: ['b'] },
+    { a: [], solo: [], x: [], b: ['a'], y: ['x'], c: ['a'] },
   );
 });
 
@@ -83,18 +83,98 @@ test('stackDependencies joins two roots that a later ticket needs into one line'
   assert.deepEqual(deps([{ key: 'a', dependsOn: [] }, { key: 'b', dependsOn: [] }, { key: 'c', dependsOn: ['a', 'b'] }]), { a: [], b: ['a'], c: ['b'] });
 });
 
+test('stackDependencies puts the later of two siblings a ticket needs on top of the earlier, and only those', () => {
+  // The Salesforce plan's real needs: only update goes on create-organization, so renewal has one base.
+  const needs = [
+    { key: 'invites', dependsOn: [] },
+    { key: 'api', dependsOn: ['invites'] },
+    { key: 'admins-add', dependsOn: ['api'] },
+    { key: 'admins-remove', dependsOn: ['api'] },
+    { key: 'create-ws', dependsOn: ['api'] },
+    { key: 'create-org', dependsOn: ['create-ws'] },
+    { key: 'update', dependsOn: ['create-ws'] },
+    { key: 'renewal', dependsOn: ['update', 'create-org'] },
+    { key: 'renew', dependsOn: ['renewal', 'api'] },
+  ];
+  const stacked = stackDependencies(needs)!;
+  assert.deepEqual(Object.fromEntries(stacked.map((t) => [t.key, t.dependsOn])), {
+    invites: [],
+    api: ['invites'],
+    'admins-add': ['api'],
+    'admins-remove': ['api'],
+    'create-ws': ['api'],
+    'create-org': ['create-ws'],
+    update: ['create-org'],
+    renewal: ['update'],
+    renew: ['renewal'],
+  });
+  const shape = stackShape(needs, stacked);
+  assert.deepEqual(shape.longest, ['invites', 'api', 'create-ws', 'create-org', 'update', 'renewal', 'renew']);
+  assert.equal(shape.widest, 3);
+  assert.deepEqual(shape.forced, [{ key: 'update', on: 'create-org' }]);
+});
+
+test('stackDependencies leaves a foundation-first plan as a wide tree', () => {
+  const needs = [
+    { key: 'invites', dependsOn: [] },
+    { key: 'foundation', dependsOn: ['invites'] },
+    ...['reads', 'admins-add', 'admins-remove', 'create-ws', 'create-org', 'update'].map((key) => ({ key, dependsOn: ['foundation'] })),
+    { key: 'renewal', dependsOn: ['create-org', 'foundation'] },
+    { key: 'renew', dependsOn: ['renewal'] },
+  ];
+  const shape = stackShape(needs, stackDependencies(needs)!);
+  assert.equal(shape.longest.length, 5);
+  assert.equal(shape.widest, 6);
+  assert.deepEqual(shape.forced, []);
+});
+
+test('stackDependencies never adds a cycle, whatever the plan order', () => {
+  const needs = [
+    { key: 'd', dependsOn: ['b', 'c'] },
+    { key: 'c', dependsOn: ['a'] },
+    { key: 'b', dependsOn: ['a'] },
+    { key: 'a', dependsOn: [] },
+    { key: 'e', dependsOn: ['d', 'b'] },
+  ];
+  const stacked = stackDependencies(needs)!;
+  assert.ok(topoOrder(stacked));
+  for (const t of stacked) assert.ok(t.dependsOn.length <= 1, t.key);
+  // Every need is still below the ticket in its line.
+  const parent = new Map(stacked.map((t) => [t.key, t.dependsOn[0]]));
+  const line = (k: string): string[] => (parent.get(k) ? [parent.get(k)!, ...line(parent.get(k)!)] : []);
+  for (const t of needs) for (const d of t.dependsOn) assert.ok(line(t.key).includes(d), `${t.key} needs ${d}`);
+});
+
 test('stackDependencies refuses a cycle', () => {
   assert.equal(stackDependencies([{ key: 'a', dependsOn: ['b'] }, { key: 'b', dependsOn: ['a'] }]), null);
 });
 
-test('validatePlan stores the stacked dependencies, so a fan-out becomes a line of waves', () => {
-  const r = validatePlan(plan([ticket('api'), ticket('ui', ['api']), ticket('cli', ['api'])]), 10);
-  assert.deepEqual(r.plan?.tickets.map((t) => t.depends_on), [[], ['api'], ['ui']]);
+test('validatePlan keeps what each ticket needs in the plan and stacks a fan-out side by side', () => {
+  const r = validatePlan(plan([ticket('api'), ticket('ui', ['api']), ticket('cli', ['api', 'ui'])]), 10);
+  assert.deepEqual(r.plan?.tickets.map((t) => t.depends_on), [[], ['api'], ['api', 'ui']]);
+  assert.deepEqual(r.stacked?.map((t) => t.depends_on), [[], ['api'], ['ui']]);
   assert.deepEqual(r.order, [
     { key: 'api', seq: 1, wave: 0 },
     { key: 'ui', seq: 2, wave: 1 },
     { key: 'cli', seq: 3, wave: 2 },
   ]);
+  const wide = validatePlan(plan([ticket('api'), ticket('ui', ['api']), ticket('cli', ['api'])]), 10);
+  assert.deepEqual(wide.order?.map((o) => o.wave), [0, 1, 1]);
+});
+
+test('renderStacking lists each base, the longest line, the most at once and forced stacks', () => {
+  const needs = [
+    { key: 'a', dependsOn: [] },
+    { key: 'b', dependsOn: ['a'] },
+    { key: 'c', dependsOn: ['a'] },
+    { key: 'd', dependsOn: ['b', 'c'] },
+  ];
+  const md = renderStacking(needs, stackDependencies(needs)!, 4);
+  assert.match(md, /- a: on the base branch/);
+  assert.match(md, /- c: on b/);
+  assert.match(md, /Longest line: 4 tickets \(a → b → c → d\)/);
+  assert.match(md, /Most at once: 1 ticket; this initiative runs up to 4/);
+  assert.match(md, /- c on b/);
 });
 
 test('validatePlan rejects unknown deps, duplicates, cycles and too many tickets', () => {

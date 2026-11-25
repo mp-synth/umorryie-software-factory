@@ -55,6 +55,11 @@ export interface InitiativeSettings {
   createPrs: boolean;
   postReviewsToPr: boolean;
   dependentsWaitForCi: boolean;
+  /**
+   * Start a ticket once the ticket it stacks on is built and its PR is open, instead of once that
+   * ticket is approved. Its review still waits until the ticket below is approved.
+   */
+  dependentsStartWhenBuilt: boolean;
   autoArbiter: boolean;
   autoMerge: boolean;
   autoRetro: boolean;
@@ -74,6 +79,7 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
   createPrs: true,
   postReviewsToPr: true,
   dependentsWaitForCi: false,
+  dependentsStartWhenBuilt: true,
   autoArbiter: true,
   autoMerge: false,
   autoRetro: true,
@@ -224,7 +230,10 @@ export interface Ticket {
   outcome: string;
   guidance: string[];
   acceptance: string[];
+  /** The one ticket this ticket stacks on (empty for none): its branch and PR sit on that ticket's. */
   dependsOn: string[];
+  /** What the ticket needs from other tickets, as the planner wrote it; `dependsOn` is derived from it. */
+  needs: string[];
   size: string | null;
   status: TicketStatus;
   round: number;

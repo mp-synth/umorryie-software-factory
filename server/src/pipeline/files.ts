@@ -100,10 +100,14 @@ export function renderBrief(i: Initiative, p: Project): string {
 }
 
 export function renderTicket(t: Ticket, all: Ticket[]): string {
+  const describe = (d: Ticket) => `${ticketLabel(d)} (key ${d.key}, branch ${d.branch ?? 'not started'}, ${d.status})`;
+  const live = (x: Ticket) => x.id !== t.id && x.status !== 'canceled' && x.status !== 'proposed';
   const deps = t.dependsOn
     .map((k) => all.find((x) => x.key === k))
-    .filter(Boolean)
-    .map((d) => `${ticketLabel(d!)} (key ${d!.key}, branch ${d!.branch ?? 'not started'}, ${d!.status})`);
+    .filter((d): d is Ticket => !!d)
+    .map(describe);
+  const beside = t.dependsOn.length ? all.filter((x) => live(x) && x.dependsOn[0] === t.dependsOn[0] && x.status !== 'merged') : [];
+  const onTop = all.filter((x) => live(x) && x.dependsOn.includes(t.key));
   return [
     `# ${ticketLabel(t)}`,
     '',
@@ -121,6 +125,22 @@ export function renderTicket(t: Ticket, all: Ticket[]): string {
     '## Depends on',
     deps.length ? deps.map((d) => `- ${d}`).join('\n') : 'Nothing.',
     '',
+    ...(beside.length
+      ? [
+          '## Built beside it',
+          'These tickets stack on the same ticket and are built at the same time, each on its own branch and PR. Keep out of the code they add.',
+          beside.map((x) => `- ${describe(x)}`).join('\n'),
+          '',
+        ]
+      : []),
+    ...(onTop.length
+      ? [
+          '## Built on top of it',
+          'These tickets stack on this one and use the interfaces it adds.',
+          onTop.map((x) => `- ${describe(x)}`).join('\n'),
+          '',
+        ]
+      : []),
     '## Guidance for the agent',
     t.guidance.map((g) => `- ${g}`).join('\n'),
     '',

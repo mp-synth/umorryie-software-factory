@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { PlanJson } from '@factory/shared';
+import type { PlanJson, PlanTicket } from '@factory/shared';
 
 const bullet = z.string().trim().min(3).max(240);
 const bullets = (min: number, max: number) => z.array(bullet).min(min).max(max);
@@ -36,7 +36,11 @@ export interface OrderedTicket {
   wave: number;
 }
 
-export function validatePlan(raw: unknown, maxTickets: number): { plan?: PlanJson; order?: OrderedTicket[]; errors: string[] } {
+/**
+ * `plan` keeps each ticket's `depends_on` as the planner wrote it (what the ticket needs);
+ * `stacked` has the same tickets with `depends_on` set to the one ticket each stacks on.
+ */
+export function validatePlan(raw: unknown, maxTickets: number): { plan?: PlanJson; stacked?: PlanTicket[]; order?: OrderedTicket[]; errors: string[] } {
   const parsed = planSchema.safeParse(raw);
   if (!parsed.success) {
     return {
@@ -60,28 +64,91 @@ export function validatePlan(raw: unknown, maxTickets: number): { plan?: PlanJso
   }
   if (errors.length) return { errors };
 
-  const stacked = stackDependencies(plan.tickets.map((t) => ({ key: t.key, dependsOn: t.depends_on })));
-  if (!stacked) return { errors: ['tickets: depends_on contains a cycle'] };
-  const tickets = plan.tickets.map((t, i) => ({ ...t, depends_on: stacked[i].dependsOn }));
-  return { plan: { ...plan, tickets }, order: topoOrder(stacked)!, errors: [] };
+  const stackedDeps = stackDependencies(plan.tickets.map((t) => ({ key: t.key, dependsOn: t.depends_on })));
+  if (!stackedDeps) return { errors: ['tickets: depends_on contains a cycle'] };
+  const stacked = plan.tickets.map((t, i) => ({ ...t, depends_on: stackedDeps[i].dependsOn }));
+  return { plan, stacked, order: topoOrder(stackedDeps)!, errors: [] };
 }
 
 type Dependent = { key: string; dependsOn: string[] };
 
+/**
+ * Turns what each ticket needs into the one ticket it stacks on: its branch starts from that
+ * ticket's branch and its PR targets it. A need that another need already brings is dropped, so
+ * tickets that need the same ticket stack on it side by side and build in parallel. A branch has
+ * one base, so when a ticket needs two tickets that don't build on each other, those two go into
+ * one line, the later one in plan order on top of the earlier. Null when the needs have a cycle.
+ */
 export function stackDependencies<T extends Dependent>(items: T[]): T[] | null {
   const order = topoOrder(items);
   if (!order) return null;
-  const group = new Map(items.map((t) => [t.key, t.key]));
-  const groupOf = (key: string): string => (group.get(key) === key ? key : groupOf(group.get(key)!));
-  for (const t of items) for (const d of t.dependsOn) group.set(groupOf(t.key), groupOf(d));
-  const top = new Map<string, string>();
-  const below = new Map<string, string[]>();
-  for (const { key } of order) {
-    const previous = top.get(groupOf(key));
-    below.set(key, previous ? [previous] : []);
-    top.set(groupOf(key), key);
+  const rank = new Map(order.map((o, i) => [o.key, i]));
+  const needs = new Map(items.map((t) => [t.key, new Set(t.dependsOn)]));
+  const ancestors = (key: string, seen = new Set<string>()): Set<string> => {
+    for (const d of needs.get(key) ?? []) {
+      if (seen.has(d)) continue;
+      seen.add(d);
+      ancestors(d, seen);
+    }
+    return seen;
+  };
+  const direct = (key: string): string[] => {
+    const all = [...needs.get(key)!];
+    return all.filter((d) => !all.some((o) => o !== d && ancestors(o).has(d))).sort((a, b) => rank.get(a)! - rank.get(b)!);
+  };
+  // Every added edge points from an earlier ticket to a later one in `order`, so no cycle can form,
+  // and each round adds an edge that wasn't there, so this ends.
+  for (;;) {
+    const shared = order.map((o) => direct(o.key)).find((d) => d.length > 1);
+    if (!shared) break;
+    for (let i = 1; i < shared.length; i++) needs.get(shared[i])!.add(shared[i - 1]);
   }
-  return items.map((t) => ({ ...t, dependsOn: below.get(t.key)! }));
+  return items.map((t) => ({ ...t, dependsOn: direct(t.key) }));
+}
+
+export interface StackShape {
+  /** The most tickets one line holds, bottom to top. */
+  longest: string[];
+  /** The most tickets that can build at the same time (tickets in one wave). */
+  widest: number;
+  /** Tickets that stack on one they don't need, because a later ticket needs both. */
+  forced: { key: string; on: string }[];
+}
+
+export function stackShape(needs: Dependent[], stacked: Dependent[]): StackShape {
+  const parentOf = new Map(stacked.map((t) => [t.key, t.dependsOn[0] ?? null]));
+  const line = (key: string): string[] => {
+    const parent = parentOf.get(key);
+    return parent ? [...line(parent), key] : [key];
+  };
+  const longest = stacked.map((t) => line(t.key)).reduce<string[]>((a, b) => (b.length > a.length ? b : a), []);
+  const waves = new Map<number, number>();
+  for (const t of stacked) waves.set(line(t.key).length, (waves.get(line(t.key).length) ?? 0) + 1);
+  const needsOf = new Map(needs.map((t) => [t.key, t.dependsOn]));
+  const reaches = (key: string, target: string): boolean => (needsOf.get(key) ?? []).some((d) => d === target || reaches(d, target));
+  const forced = stacked.filter((t) => t.dependsOn[0] && !reaches(t.key, t.dependsOn[0])).map((t) => ({ key: t.key, on: t.dependsOn[0] }));
+  return { longest, widest: Math.max(0, ...waves.values()), forced };
+}
+
+export function renderStacking(needs: Dependent[], stacked: Dependent[], concurrency: number): string {
+  const shape = stackShape(needs, stacked);
+  return [
+    '# How the factory will build these tickets',
+    '',
+    "Each ticket's branch and PR sit on the one ticket it stacks on, and it starts once that ticket is built and pushed. Tickets that stack on the same ticket build at the same time.",
+    '',
+    ...stacked.map((t) => `- ${t.key}: ${t.dependsOn[0] ? `on ${t.dependsOn[0]}` : 'on the base branch'}`),
+    '',
+    `Longest line: ${shape.longest.length} ticket${shape.longest.length === 1 ? '' : 's'} (${shape.longest.join(' → ')}).`,
+    `Most at once: ${shape.widest} ticket${shape.widest === 1 ? '' : 's'}; this initiative runs up to ${concurrency} tickets at a time.`,
+    ...(shape.forced.length
+      ? [
+          '',
+          'Stacked on a ticket they do not need, because a later ticket needs both and a branch has one base:',
+          ...shape.forced.map((f) => `- ${f.key} on ${f.on}`),
+        ]
+      : []),
+  ].join('\n');
 }
 
 export function topoOrder(items: Dependent[]): OrderedTicket[] | null {

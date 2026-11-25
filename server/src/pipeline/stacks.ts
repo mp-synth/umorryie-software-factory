@@ -73,8 +73,12 @@ export function stackStepMessage(step: StackStep, chain: number[]): string | nul
       return `Linked ${refs(step.prs)} as a stacked PR on GitHub.`;
     case 'add':
       return `Added ${refs(step.prs)} to the GitHub stack, on top of #${chain[chain.length - step.prs.length - 1]}.`;
-    case 'taken':
-      return `#${chain[chain.length - 1]} targets the branch of #${step.parent} but can't join its GitHub stack: #${step.top} already sits on top of it, and a stack is a single line of PRs.`;
+    case 'taken': {
+      const pr = chain[chain.length - 1];
+      const below = chain[chain.length - 2];
+      if (below !== step.parent) return `#${pr} builds on #${below}, which is outside the GitHub stack of #${step.parent}, so #${pr} stays outside it too; it still syncs and retargets like a stacked PR.`;
+      return `#${pr} builds on #${step.parent} beside #${step.top}, which already sits on top of it in its GitHub stack. A GitHub stack is a single line of PRs, so #${pr} stays a PR on the branch of #${step.parent}, outside the stack; it still syncs and retargets like a stacked PR.`;
+    }
     case 'restack':
       return `Made the GitHub stack again as ${refs(step.prs)}: closed ${refs(step.closed)} ${step.closed.length === 1 ? 'was' : 'were'} still in it, so nothing could stack above ${step.closed.length === 1 ? 'it' : 'them'}.`;
     case 'done':

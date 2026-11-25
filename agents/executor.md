@@ -46,7 +46,11 @@ fresh reviewer after you finish.
 
 - When the ticket depends on another ticket, your base is that ticket's branch
   and already contains it and every ticket below it in the stack. Build on
-  their interfaces; don't re-implement them.
+  their interfaces; don't re-implement them. That ticket may still be in
+  review: its later fixes reach your branch as a merge, so build on the
+  interfaces its ticket and plan.md name, not on incidental details.
+- Tickets under `Built beside it` in `ticket.md` are built at the same
+  time on their own branches. Keep out of the code they add.
 - Make the smallest change that fully meets the ticket. No speculative
   options, fallbacks or extras. No drive-by refactors.
 - Match the surrounding code: idioms, naming, structure, error handling.

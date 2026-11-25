@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TicketStatus } from '@factory/shared';
-import { buildNumber, earlierBranches, rebuildBlocker } from './rebuild.ts';
+import { buildNumber, earlierBranches, rebuildBlocker, startedAbove } from './rebuild.ts';
 
 const wanted = 'factory/usage/01-per-video';
 const ticket = (key: string, branch: string | null, dependsOn: string[] = [], status: TicketStatus = 'todo') => ({ key, branch, dependsOn, status });
@@ -24,9 +24,25 @@ test('rebuilds a ticket nothing builds on yet', () => {
   assert.equal(rebuildBlocker(all[0], wanted, all), null);
 });
 
-test('does not rebuild a ticket whose dependents already have a branch', () => {
-  const all = [ticket('per-video', wanted), ticket('limits', 'factory/usage/02-limits', ['per-video'], 'building')];
-  assert.match(rebuildBlocker(all[0], wanted, all) ?? '', /limits already build on its branch/);
+test('rebuilds a ticket whose dependents started but are not approved, and resets them, highest first', () => {
+  const all = [
+    ticket('per-video', wanted),
+    ticket('limits', 'factory/usage/02-limits', ['per-video'], 'in_review'),
+    ticket('alerts', 'factory/usage/03-alerts', ['limits'], 'building'),
+    ticket('export', 'factory/usage/04-export', ['per-video'], 'built'),
+    ticket('later', null, ['alerts']),
+    ticket('elsewhere', 'factory/usage/05-elsewhere', [], 'built'),
+  ];
+  assert.equal(rebuildBlocker(all[0], wanted, all), null);
+  assert.deepEqual(
+    startedAbove('per-video', all).map((t) => t.key),
+    ['export', 'alerts', 'limits'],
+  );
+});
+
+test('does not rebuild a ticket an approved ticket builds on', () => {
+  const all = [ticket('per-video', wanted), ticket('limits', 'factory/usage/02-limits', ['per-video'], 'approved')];
+  assert.match(rebuildBlocker(all[0], wanted, all) ?? '', /limits already build on its branch and was approved/);
 });
 
 test('ignores canceled dependents', () => {
