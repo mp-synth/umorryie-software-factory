@@ -5,6 +5,8 @@ export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs));
 }
 
+export const keysOf = <T extends object>(o: T) => Object.keys(o) as (keyof T)[];
+
 export function money(n: number | null | undefined): string {
   if (n == null) return '—';
   if (n === 0) return '$0';

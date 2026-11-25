@@ -1,54 +1,57 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowRight, FolderGit2, GitBranch, Sparkles } from 'lucide-react';
+import { ChevronRight, FolderGit2, GitBranch, Plus, Sparkles } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { DEFAULT_INITIATIVE_SETTINGS, type InitiativeSettings } from '@factory/shared';
 import { api } from '@/lib/api';
+import { useProjects } from '@/lib/queries';
+import { MOD } from '@/lib/shortcuts';
 import { toastError } from '@/lib/toasts';
-import { Button, Combobox, Dialog, Field, Input, Select, Switch, Textarea } from './ui';
+import { cn } from '@/lib/utils';
+import { Button, Combobox, Dialog, EmptyState, Field, Input, Select, SwitchRow, Textarea } from './ui';
 
 const AUTOPILOT: { key: keyof InitiativeSettings; label: string; hint: string }[] = [
   { key: 'autoPlanReview', label: 'Review the plan', hint: 'A fresh reviewer checks the plan against the code before you see it.' },
   { key: 'autoExecute', label: 'Build after approval', hint: 'Tickets start as soon as their dependencies are approved.' },
   { key: 'autoReview', label: 'Review every branch', hint: 'A fresh reviewer runs after each build or fix.' },
-  { key: 'autoFix', label: 'Fix review findings', hint: 'A fresh fixer handles CHANGES and failing checks, up to the round limit.' },
-  { key: 'createPrs', label: 'Push & open draft PRs', hint: 'Needs a GitHub origin and gh auth. Never force-pushes or merges.' },
+  { key: 'autoFix', label: 'Fix review findings', hint: 'A fresh fixer handles requested changes and failing checks, up to the round limit.' },
+  { key: 'createPrs', label: 'Push and open draft PRs', hint: 'Needs a GitHub origin and gh auth. Never force-pushes or merges.' },
   {
     key: 'autoArbiter',
     label: 'Arbiter decides for you',
-    hint: 'When the plan waits for approval, the planner has questions or a ticket needs you, a fresh Fable arbiter approves, answers or sends it back. You get only what it cannot decide.',
+    hint: 'When the plan waits for approval, the planner has questions or a ticket needs you, a fresh arbiter approves, answers or sends it back. You only get what it cannot decide.',
   },
 ];
 
-export function NewInitiativeDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+const MIN_TITLE = 3;
+const MIN_BRIEF = 10;
+
+export function NewInitiativeDialog({ open, onOpenChange, onAddProject }: { open: boolean; onOpenChange: (v: boolean) => void; onAddProject: () => void }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const { data: projects = [] } = useQuery({ queryKey: ['projects'], queryFn: api.projects, enabled: open });
+  const { data: projects = [], isPending } = useProjects(open);
   const [projectId, setProjectId] = useState('');
   const [title, setTitle] = useState('');
   const [brief, setBrief] = useState('');
   const [baseBranch, setBaseBranch] = useState('');
   const [settings, setSettings] = useState<InitiativeSettings>(DEFAULT_INITIATIVE_SETTINGS);
+  const [showAutopilot, setShowAutopilot] = useState(false);
 
   useEffect(() => {
     if (open && !projectId && projects.length) setProjectId(projects[0].id);
   }, [open, projects, projectId]);
 
-  const { data: branchData } = useQuery({
-    queryKey: ['branches', projectId],
-    queryFn: () => api.branches(projectId),
-    enabled: open && !!projectId,
-  });
+  const { data: branchData } = useQuery({ queryKey: ['branches', projectId], queryFn: () => api.branches(projectId), enabled: open && !!projectId });
   useEffect(() => {
     if (branchData) setBaseBranch(branchData.defaultBranch);
   }, [branchData]);
 
   const create = useMutation({
-    mutationFn: () => api.createInitiative({ projectId, title, brief, baseBranch, settings, start: true }),
+    mutationFn: () => api.createInitiative({ projectId, title: title.trim(), brief, baseBranch, settings, start: true }),
     onSuccess: (init) => {
       qc.invalidateQueries({ queryKey: ['initiatives'] });
-      toast.success('Initiative created — the planner is starting');
+      toast.success('Initiative created. The planner is starting.');
       onOpenChange(false);
       setTitle('');
       setBrief('');
@@ -57,43 +60,71 @@ export function NewInitiativeDialog({ open, onOpenChange }: { open: boolean; onO
     onError: toastError,
   });
 
-  const canSubmit = projectId && title.trim().length >= 3 && brief.trim().length >= 10 && baseBranch;
+  const missing = !projectId
+    ? 'Pick a repository'
+    : !baseBranch
+      ? 'Pick a base branch'
+      : title.trim().length < MIN_TITLE
+        ? 'Give it a title'
+        : brief.trim().length < MIN_BRIEF
+          ? 'Describe the outcome in the brief'
+          : null;
+  const submit = () => !missing && !create.isPending && create.mutate();
+  const onCount = AUTOPILOT.filter((a) => settings[a.key]).length;
+
+  if (open && !isPending && projects.length === 0) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange} title="New initiative" size="sm">
+        <EmptyState
+          icon={<FolderGit2 />}
+          title="Add a repository first"
+          actions={
+            <Button
+              variant="primary"
+              icon={<Plus />}
+              onClick={() => {
+                onOpenChange(false);
+                onAddProject();
+              }}
+            >
+              Add a project
+            </Button>
+          }
+        >
+          Initiatives are built in a project: a git repository on this machine. Agents work in worktrees next to it, so your checkout is never touched.
+        </EmptyState>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      wide
+      size="lg"
       title="New initiative"
-      description="Describe the outcome. A fresh planner reads the repo, plans it, and splits it into small tickets."
+      description="Describe the outcome you want. A fresh planner reads the repository, plans it and splits it into small tickets for you to approve."
+      footerStart={missing ?? (settings.autoArbiter ? 'Planning starts right away. The arbiter approves the plan unless it needs you.' : 'Planning starts right away. Nothing is built until you approve the plan.')}
       footer={
         <>
-          <span className="mr-auto text-2xs text-zinc-500">
-            Planning starts immediately · {settings.autoArbiter ? 'the arbiter approves the plan unless it needs you' : 'nothing is built until you approve'}
-          </span>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button variant="primary" disabled={!canSubmit} loading={create.isPending} onClick={() => create.mutate()} icon={<Sparkles className="h-3.5 w-3.5" />}>
-            Create & plan
+          <Button variant="primary" disabled={!!missing} loading={create.isPending} onClick={submit} icon={<Sparkles />} title={`${MOD}↵`}>
+            Create and start planning
           </Button>
         </>
       }
     >
-      {projects.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-line-strong p-6 text-center">
-          <FolderGit2 className="mx-auto h-6 w-6 text-zinc-500" />
-          <p className="mt-2 text-sm text-zinc-300">Add a local repository first.</p>
-          <p className="mt-1 text-xs text-zinc-500">Projects are git repos on this machine. Agents work in worktrees next to them.</p>
-          <Link to="/projects" onClick={() => onOpenChange(false)}>
-            <Button className="mt-4" size="sm" icon={<ArrowRight className="h-3.5 w-3.5" />}>
-              Go to Projects
-            </Button>
-          </Link>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+      <div
+        className="space-y-6"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
+        }}
+      >
+        <fieldset className="space-y-3">
+          <legend className="eyebrow mb-2">Where</legend>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="Repository">
               <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
                 {projects.map((p) => (
@@ -103,40 +134,64 @@ export function NewInitiativeDialog({ open, onOpenChange }: { open: boolean; onO
                 ))}
               </Select>
             </Field>
-            <Field group label={<span className="flex items-center gap-1.5"><GitBranch className="h-3 w-3" /> Base branch</span>}>
+            <Field
+              group
+              label={
+                <span className="inline-flex items-center gap-1.5">
+                  <GitBranch className="size-3.5 text-ink-tertiary" /> Base branch
+                </span>
+              }
+            >
               <Combobox value={baseBranch} onChange={setBaseBranch} options={branchData?.branches ?? []} placeholder="Search branches" />
             </Field>
           </div>
+        </fieldset>
+
+        <fieldset className="space-y-3">
+          <legend className="eyebrow mb-2">What</legend>
           <Field label="Title">
-            <Input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Team invites with email verification" maxLength={120} />
+            <Input data-autofocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Team invites with email verification" maxLength={120} />
           </Field>
           <Field
             label="Brief"
-            hint={`What should be true when this is done? Constraints, non-goals, links. Paste any URL — a PR or file in another repo (e.g. TTVPlatform), an open-source repo, docs — and every agent gets it as a local read-only copy. ${settings.autoArbiter ? "The arbiter answers the planner's questions from this brief, so put your preferences here." : 'The planner asks you if something blocks it.'}`}
+            hint={`What should be true when this is done? Constraints, non-goals, links. Paste any URL, such as a PR or file in another repo, an open-source repo or docs, and every agent gets a local read-only copy. ${settings.autoArbiter ? "The arbiter answers the planner's questions from this brief, so put your preferences here." : 'The planner asks you if something blocks it.'}`}
           >
             <Textarea
               value={brief}
               onChange={(e) => setBrief(e.target.value)}
-              className="min-h-[180px] font-mono text-[12.5px]"
+              className="min-h-[11rem] font-mono text-sm"
               placeholder={`Users can invite teammates by email.\n\n- Invite expires after 7 days\n- Only admins can invite\n- Reuse the existing mailer in src/lib/mail.ts\n\nOut of scope: SSO.`}
             />
           </Field>
-          <div>
-            <div className="section-title mb-2">Autopilot</div>
-            <div className="divide-y divide-line rounded-xl border border-line bg-black/20">
+        </fieldset>
+
+        <fieldset>
+          <legend className="sr-only">Autopilot</legend>
+          <button
+            type="button"
+            onClick={() => setShowAutopilot((v) => !v)}
+            aria-expanded={showAutopilot}
+            className="flex w-full items-center gap-3 rounded-lg border border-line-subtle px-3.5 py-3 text-left transition-colors hover:bg-hover"
+          >
+            <ChevronRight className={cn('size-4 text-ink-tertiary transition-transform', showAutopilot && 'rotate-90')} />
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium text-ink">Autopilot</span>
+              <span className="block text-xs text-ink-secondary">
+                {onCount === AUTOPILOT.length ? 'Everything runs on its own: you approve the plan, agents do the rest.' : `${onCount} of ${AUTOPILOT.length} steps run on their own.`}{' '}
+                You can change this later on the initiative.
+              </span>
+            </span>
+            <span className="text-xs font-medium text-ink-accent">{showAutopilot ? 'Hide' : 'Customize'}</span>
+          </button>
+          {showAutopilot && (
+            <div className="mt-2 animate-fade-in divide-y divide-line-subtle overflow-hidden rounded-lg border border-line-subtle">
               {AUTOPILOT.map((a) => (
-                <div key={a.key} className="flex items-center gap-3 px-3.5 py-2.5">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-medium text-zinc-200">{a.label}</div>
-                    <div className="text-2xs text-zinc-500">{a.hint}</div>
-                  </div>
-                  <Switch label={a.label} checked={settings[a.key] as boolean} onChange={(v) => setSettings((s) => ({ ...s, [a.key]: v }))} />
-                </div>
+                <SwitchRow key={a.key} label={a.label} description={a.hint} checked={settings[a.key] as boolean} onChange={(v) => setSettings((s) => ({ ...s, [a.key]: v }))} />
               ))}
             </div>
-          </div>
-        </div>
-      )}
+          )}
+        </fieldset>
+      </div>
     </Dialog>
   );
 }

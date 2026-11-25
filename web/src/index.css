@@ -9,106 +9,144 @@
     height: 100%;
   }
   body {
-    @apply bg-bg font-sans text-[13.5px] text-zinc-200 antialiased;
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11', 'ss01';
+    @apply bg-backdrop font-sans text-base text-ink antialiased;
+    font-feature-settings: 'kern', 'liga';
+    text-rendering: optimizeLegibility;
   }
   ::selection {
-    background: rgba(139, 124, 255, 0.35);
+    background: color-mix(in srgb, var(--fill-accent) 26%, transparent);
   }
   * {
     scrollbar-width: thin;
-    scrollbar-color: theme(colors.line.strong) transparent;
+    scrollbar-color: var(--scroll-thumb) transparent;
   }
+  /* Framework 26 focus effect: a ring outline, with the gap painted in the offset colour so it reads on any fill. */
   :focus-visible {
-    outline: 2px solid rgba(139, 124, 255, 0.7);
-    outline-offset: 2px;
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-offset-width);
+    box-shadow: 0 0 0 var(--focus-offset-width) var(--focus-offset);
+  }
+  :where(input, textarea, select):focus-visible {
+    outline: none;
+    box-shadow: none;
   }
   code,
   kbd,
-  pre {
+  pre,
+  samp {
     @apply font-mono;
+  }
+  button {
+    cursor: default;
+  }
+  svg.lucide[stroke-width='2'] {
+    stroke-width: 1.75;
+  }
+  a,
+  button:not(:disabled) {
+    -webkit-tap-highlight-color: transparent;
+  }
+  [data-motion='reduce'] *,
+  [data-motion='reduce'] *::before,
+  [data-motion='reduce'] *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root:not([data-motion='full']) *,
+    :root:not([data-motion='full']) *::before,
+    :root:not([data-motion='full']) *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }
 
 @layer components {
-  .card {
-    @apply rounded-xl border border-line bg-surface shadow-panel;
+  .heading {
+    font-weight: 500;
+    letter-spacing: var(--heading-tracking);
   }
-  .hairline {
-    @apply border-line;
+  .numeric {
+    font-family: var(--font-numeric);
+    font-variant-numeric: tabular-nums lining-nums;
   }
-  .mono-chip {
-    @apply inline-flex items-center gap-1 rounded-md border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-2xs text-zinc-400;
+  .eyebrow {
+    @apply text-2xs font-medium uppercase tracking-label text-ink-tertiary;
   }
-  .section-title {
-    @apply text-2xs font-semibold uppercase tracking-[0.08em] text-zinc-500;
+  .scroll-area {
+    scrollbar-gutter: stable;
   }
-  .grid-bg {
-    background-image: radial-gradient(circle at 1px 1px, theme(colors.white / 4.5%) 1px, transparent 0);
-    background-size: 22px 22px;
-  }
-  .glow-top {
-    background: radial-gradient(1200px 380px at 50% -120px, rgba(124, 108, 255, 0.16), transparent 70%),
-      radial-gradient(700px 260px at 85% -80px, rgba(34, 211, 238, 0.08), transparent 70%);
-  }
-  .light .glow-top {
-    background: radial-gradient(1200px 320px at 50% -140px, rgba(124, 108, 255, 0.05), transparent 70%);
-  }
-  .text-gradient {
-    @apply bg-gradient-to-r from-violet-300 via-indigo-200 to-cyan-200 bg-clip-text text-transparent;
+  .no-scrollbar {
+    scrollbar-width: none;
   }
 }
 
 .md {
-  @apply prose prose-sm max-w-none;
-  --tw-prose-body: theme(colors.zinc.300);
-  --tw-prose-headings: theme(colors.zinc.100);
-  --tw-prose-lead: theme(colors.zinc.400);
-  --tw-prose-bold: theme(colors.zinc.100);
-  --tw-prose-links: theme(colors.violet.300);
-  --tw-prose-code: theme(colors.zinc.200);
-  --tw-prose-pre-code: theme(colors.zinc.300);
-  --tw-prose-kbd: theme(colors.zinc.100);
-  --tw-prose-kbd-shadows: var(--white);
-  --tw-prose-captions: theme(colors.zinc.500);
-  --tw-prose-quotes: theme(colors.zinc.300);
-  --tw-prose-bullets: theme(colors.zinc.600);
-  --tw-prose-counters: theme(colors.zinc.500);
-  --tw-prose-hr: theme(colors.zinc.800);
-  --tw-prose-th-borders: theme(colors.zinc.700);
-  --tw-prose-td-borders: theme(colors.zinc.800);
-  --tw-prose-quote-borders: theme(colors.violet.500 / 40%);
+  @apply prose max-w-none;
+  font-size: 0.929rem;
+  line-height: 1.6;
+  --tw-prose-body: color-mix(in srgb, var(--ink) 88%, transparent);
+  --tw-prose-headings: var(--ink);
+  --tw-prose-lead: var(--ink-secondary);
+  --tw-prose-links: var(--ink-accent);
+  --tw-prose-bold: var(--ink);
+  --tw-prose-counters: var(--ink-tertiary);
+  --tw-prose-bullets: var(--ink-tertiary);
+  --tw-prose-hr: var(--line-subtle);
+  --tw-prose-quotes: var(--ink-secondary);
+  --tw-prose-quote-borders: var(--line);
+  --tw-prose-captions: var(--ink-tertiary);
+  --tw-prose-kbd: var(--ink);
+  --tw-prose-kbd-shadows: var(--ink);
+  --tw-prose-code: var(--ink);
+  --tw-prose-pre-code: var(--ink-secondary);
+  --tw-prose-pre-bg: var(--app-sunken);
+  --tw-prose-th-borders: var(--line);
+  --tw-prose-td-borders: var(--line-subtle);
 }
 .md :where(h1) {
-  @apply mb-3 mt-1 text-base font-semibold;
+  @apply heading mb-3 mt-1 text-lg text-ink;
 }
 .md :where(h2) {
-  @apply mb-2 mt-5 text-[13px] font-semibold uppercase tracking-wide text-zinc-400;
+  @apply heading mb-2 mt-5 text-md text-ink;
 }
-.md :where(h3) {
-  @apply mb-1.5 mt-4 text-[13px] font-semibold;
+.md :where(h3, h4) {
+  @apply mb-1.5 mt-4 text-sm font-semibold text-ink;
 }
 .md :where(p, li) {
-  @apply my-1 leading-relaxed;
+  @apply my-1.5;
 }
 .md :where(ul, ol) {
-  @apply my-1.5 pl-5;
+  @apply my-2 pl-5;
+}
+.md :where(li)::marker {
+  color: var(--ink-tertiary);
+}
+.md :where(a) {
+  @apply font-medium no-underline hover:underline;
 }
 .md :where(code):not(pre code) {
-  @apply rounded bg-white/[0.06] px-1 py-px text-[12px] font-normal before:content-none after:content-none;
+  @apply rounded-sm bg-neutral-subtle px-1 py-px text-[0.9em] font-normal before:content-none after:content-none;
 }
 .md :where(pre) {
-  @apply my-2 rounded-lg border border-line bg-black/50 p-3 text-[12px] leading-relaxed;
+  @apply my-2.5 rounded-lg border border-line-subtle p-3 text-xs leading-relaxed;
 }
 .md :where(table) {
-  @apply my-2 text-[12.5px];
+  @apply my-2.5 text-sm;
 }
 .md :where(th, td) {
   @apply px-2 py-1;
 }
 .md :where(blockquote) {
-  @apply font-normal not-italic text-zinc-400;
+  @apply font-normal not-italic;
 }
 .md-tight :where(p, li) {
   @apply my-0.5;
+}
+.md-tight :where(ul, ol) {
+  @apply my-1;
 }

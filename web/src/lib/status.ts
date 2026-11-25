@@ -1,9 +1,7 @@
 import {
-  Bot,
   BrainCircuit,
-  GraduationCap,
-  CheckCircle2,
   ClipboardCheck,
+  GraduationCap,
   Hammer,
   MessageCircleQuestion,
   Route,
@@ -15,78 +13,80 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { InitiativeStatus, RunKind, RunStatus, TicketStatus } from '@factory/shared';
+import type { Hue, Tone } from '@/design/tone';
 
-export type Tone = 'neutral' | 'active' | 'attention' | 'success' | 'danger' | 'muted' | 'accent' | 'info';
+export interface StatusInfo {
+  label: string;
+  tone: Tone;
+  live?: boolean;
+  /** One plain sentence on what the status means, for tooltips and legends. */
+  description: string;
+}
 
-export const toneClasses: Record<Tone, { pill: string; dot: string; text: string; bar: string }> = {
-  neutral: { pill: 'bg-zinc-500/10 text-zinc-300 ring-zinc-500/20', dot: 'bg-zinc-400', text: 'text-zinc-300', bar: 'bg-zinc-500' },
-  muted: { pill: 'bg-zinc-500/5 text-zinc-500 ring-zinc-500/15', dot: 'bg-zinc-600', text: 'text-zinc-500', bar: 'bg-zinc-700' },
-  active: { pill: 'bg-cyan-400/10 text-cyan-300 ring-cyan-400/25', dot: 'bg-cyan-400', text: 'text-cyan-300', bar: 'bg-cyan-400' },
-  info: { pill: 'bg-sky-400/10 text-sky-300 ring-sky-400/20', dot: 'bg-sky-400', text: 'text-sky-300', bar: 'bg-sky-500' },
-  attention: { pill: 'bg-amber-400/10 text-amber-300 ring-amber-400/25', dot: 'bg-amber-400', text: 'text-amber-300', bar: 'bg-amber-400' },
-  success: { pill: 'bg-emerald-400/10 text-emerald-300 ring-emerald-400/25', dot: 'bg-emerald-400', text: 'text-emerald-300', bar: 'bg-emerald-400' },
-  danger: { pill: 'bg-rose-500/10 text-rose-300 ring-rose-500/25', dot: 'bg-rose-400', text: 'text-rose-300', bar: 'bg-rose-500' },
-  accent: { pill: 'bg-violet-400/10 text-violet-300 ring-violet-400/25', dot: 'bg-violet-400', text: 'text-violet-300', bar: 'bg-violet-400' },
+export const initiativeStatus: Record<InitiativeStatus, StatusInfo> = {
+  draft: { label: 'Draft', tone: 'neutral', description: 'Not started. Planning starts when you press Start planning.' },
+  planning: { label: 'Planning', tone: 'active', live: true, description: 'A planner is reading the repository and writing the plan.' },
+  plan_review: { label: 'Reviewing plan', tone: 'active', live: true, description: 'A second agent is checking the plan against the code.' },
+  needs_input: { label: 'Needs your input', tone: 'warn', description: 'The planner has questions only you can answer.' },
+  awaiting_approval: { label: 'Awaiting approval', tone: 'warn', description: 'The plan is ready: approve it, or ask for changes.' },
+  in_progress: { label: 'Building', tone: 'accent', description: 'Agents are building, checking, reviewing and fixing the tickets.' },
+  done: { label: 'Done', tone: 'good', description: 'Every ticket is approved or merged.' },
+  failed: { label: 'Failed', tone: 'bad', description: 'Planning failed. Open the last run to see why, then try again.' },
+  archived: { label: 'Archived', tone: 'muted', description: 'Put away. Restore it to continue.' },
 };
 
-export const initiativeStatus: Record<InitiativeStatus, { label: string; tone: Tone; live?: boolean }> = {
-  draft: { label: 'Draft', tone: 'neutral' },
-  planning: { label: 'Planning', tone: 'active', live: true },
-  plan_review: { label: 'Reviewing plan', tone: 'active', live: true },
-  needs_input: { label: 'Needs your input', tone: 'attention' },
-  awaiting_approval: { label: 'Awaiting approval', tone: 'attention' },
-  in_progress: { label: 'Building', tone: 'accent' },
-  done: { label: 'Done', tone: 'success' },
-  failed: { label: 'Failed', tone: 'danger' },
-  archived: { label: 'Archived', tone: 'muted' },
+export const ticketStatus: Record<TicketStatus, StatusInfo> = {
+  proposed: { label: 'Proposed', tone: 'muted', description: 'Part of a plan that is not approved yet.' },
+  todo: { label: 'To do', tone: 'neutral', description: 'Waiting to be built.' },
+  building: { label: 'Building', tone: 'active', live: true, description: 'An executor is writing the code in its own worktree.' },
+  checking: { label: 'Running checks', tone: 'active', live: true, description: "The project's checks command is running on the branch." },
+  built: { label: 'Built', tone: 'info', description: 'Built and checked, waiting for a review.' },
+  in_review: { label: 'In review', tone: 'active', live: true, description: 'A reviewer with no memory of the build is reading the diff.' },
+  changes_requested: { label: 'Changes requested', tone: 'warn', description: 'The review found things to fix.' },
+  fixing: { label: 'Fixing', tone: 'active', live: true, description: 'A fixer is working through findings, failing CI and PR comments.' },
+  approved: { label: 'Approved', tone: 'good', description: 'Reviewed and approved.' },
+  merged: { label: 'Merged', tone: 'good', description: 'Its pull request is merged.' },
+  blocked: { label: 'Needs you', tone: 'bad', description: 'Stopped until you act. Open the ticket to see why.' },
+  canceled: { label: 'Canceled', tone: 'muted', description: 'A revised plan no longer needs it.' },
 };
 
-export const ticketStatus: Record<TicketStatus, { label: string; tone: Tone; live?: boolean }> = {
-  proposed: { label: 'Proposed', tone: 'muted' },
-  todo: { label: 'To do', tone: 'neutral' },
-  building: { label: 'Building', tone: 'active', live: true },
-  checking: { label: 'Running checks', tone: 'active', live: true },
-  built: { label: 'Built', tone: 'info' },
-  in_review: { label: 'In review', tone: 'active', live: true },
-  changes_requested: { label: 'Changes requested', tone: 'attention' },
-  fixing: { label: 'Fixing', tone: 'active', live: true },
-  approved: { label: 'Approved', tone: 'success' },
-  merged: { label: 'Merged', tone: 'success' },
-  blocked: { label: 'Needs you', tone: 'danger' },
-  canceled: { label: 'Canceled', tone: 'muted' },
+export const runStatus: Record<RunStatus, StatusInfo> = {
+  queued: { label: 'Queued', tone: 'neutral', description: 'Waiting for a free agent slot.' },
+  running: { label: 'Running', tone: 'active', live: true, description: 'Working now.' },
+  succeeded: { label: 'Done', tone: 'good', description: 'Finished.' },
+  failed: { label: 'Failed', tone: 'bad', description: 'Ended with an error.' },
+  canceled: { label: 'Canceled', tone: 'muted', description: 'Stopped before it finished.' },
+  interrupted: { label: 'Interrupted', tone: 'warn', description: 'A restart stopped it.' },
 };
 
-export const runStatus: Record<RunStatus, { label: string; tone: Tone; live?: boolean }> = {
-  queued: { label: 'Queued', tone: 'neutral' },
-  running: { label: 'Running', tone: 'active', live: true },
-  succeeded: { label: 'Done', tone: 'success' },
-  failed: { label: 'Failed', tone: 'danger' },
-  canceled: { label: 'Canceled', tone: 'muted' },
-  interrupted: { label: 'Interrupted', tone: 'attention' },
-};
+export interface AgentKind {
+  label: string;
+  agent: string;
+  icon: LucideIcon;
+  hue: Hue;
+  description: string;
+}
 
-export const runKind: Record<RunKind, { label: string; agent: string; icon: LucideIcon; color: string }> = {
-  plan: { label: 'Plan', agent: 'Planner', icon: BrainCircuit, color: 'text-violet-300' },
-  plan_review: { label: 'Plan review', agent: 'Plan reviewer', icon: ClipboardCheck, color: 'text-indigo-300' },
-  execute: { label: 'Build', agent: 'Executor', icon: Hammer, color: 'text-cyan-300' },
-  gate: { label: 'Checks', agent: 'Checks gate', icon: ShieldCheck, color: 'text-teal-300' },
-  review: { label: 'Review', agent: 'Reviewer', icon: ScanSearch, color: 'text-sky-300' },
-  fix: { label: 'Fix', agent: 'Fixer', icon: Wrench, color: 'text-amber-300' },
-  verify: { label: 'Verify fix', agent: 'Fix verifier', icon: UserCheck, color: 'text-lime-300' },
-  arbitrate: { label: 'Decide', agent: 'Arbiter', icon: Scale, color: 'text-orange-300' },
-  ask: { label: 'Ask', agent: 'Advisor', icon: MessageCircleQuestion, color: 'text-fuchsia-300' },
-  steer: { label: 'Route feedback', agent: 'Steering router', icon: Route, color: 'text-rose-300' },
-  retro: { label: 'Retro', agent: 'Retro', icon: GraduationCap, color: 'text-emerald-300' },
+export const runKind: Record<RunKind, AgentKind> = {
+  plan: { label: 'Plan', agent: 'Planner', icon: BrainCircuit, hue: 'info', description: 'Reads the repository and writes the plan and its tickets.' },
+  plan_review: { label: 'Plan review', agent: 'Plan reviewer', icon: ClipboardCheck, hue: 'info', description: 'Checks the plan against the code before you see it.' },
+  execute: { label: 'Build', agent: 'Executor', icon: Hammer, hue: 'accent', description: 'Writes the code for one ticket on its own branch.' },
+  gate: { label: 'Checks', agent: 'Checks gate', icon: ShieldCheck, hue: 'neutral', description: "Runs the project's checks command. No agent involved." },
+  review: { label: 'Review', agent: 'Reviewer', icon: ScanSearch, hue: 'pink', description: 'Reads the diff with fresh eyes and approves or asks for changes.' },
+  fix: { label: 'Fix', agent: 'Fixer', icon: Wrench, hue: 'orange', description: 'Fixes review findings, failing CI, conflicts and PR comments.' },
+  verify: { label: 'Verify fix', agent: 'Fix verifier', icon: UserCheck, hue: 'lime', description: 'Checks that a fix did what it says.' },
+  arbitrate: { label: 'Decide', agent: 'Arbiter', icon: Scale, hue: 'yellow', description: 'Decides for you when a step would otherwise wait on you.' },
+  ask: { label: 'Ask', agent: 'Advisor', icon: MessageCircleQuestion, hue: 'active', description: 'Answers your questions about the plan and the code.' },
+  steer: { label: 'Route feedback', agent: 'Steering router', icon: Route, hue: 'orange', description: 'Sends your feedback to the pull requests it belongs to.' },
+  retro: { label: 'Retro', agent: 'Retro', icon: GraduationCap, hue: 'good', description: 'Learns rules from what you had to steer by hand.' },
 };
-
-export const AgentIcon = Bot;
-export const DoneIcon = CheckCircle2;
 
 export function verdictTone(v: string | null | undefined): Tone {
   if (!v) return 'muted';
-  if (/APPROVE|PASS|READY|APPLIED|SKIPPED/i.test(v)) return /SKIPPED/i.test(v) ? 'neutral' : 'success';
-  if (/CHANGES|REVISE|NO-CHANGES|NOTHING|RETRY/i.test(v)) return 'attention';
-  if (/BLOCK|FAIL|ESCALATE/i.test(v)) return 'danger';
+  if (/SKIPPED/i.test(v)) return 'neutral';
+  if (/APPROVE|PASS|READY|APPLIED/i.test(v)) return 'good';
+  if (/CHANGES|REVISE|NO-CHANGES|NOTHING|RETRY/i.test(v)) return 'warn';
+  if (/BLOCK|FAIL|ESCALATE/i.test(v)) return 'bad';
   return 'neutral';
 }
 

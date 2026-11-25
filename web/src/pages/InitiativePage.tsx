@@ -1,94 +1,173 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { Archive, ArchiveRestore, ChevronLeft, ClipboardCopy, FileText, FolderGit2, GitBranch, GitMerge, GitPullRequest, GraduationCap, MoreHorizontal, Pencil, RotateCcw, Trash2, Wrench } from 'lucide-react';
+import { useMutation } from '@tanstack/react-query';
+import {
+  Archive,
+  ArchiveRestore,
+  BrainCircuit,
+  ClipboardCopy,
+  FileText,
+  FolderGit2,
+  Gauge,
+  GitBranch,
+  GitMerge,
+  GitPullRequest,
+  GraduationCap,
+  ListChecks,
+  MessagesSquare,
+  MoreHorizontal,
+  Pencil,
+  RotateCcw,
+  Trash2,
+  Wrench,
+} from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import type { InitiativeDetail } from '@factory/shared';
-import { api, ApiError } from '@/lib/api';
-import { toastError, toastSuccess } from '@/lib/toasts';
-import { ago, cn, copy, money, shortPath } from '@/lib/utils';
-import { AutopilotCard } from '@/components/AutopilotCard';
-import { Conversation } from '@/components/Conversation';
+import { AutopilotPanel } from '@/components/initiative/AutopilotPanel';
+import { Conversation } from '@/components/initiative/Conversation';
+import { PlanPanel } from '@/components/initiative/PlanPanel';
+import { StatusCard } from '@/components/initiative/StatusCard';
+import { defaultTab, tabsFor, type InitiativeTab } from '@/components/initiative/tabs';
+import { TicketList } from '@/components/initiative/TicketList';
 import { Markdown } from '@/components/Markdown';
-import { PipelineStrip } from '@/components/PipelineStrip';
-import { PlanPanel } from '@/components/PlanPanel';
-import { RulesCard } from '@/components/RulesCard';
-import { InitiativePill } from '@/components/StatusPill';
-import { TicketList } from '@/components/TicketList';
-import { Button, Chip, Dialog, EmptyState, Field, Input, Menu, MenuItem, MenuSeparator, Skeleton, Textarea } from '@/components/ui';
+import { RulesPanel } from '@/components/RulesPanel';
+import { usePageMeta } from '@/components/shell/page-meta';
+import { InitiativeBadge } from '@/components/StatusBadge';
+import {
+  Button,
+  ButtonLink,
+  Card,
+  Chip,
+  Dialog,
+  EmptyState,
+  Field,
+  Input,
+  Menu,
+  MenuItem,
+  MenuSeparator,
+  Page,
+  PageHeader,
+  Skeleton,
+  Tabs,
+  Textarea,
+  confirmAction,
+  type TabItem,
+} from '@/components/ui';
+import { api, ApiError } from '@/lib/api';
+import { useInitiative } from '@/lib/queries';
+import { TICKET_FILTERS, ticketFilterOf, type TicketFilter } from '@/lib/tickets';
+import { toastError, toastSuccess } from '@/lib/toasts';
+import { ago, copy, money, shortPath } from '@/lib/utils';
 
 export function InitiativePage() {
   const { id } = useParams<{ id: string }>();
-  const { data, error, isLoading } = useQuery({ queryKey: ['initiative', id], queryFn: () => api.initiative(id!), enabled: !!id });
-
-  useEffect(() => {
-    if (data) document.title = `${data.initiative.title} · Software Factory`;
-    return () => {
-      document.title = 'Software Factory';
-    };
-  }, [data]);
+  const { data, error, isLoading, refetch } = useInitiative(id);
+  usePageMeta(data?.initiative.title ?? (isLoading ? 'Loading…' : 'Initiative'), [{ label: 'Overview', to: '/' }]);
 
   if (isLoading) {
     return (
-      <div className="mx-auto max-w-[1400px] space-y-4 px-8 py-8">
-        <Skeleton className="h-8 w-1/3" />
-        <Skeleton className="h-16" />
-        <Skeleton className="h-80" />
-      </div>
+      <Page width="wide">
+        <div className="space-y-4">
+          <Skeleton className="h-8 w-1/3" />
+          <Skeleton className="h-6 w-1/2" />
+          <Skeleton className="h-28 rounded-xl" />
+          <Skeleton className="h-80 rounded-xl" />
+        </div>
+      </Page>
     );
   }
   if (error || !data) {
+    const missing = error instanceof ApiError && error.status === 404;
     return (
-      <EmptyState title={error instanceof ApiError && error.status === 404 ? 'Initiative not found' : 'Could not load the initiative'} action={<Link to="/"><Button>Back to dashboard</Button></Link>}>
-        {(error as Error)?.message}
-      </EmptyState>
+      <Page width="narrow">
+        <EmptyState
+          title={missing ? 'This initiative no longer exists' : 'Could not load the initiative'}
+          actions={
+            <>
+              {!missing && (
+                <Button variant="primary" onClick={() => refetch()}>
+                  Try again
+                </Button>
+              )}
+              <ButtonLink to="/" variant="outline">
+                Go to the overview
+              </ButtonLink>
+            </>
+          }
+        >
+          {missing ? 'It may have been deleted.' : (error as Error | null)?.message}
+        </EmptyState>
+      </Page>
     );
   }
   return <Initiative detail={data} />;
 }
 
 function Initiative({ detail }: { detail: InitiativeDetail }) {
+  const { initiative: i, project, tickets, runs } = detail;
+  const [params, setParams] = useSearchParams();
+  const tabs = tabsFor(detail);
+  const tab = (tabs as string[]).includes(params.get('tab') ?? '') ? (params.get('tab') as InitiativeTab) : defaultTab(detail);
+  const show = TICKET_FILTERS.some((f) => f.value === params.get('show')) ? (params.get('show') as TicketFilter) : 'all';
+  const go = (next: { tab?: InitiativeTab; show?: string | null }) => {
+    const p = new URLSearchParams(params);
+    if (next.tab) p.set('tab', next.tab);
+    if (next.show === null || (next.show === undefined && next.tab)) p.delete('show');
+    else if (next.show) p.set('show', next.show);
+    setParams(p, { replace: true });
+  };
+
+  const live = tickets.filter((t) => t.status !== 'canceled');
+  const needsYou = tickets.filter((t) => ticketFilterOf(t, runs.filter((r) => r.ticketId === t.id)) === 'needs-you').length;
+  const proposedRules = (detail.rules ?? []).filter((r) => r.status === 'proposed').length;
+  const planWaits = ['awaiting_approval', 'needs_input'].includes(i.status);
+  const items: Record<InitiativeTab, TabItem<InitiativeTab>> = {
+    plan: { value: 'plan', label: 'Plan', icon: <BrainCircuit />, dot: planWaits ? 'warn' : undefined },
+    tickets: { value: 'tickets', label: 'Tickets', icon: <ListChecks />, count: live.length, countTone: needsYou ? 'bad' : 'neutral' },
+    conversation: { value: 'conversation', label: 'Conversation', icon: <MessagesSquare /> },
+    rules: { value: 'rules', label: 'Learned rules', icon: <GraduationCap />, count: proposedRules, countTone: 'warn' },
+    autopilot: { value: 'autopilot', label: 'Autopilot', icon: <Gauge /> },
+  };
+
+  return (
+    <Page width="wide">
+      <Header detail={detail} onAutopilot={() => go({ tab: 'autopilot' })} />
+      <StatusCard detail={detail} onTab={(t, s) => go({ tab: t, show: s ?? null })} />
+      <Tabs label="Initiative sections" className="mt-6" value={tab} onChange={(t) => go({ tab: t })} items={tabs.map((t) => items[t])} />
+      <div className="mt-5" role="tabpanel">
+        {tab === 'plan' && <PlanPanel detail={detail} />}
+        {tab === 'tickets' && <TicketList detail={detail} show={show} onShow={(f) => go({ show: f === 'all' ? null : f })} />}
+        {tab === 'conversation' && <Conversation detail={detail} />}
+        {tab === 'rules' && <RulesPanel detail={detail} />}
+        {tab === 'autopilot' && <AutopilotPanel detail={detail} />}
+      </div>
+      <p className="mt-8 text-pretty text-xs leading-relaxed text-ink-tertiary">
+        Agents never touch <span className="font-mono">{shortPath(project.repoPath)}</span> directly: each ticket gets its own worktree and <span className="font-mono">factory/*</span> branch, and every
+        step is a fresh <span className="font-mono">claude -p</span> process.
+      </p>
+    </Page>
+  );
+}
+
+function Header({ detail, onAutopilot }: { detail: InitiativeDetail; onAutopilot: () => void }) {
   const { initiative: i, project } = detail;
   const navigate = useNavigate();
   const [editing, setEditing] = useState(false);
   const [showBrief, setShowBrief] = useState(false);
+  const isFeature = i.kind !== 'open-prs';
+  const hasOpenPrs = detail.tickets.some((t) => t.prNumber && t.prState !== 'MERGED' && t.prState !== 'CLOSED');
+  // Open PRs not known to be ready: drafts, and ones the PR sync has not looked at yet (the server asks GitHub before each).
+  const drafts = detail.tickets.filter((t) => t.prNumber && t.prState === 'OPEN' && t.prDraft !== false && t.status !== 'merged' && t.status !== 'canceled').sort((a, b) => a.seq - b.seq);
 
-  const update = useMutation({
-    mutationFn: (p: { status?: 'archived' | 'draft' }) => api.updateInitiative(i.id, p),
-    onSuccess: (_r, p) => toast.success(p.status === 'archived' ? 'Archived' : 'Restored'),
-    onError: toastError,
-  });
-  const reset = useMutation({
-    mutationFn: () => api.resetInitiative(i.id),
-    onSuccess: toastSuccess('Reset to draft'),
-    onError: toastError,
-  });
-  const copyReport = useMutation({
-    mutationFn: () => api.reportMarkdown(i.id).then(copy),
-    onSuccess: toastSuccess('Report copied'),
-    onError: toastError,
-  });
+  const update = useMutation({ mutationFn: (p: { status: 'archived' | 'draft' }) => api.updateInitiative(i.id, p), onSuccess: (_r, p) => toast.success(p.status === 'archived' ? 'Archived' : 'Restored'), onError: toastError });
+  const reset = useMutation({ mutationFn: () => api.resetInitiative(i.id), onSuccess: toastSuccess('Reset to draft'), onError: toastError });
+  const report = useMutation({ mutationFn: () => api.reportMarkdown(i.id).then(copy), onSuccess: toastSuccess('Report copied as Markdown'), onError: toastError });
   const fixPrs = useMutation({
     mutationFn: () => api.bulk(i.id, 'fix-prs'),
     onSuccess: ({ count }) => toast.success(count ? `Started a fixer on ${count} PR${count > 1 ? 's' : ''}` : 'No open PR has anything to fix right now'),
     onError: toastError,
   });
-  const autoMerge = useMutation({
-    mutationFn: (on: boolean) => api.updateInitiative(i.id, { settings: { autoMerge: on } }),
-    onSuccess: (_r, on) => toast.success(on ? 'Auto-merge on: each approved PR joins the merge queue once the PRs below it merge' : 'Auto-merge off'),
-    onError: toastError,
-  });
-  const retro = useMutation({
-    mutationFn: () => api.retro(i.id),
-    onSuccess: toastSuccess('Retro queued: it proposes rules under Learned rules'),
-    onError: toastError,
-  });
-  const isFeature = i.kind !== 'open-prs';
-  const hasOpenPrs = detail.tickets.some((t) => t.prNumber && t.prState !== 'MERGED' && t.prState !== 'CLOSED');
-  // Open PRs not known to be ready: drafts, and ones the PR sync has not looked at yet (the server asks GitHub before each).
-  const drafts = detail.tickets
-    .filter((t) => t.prNumber && t.prState === 'OPEN' && t.prDraft !== false && t.status !== 'merged' && t.status !== 'canceled')
-    .sort((a, b) => a.seq - b.seq);
+  const retro = useMutation({ mutationFn: () => api.retro(i.id), onSuccess: toastSuccess('Retro queued: it proposes rules under Learned rules'), onError: toastError });
   const markReady = useMutation({
     mutationFn: () => api.bulk(i.id, 'ready-prs'),
     onSuccess: ({ count }) => toast.success(count ? `Marked ${count} PR${count > 1 ? 's' : ''} ready for review` : 'No draft PR left: they are all ready for review'),
@@ -103,130 +182,104 @@ function Initiative({ detail }: { detail: InitiativeDetail }) {
     onError: toastError,
   });
 
+  const askReset = async () => {
+    const ok = await confirmAction({
+      title: 'Reset to draft?',
+      description: 'This stops every agent and deletes the plan, the tickets, their local worktrees and factory branches. Pushed branches and pull requests stay.',
+      confirmLabel: 'Reset to draft',
+      danger: true,
+    });
+    if (ok) reset.mutate();
+  };
+  const askDelete = async () => {
+    const ok = await confirmAction({
+      title: `Delete “${i.title}”?`,
+      description: 'This deletes the initiative and its history, with its local worktrees and factory branches. It cannot be undone.',
+      confirmLabel: 'Delete for good',
+      danger: true,
+    });
+    if (ok) remove.mutate();
+  };
+
   return (
-    <div className="mx-auto max-w-[1440px] px-6 py-6 @lg:px-8">
-      <div className="mb-5">
-        <Link to="/" className="mb-3 inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300">
-          <ChevronLeft className="h-3.5 w-3.5" /> Dashboard
-        </Link>
-        <div className="flex flex-wrap items-start gap-4">
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-xl font-semibold tracking-tight text-zinc-50">{i.title}</h1>
-              <InitiativePill status={i.status} />
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              <Chip title={project.repoPath}>
-                <FolderGit2 className="h-3 w-3" /> {project.name}
-              </Chip>
-              <Chip>
-                <GitBranch className="h-3 w-3" /> {i.baseBranch}
-              </Chip>
-              {i.settings.autoMerge && (
-                <Chip title="Each approved PR joins the merge queue once the PRs below it merge">
-                  <GitMerge className="h-3 w-3" /> auto-merge
-                </Chip>
-              )}
-              <Chip>{money(detail.costUsd)} spent</Chip>
-              <Chip>created {ago(i.createdAt)}</Chip>
-              <button onClick={() => setShowBrief((v) => !v)} className="mono-chip hover:text-zinc-200">
-                <FileText className="h-3 w-3" /> {showBrief ? 'Hide brief' : 'Brief'}
+    <>
+      <PageHeader
+        title={i.title}
+        status={<InitiativeBadge status={i.status} />}
+        meta={
+          <>
+            <Link to="/projects" title={project.repoPath}>
+              <Chip icon={<FolderGit2 />}>{project.name}</Chip>
+            </Link>
+            <Chip icon={<GitBranch />} mono>
+              {i.baseBranch}
+            </Chip>
+            {!isFeature && <Chip icon={<GitPullRequest />}>Adopted pull requests</Chip>}
+            {i.settings.autoMerge && (
+              <button type="button" onClick={onAutopilot} title="Each approved PR joins the merge queue once the PRs below it merge. Change it under Autopilot.">
+                <Chip icon={<GitMerge />}>Auto-merge on</Chip>
               </button>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" icon={<ClipboardCopy className="h-4 w-4" />} loading={copyReport.isPending} onClick={() => copyReport.mutate()}>
+            )}
+            <Chip>
+              <span className="numeric">{money(detail.costUsd)}</span> spent
+            </Chip>
+            <Chip>Created {ago(i.createdAt)}</Chip>
+          </>
+        }
+        actions={
+          <>
+            <Button variant="ghost" size="sm" icon={<FileText />} onClick={() => setShowBrief((v) => !v)} aria-expanded={showBrief}>
+              {showBrief ? 'Hide the brief' : 'Brief'}
+            </Button>
+            <Button variant="outline" size="sm" icon={<ClipboardCopy />} loading={report.isPending} onClick={() => report.mutate()}>
               Copy report
             </Button>
-            <Menu
-              trigger={
-                <Button variant="outline" size="sm" icon={<MoreHorizontal className="h-4 w-4" />}>
-                  More
-                </Button>
-              }
-            >
+            <Menu trigger={<Button variant="outline" size="sm" icon={<MoreHorizontal />} aria-label="More actions" />}>
               {drafts.length > 0 && (
-                <MenuItem icon={<GitPullRequest />} disabled={markReady.isPending} onSelect={() => markReady.mutate()}>
-                  <span className="block">{drafts.length > 1 ? `Make ${drafts.length} PRs non-draft` : `Make PR #${drafts[0].prNumber} non-draft`}</span>
-                  <span className="block max-w-[280px] truncate text-2xs text-zinc-500">Ready for review: {drafts.map((t) => `#${t.prNumber}`).join(', ')}</span>
+                <MenuItem icon={<GitPullRequest />} disabled={markReady.isPending} onSelect={() => markReady.mutate()} description={`Ready for review: ${drafts.map((t) => `#${t.prNumber}`).join(', ')}`}>
+                  {drafts.length > 1 ? `Mark ${drafts.length} PRs ready for review` : `Mark PR #${drafts[0].prNumber} ready for review`}
                 </MenuItem>
               )}
-              <MenuItem icon={<Wrench />} disabled={!hasOpenPrs || fixPrs.isPending} onSelect={() => fixPrs.mutate()}>
-                <span className="block">Fix PRs now</span>
-                <span className="block text-2xs text-zinc-500">Review comments, failing CI, conflicts</span>
-              </MenuItem>
-              <MenuItem icon={<GitMerge />} disabled={autoMerge.isPending} hint={i.settings.autoMerge ? 'On' : 'Off'} onSelect={() => autoMerge.mutate(!i.settings.autoMerge)}>
-                <span className="block">Auto-merge PRs</span>
-                <span className="block text-2xs text-zinc-500">Queue each approved PR once the PRs below it merge</span>
+              <MenuItem icon={<Wrench />} disabled={!hasOpenPrs || fixPrs.isPending} onSelect={() => fixPrs.mutate()} description="Review comments, failing CI and conflicts">
+                Fix the PRs now
               </MenuItem>
               {isFeature && (
-                <MenuItem icon={<GraduationCap />} disabled={!i.approvedAt || retro.isPending} onSelect={() => retro.mutate()}>
-                  <span className="block">Retro on the plan</span>
-                  <span className="block text-2xs text-zinc-500">What you steered by hand, and rules so you don’t have to again</span>
+                <MenuItem icon={<GraduationCap />} disabled={!i.approvedAt || retro.isPending} onSelect={() => retro.mutate()} description="What you steered by hand, as rules for next time">
+                  Run a retro on the plan
                 </MenuItem>
               )}
               <MenuSeparator />
               <MenuItem icon={<Pencil />} onSelect={() => setEditing(true)}>
-                Edit title & brief
+                Edit the title and brief
               </MenuItem>
               {i.status === 'archived' ? (
                 <MenuItem icon={<ArchiveRestore />} onSelect={() => update.mutate({ status: 'draft' })}>
                   Restore
                 </MenuItem>
               ) : (
-                <MenuItem icon={<Archive />} onSelect={() => update.mutate({ status: 'archived' })}>
+                <MenuItem icon={<Archive />} onSelect={() => update.mutate({ status: 'archived' })} description="Hide it from the overview and the sidebar; restore any time">
                   Archive
                 </MenuItem>
               )}
               <MenuSeparator />
-              <MenuItem
-                icon={<RotateCcw />}
-                danger
-                onSelect={() => {
-                  if (confirm('Reset to draft? This stops all agents and deletes the plan, tickets, local worktrees and factory branches. Pushed branches and PRs stay.')) reset.mutate();
-                }}
-              >
+              <MenuItem icon={<RotateCcw />} danger onSelect={askReset} description="Deletes the plan, tickets and branches">
                 Reset to draft
               </MenuItem>
-              <MenuItem
-                icon={<Trash2 />}
-                danger
-                onSelect={() => {
-                  if (confirm('Delete this initiative and its history? Local worktrees and factory branches are removed too. This cannot be undone.')) remove.mutate();
-                }}
-              >
+              <MenuItem icon={<Trash2 />} danger onSelect={askDelete}>
                 Delete
               </MenuItem>
             </Menu>
-          </div>
-        </div>
-        {showBrief && (
-          <div className="card mt-3 animate-fade-in px-4 py-3">
-            <Markdown>{i.brief}</Markdown>
-          </div>
-        )}
-      </div>
-
-      {isFeature && <PipelineStrip detail={detail} />}
-
-      <div className={cn('grid grid-cols-1 gap-5 @xl:grid-cols-[minmax(0,1fr)_380px]', isFeature && 'mt-5')}>
-        <div className="min-w-0 space-y-5">
-          {isFeature && <PlanPanel detail={detail} />}
-          <TicketList detail={detail} />
-        </div>
-        <div className="space-y-5 @xl:sticky @xl:top-5 @xl:self-start">
-          <Conversation detail={detail} />
-          <RulesCard detail={detail} />
-          <AutopilotCard initiative={i} />
-          <div className="px-1 text-2xs leading-relaxed text-zinc-600">
-            Agents never touch <span className="font-mono">{shortPath(project.repoPath)}</span> directly: each ticket gets its own worktree and{' '}
-            <span className="font-mono">factory/*</span> branch. Every step is a fresh <span className="font-mono">claude -p</span> process.
-          </div>
-        </div>
-      </div>
-
+          </>
+        }
+      />
+      {showBrief && (
+        <Card className="-mt-2 mb-6 animate-fade-in px-5 py-4">
+          <div className="eyebrow mb-2">Your brief</div>
+          <Markdown>{i.brief}</Markdown>
+        </Card>
+      )}
       <EditDialog detail={detail} open={editing} onOpenChange={setEditing} />
-    </div>
+    </>
   );
 }
 
@@ -252,25 +305,26 @@ function EditDialog({ detail, open, onOpenChange }: { detail: InitiativeDetail; 
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      wide
-      title="Edit initiative"
+      size="lg"
+      title="Edit the initiative"
+      description="The next planner reads the brief as it is when it starts."
       footer={
         <>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button variant="primary" loading={save.isPending} onClick={() => save.mutate()}>
+          <Button variant="primary" loading={save.isPending} disabled={title.trim().length < 3 || brief.trim().length < 10} onClick={() => save.mutate()}>
             Save
           </Button>
         </>
       }
     >
-      <div className="space-y-3">
+      <div className="space-y-3" onKeyDown={(e) => e.key === 'Enter' && (e.metaKey || e.ctrlKey) && save.mutate()}>
         <Field label="Title">
           <Input value={title} onChange={(e) => setTitle(e.target.value)} />
         </Field>
         <Field label="Brief">
-          <Textarea value={brief} onChange={(e) => setBrief(e.target.value)} className="min-h-[220px] font-mono text-xs" />
+          <Textarea value={brief} onChange={(e) => setBrief(e.target.value)} className="min-h-[14rem] font-mono text-sm" />
         </Field>
       </div>
     </Dialog>
