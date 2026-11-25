@@ -142,10 +142,21 @@ export function OverviewPage() {
                 icon={<Layers />}
                 title={query ? 'No initiative matches' : filter === 'active' ? 'Nothing in flight' : 'Nothing here'}
                 actions={
-                  !query && (
-                    <Button variant="primary" icon={<Plus />} onClick={newInitiative}>
-                      New initiative
+                  query ? (
+                    <Button variant="outline" onClick={() => setQuery('')}>
+                      Clear the filter
                     </Button>
+                  ) : (
+                    <>
+                      <Button variant="primary" icon={<Plus />} onClick={newInitiative}>
+                        New initiative
+                      </Button>
+                      {filter === 'active' && counts.done > 0 && (
+                        <Button variant="outline" onClick={() => setFilter('done')}>
+                          Show the {counts.done} done
+                        </Button>
+                      )}
+                    </>
                   )
                 }
               >
