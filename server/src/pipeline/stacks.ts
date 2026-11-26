@@ -19,6 +19,26 @@ export function stackBase<T extends StackMember>(ticket: T, all: T[]): T | null 
   }
 }
 
+export function getStackDepth<T extends StackMember>(ticket: T, all: T[]): number {
+  let depth = 0;
+  for (let below = stackBase(ticket, all); below && depth < all.length; below = stackBase(below, all)) depth++;
+  return depth;
+}
+
+export function sortBottomUp<T extends StackMember>(tickets: T[], all: T[]): T[] {
+  return [...tickets].sort((a, b) => getStackDepth(a, all) - getStackDepth(b, all));
+}
+
+// Feedback on a stacked ticket waits while a ticket below it still has feedback to fix or is being fixed:
+// its fix reaches this branch through the stack sync, and only then does this ticket's fixer see it.
+export function findFeedbackBlocker<T extends StackMember & { id: string }>(ticket: T, all: T[], withPendingFeedback: ReadonlySet<string>): T | null {
+  let steps = 0;
+  for (let below = stackBase(ticket, all); below && steps < all.length; below = stackBase(below, all), steps++) {
+    if (below.status === 'fixing' || withPendingFeedback.has(below.id)) return below;
+  }
+  return null;
+}
+
 export function syncTarget<T extends StackMember & StackFields>(ticket: T, all: T[], baseBranch: string): { parent: T | null; target: string } | null {
   const parent = stackBase(ticket, all);
   if (parent) return isOpenPr(parent) ? { parent, target: remoteBranchOf(parent)! } : null;

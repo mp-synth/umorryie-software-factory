@@ -452,7 +452,7 @@ export async function routes(app: FastifyInstance): Promise<void> {
     const { id: tid, action } = z
       .object({
         id: z.string().uuid(),
-        action: z.enum(['run', 'check', 'review', 'fix', 'retro', 'reset', 'mark-approved', 'mark-merged', 'mark-todo']),
+        action: z.enum(['run', 'check', 'review', 'fix', 'retro', 'arbitrate', 'reset', 'mark-approved', 'mark-merged', 'mark-todo']),
       })
       .parse(req.params);
     const t = await repo.getTicket(tid);
@@ -468,6 +468,8 @@ export async function routes(app: FastifyInstance): Promise<void> {
         return engine.enqueue({ kind: 'fix', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
       case 'retro':
         return engine.retroNow(t.initiativeId, t.id);
+      case 'arbitrate':
+        return engine.arbitrateNow(t.initiativeId, t.id);
       case 'reset':
         await engine.resetTicket(t.id);
         return { ok: true };

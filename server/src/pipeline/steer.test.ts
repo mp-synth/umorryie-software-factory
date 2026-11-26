@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Ticket } from '@factory/shared';
-import { parseRoutes, renderTicketsForSteering, resolveTicketRef, routeBlocker, routeReason, routesByTicket } from './steer.ts';
+import { parseRestacks, parseRoutes, renderTicketsForSteering, resolveTicketRef, routeBlocker, routeReason, routesByTicket } from './steer.ts';
 
 const ticket = (seq: number, key: string, status: Ticket['status'] = 'approved', extra: Partial<Ticket> = {}) =>
   ({ id: `id-${key}`, seq, key, title: `Ticket ${key}`, status, branch: `factory/x/${key}`, worktreePath: `/wt/${key}`, prUrl: `https://github.com/o/r/pull/${seq}`, prState: 'OPEN', dependsOn: [], what: 'Does a thing.', baseRef: 'main', ...extra }) as Ticket;
@@ -74,4 +74,31 @@ test('the ticket list shows the stack, the diff and what can take changes', () =
   assert.match(md, /git -C \/wt\/retry diff factory\/x\/api-client\.\.\.HEAD/);
   assert.match(md, /Builds on: `main`/);
   assert.match(md, /git -C \/wt\/api-client diff origin\/main\.\.\.HEAD/);
+});
+
+test('reads restacks of open tickets onto other open tickets and refuses the impossible ones', () => {
+  const t = (seq: number, key: string, dependsOn: string[], status: Ticket['status'] = 'approved') => ({ id: key, key, seq, title: key, status, dependsOn });
+  const tickets = [t(1, 'core', []), t(5, 'create', ['core']), t(7, 'update', ['core']), t(9, 'renew', ['core']), t(3, 'gone', [], 'merged')];
+  const md = [
+    'ROUTE: TICKETS',
+    '',
+    '## Restack',
+    '- update onto create',
+    '- [09] renew onto 05',
+    '- create onto update',
+    '- core onto create',
+    '- update onto gone',
+    '- nope onto create',
+    '',
+    '## Ticket create',
+    'Define the term helpers here.',
+  ].join('\n');
+  const { restacks, rejected } = parseRestacks(md, tickets);
+  assert.deepEqual(restacks.map((r) => `${r.ticket.key}>${r.onto.key}`), ['update>create', 'renew>create']);
+  assert.equal(rejected.length, 4);
+  assert.match(rejected[0], /already builds on/);
+  assert.match(rejected[1], /already builds on/);
+  assert.match(rejected[2], /merged/);
+  assert.match(rejected[3], /no such ticket/);
+  assert.deepEqual(parseRoutes(md).map((r) => r.ref), ['create']);
 });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TicketStatus } from '@factory/shared';
-import { nextStackStep, stackBase, stackChain, stackStepMessage, syncTarget } from './stacks.ts';
+import { findFeedbackBlocker, getStackDepth, nextStackStep, sortBottomUp, stackBase, stackChain, stackStepMessage, syncTarget } from './stacks.ts';
 
 const ticket = (branch: string, baseRef: string, prNumber: number | null, prState: string | null = 'OPEN', prHeadRef: string | null = null) => ({
   branch,
@@ -116,4 +116,32 @@ test('never restacks around a merged PR, a PR outside the chain, or a stack with
   assert.equal(nextStackStep([10, 11, 13], { pr: 10, stack: foreign }).kind, 'taken');
   const clean = { number: 99, pullRequests: [10, 11], closed: [], merged: [] };
   assert.equal(nextStackStep([10, 13], { pr: 10, stack: clean }).kind, 'taken');
+});
+
+const stacked = (id: string, dependsOn: string[], status: TicketStatus = 'approved') => ({ id, key: id, dependsOn, status });
+
+test('a ticket is as deep as the open tickets below it in its stack', () => {
+  const all = [stacked('a', []), stacked('b', ['a']), stacked('c', ['b'], 'built'), stacked('d', ['c'])];
+  assert.deepEqual(all.map((t) => getStackDepth(t, all)), [0, 1, 2, 3]);
+  const mergedBottom = [stacked('a', [], 'merged'), stacked('b', ['a']), stacked('c', ['b'])];
+  assert.deepEqual(mergedBottom.map((t) => getStackDepth(t, mergedBottom)), [0, 0, 1]);
+});
+
+test('sorts tickets so the ticket below syncs before the ones on top of it', () => {
+  const all = [stacked('top', ['mid']), stacked('mid', ['base']), stacked('side', []), stacked('base', [])];
+  assert.deepEqual(sortBottomUp(all, all).map((t) => t.key), ['side', 'base', 'mid', 'top']);
+});
+
+test('feedback waits while a ticket below has feedback to fix or is being fixed', () => {
+  const all = [stacked('a', []), stacked('b', ['a']), stacked('c', ['b']), stacked('side', ['a'])];
+  assert.equal(findFeedbackBlocker(all[2], all, new Set(['a']))?.key, 'a');
+  assert.equal(findFeedbackBlocker(all[2], all, new Set(['b', 'c']))?.key, 'b');
+  assert.equal(findFeedbackBlocker(all[2], all, new Set(['c', 'side'])), null);
+  const fixing = [stacked('a', [], 'fixing'), stacked('b', ['a'])];
+  assert.equal(findFeedbackBlocker(fixing[1], fixing, new Set())?.key, 'a');
+});
+
+test('merged tickets below never hold feedback', () => {
+  const all = [stacked('a', [], 'merged'), stacked('b', ['a'])];
+  assert.equal(findFeedbackBlocker(all[1], all, new Set(['a'])), null);
 });

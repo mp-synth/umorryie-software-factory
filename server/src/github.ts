@@ -194,6 +194,12 @@ export async function retargetPr(cwd: string, prNumber: number, base: string): P
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh pr edit exited ${r.code}`);
 }
 
+export async function getMergeCommit(cwd: string, prNumber: number): Promise<string | null> {
+  const r = await gh(cwd, ['pr', 'view', String(prNumber), '--json', 'mergeCommit', '-q', '.mergeCommit.oid // ""']);
+  const oid = r.stdout.trim();
+  return r.code === 0 && /^[0-9a-f]{40}$/.test(oid) ? oid : null;
+}
+
 export async function closePr(cwd: string, prNumber: number, why: string): Promise<void> {
   await comment(cwd, prNumber, why);
   const r = await gh(cwd, ['pr', 'close', String(prNumber)]);

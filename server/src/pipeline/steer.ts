@@ -86,3 +86,47 @@ export function renderTicketsForSteering(tickets: ListedTicket[], baseBranch: st
     }),
   ].join('\n');
 }
+
+export interface Restack<T> {
+  ticket: T;
+  onto: T;
+}
+
+type StackedTicket = Pick<Ticket, 'id' | 'key' | 'seq' | 'title' | 'status' | 'dependsOn'>;
+
+function isStackedOn(ticket: StackedTicket, below: StackedTicket, all: StackedTicket[]): boolean {
+  const seen = new Set<string>();
+  const visit = (key: string): boolean => {
+    if (key === below.key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return (all.find((t) => t.key === key)?.dependsOn ?? []).some(visit);
+  };
+  return ticket.dependsOn.some(visit);
+}
+
+// `## Restack` lines read `- <ticket> onto <ticket>`: an open ticket moves onto another open ticket's branch and
+// keeps its PR. The owner's feedback moved code into that ticket, and this one calls it.
+export function parseRestacks<T extends StackedTicket>(md: string, tickets: T[]): { restacks: Restack<T>[]; rejected: string[] } {
+  const restacks: Restack<T>[] = [];
+  const rejected: string[] = [];
+  const stacked = tickets.map((t) => ({ ...t, dependsOn: [...t.dependsOn] }));
+  const stackedOf = (t: T) => stacked.find((s) => s.id === t.id)!;
+  for (const line of (section(md, 'Restack') ?? '').split('\n')) {
+    const m = /^\s*[-*]\s*(.+?)\s+onto\s+(.+?)\s*$/i.exec(line);
+    if (!m) continue;
+    const ticket = resolveTicketRef(m[1], tickets);
+    const onto = resolveTicketRef(m[2], tickets);
+    const said = `"${oneLine(line.replace(/^\s*[-*]\s*/, ''))}"`;
+    if (!ticket || !onto) rejected.push(`${said}: no such ticket.`);
+    else if (ticket.id === onto.id) rejected.push(`${said}: a ticket can't stack on itself.`);
+    else if (routeBlocker(ticket) || routeBlocker(onto)) rejected.push(`${said}: ${routeBlocker(ticket) ? ticketLabel(ticket) : ticketLabel(onto)} is ${(routeBlocker(ticket) ? ticket : onto).status}.`);
+    else if (stackedOf(ticket).dependsOn[0] === onto.key) continue;
+    else if (isStackedOn(stackedOf(onto), ticket, stacked)) rejected.push(`${said}: ${ticketLabel(onto)} already builds on ${ticketLabel(ticket)}.`);
+    else {
+      restacks.push({ ticket, onto });
+      stackedOf(ticket).dependsOn = [onto.key];
+    }
+  }
+  return { restacks, rejected };
+}
