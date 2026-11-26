@@ -36,7 +36,10 @@ an order:
 - `feedback.md`: the project owner's own words, or an arbiter's decision
   made on the owner's behalf. Authoritative on product decisions; still
   check it against the code. An arbiter decision settles the NEEDS-HUMAN
-  items it answers: act on them instead of blocking again. A note from the
+  items it answers: act on them instead of blocking again. When the owner
+  states a rule with an example ("names must state intent, e.g. ..."), the
+  rule applies to every instance in this ticket's diff, not only the example:
+  find them all (`git diff <base>...HEAD`) and list each one in Triage. A note from the
   factory says the PR below this one in the stack changed and merging its
   branch conflicts: that merge is a merge conflict like any other.
 - `verify-block.md`, when present: a verifier rejected your previous attempt
@@ -73,8 +76,11 @@ Read the code each item points at and the branch's diff
 A VALID item that only rewriting already-pushed commits would fix (a commit
 with someone else's author or message, another branch's commit in this
 branch's history) is not NEEDS-HUMAN and not a force-push: commit nothing and
-write `FIX: REBUILD`. The factory then builds the ticket again on a fresh
-branch and closes the old PR once the new one opens.
+write `FIX: REBUILD`. The factory then builds the ticket again from its base
+and puts the result on the same PR as one new commit; every ticket stacked on
+it is built again too, so this is a last resort. Owner feedback is never a
+rebuild: naming, moving, deleting or restructuring code is done with new
+commits on this branch, and the PR stays the same PR.
 
 Check failures, CI failures and merge conflicts are VALID by definition: the
 failure is real. What caused it is still a claim to check. For a failing
@@ -99,6 +105,15 @@ verdict per finding inside its single reply.
 
 - Touch only the items you were given, and keep each fix to what its item
   asks for. No drive-by refactors.
+- Moving code between tickets of a stack: when an item says a function this
+  branch defines belongs to a ticket higher up (the first one that calls it),
+  delete it here with the tests that only cover it. When an item says this
+  ticket must define a function a ticket below defines today, first merge the
+  latest base (`git fetch origin && git merge origin/<base>`): the factory
+  starts you only after the fix below is in your base, so the function is
+  gone from it and you add it here, next to its first caller, with its tests.
+- Renames and other pure refactors asked for in feedback go in their own
+  commit (`refactor: ...`), never in the same commit as a behaviour fix.
 - Fix VALID items and the real part of PARTIAL items with the smallest change.
   Your changes follow the owner's code rules below like any other code.
 - Never weaken a test: no removed or loosened assertions, no skips, no

@@ -85,6 +85,8 @@ export const EFFORT: Record<AgentKind, string> = {
 };
 
 const STEPS_THAT_WRITE_OR_JUDGE_CODE: RunKind[] = ['execute', 'fix', 'review', 'verify', 'arbitrate'];
+// Planners shape the PRs and the router decides who fixes what, so they read the owner's code rules too.
+const STEPS_THAT_READ_CODE_STYLE: RunKind[] = [...STEPS_THAT_WRITE_OR_JUDGE_CODE, 'plan', 'plan_review', 'steer'];
 const STEPS_THAT_WRITE_FOR_PEOPLE: RunKind[] = ['execute', 'fix', 'review', 'arbitrate'];
 
 export function readAgentFile(file: string): string {
@@ -127,7 +129,7 @@ export function ruleAppliesTo(role: RuleRole, kind: AgentKind): boolean {
 
 export function rolePrompt(kind: AgentKind, roleFile = ROLE_FILES[kind], projectRules: Pick<Rule, 'role' | 'body'>[] = []): string {
   const parts = [readAgentFile(roleFile), readAgentFile('repo-rules.md')];
-  if (STEPS_THAT_WRITE_OR_JUDGE_CODE.includes(kind)) parts.push(readAgentFile('code-style.md'));
+  if (STEPS_THAT_READ_CODE_STYLE.includes(kind)) parts.push(readAgentFile('code-style.md'));
   if (STEPS_THAT_WRITE_FOR_PEOPLE.includes(kind)) parts.push(readAgentFile('writing.md'));
   const learned = renderProjectRules(projectRules.filter((r) => ruleAppliesTo(r.role, kind)));
   if (learned) parts.push(learned);

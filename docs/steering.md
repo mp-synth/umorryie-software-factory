@@ -13,6 +13,19 @@ Merged or canceled tickets can't take changes: the router says which part went
 nowhere and needs a follow-up initiative. Before the plan is approved, the same
 box still re-plans.
 
+Feedback about the code inside the tickets (names, comments, deleting unused
+code, moving a helper into the ticket that first calls it, splitting a
+refactor out, the rules in `agents/code-style.md`) always goes to the existing
+PRs as fixes, never to a re-plan, so no PR is replaced. A rule you state with
+an example is applied to every instance in every open ticket. When a helper
+moves into a ticket that tickets beside it also call, the router restacks
+those tickets onto it (`## Restack` in route.md): each keeps its PR, which is
+retargeted, and the stack sync merges the new base into it.
+
+A stacked ticket's fixer waits while a ticket below it still has feedback to
+fix or is being fixed, and starts once that fix is pushed and merged into its
+branch, so it sees, for example, a function the ticket below just removed.
+
 When your words change the plan rather than code inside a ticket (another
 approach or architecture, a changed API or contract, scope added or dropped),
 the router re-plans instead. A fresh planner revises the plan with your words
@@ -21,12 +34,22 @@ running finish, but no new ticket starts. The revised plan goes through plan
 review and approval as usual. Then:
 
 - tickets whose text is unchanged keep building;
-- tickets whose text changed are rebuilt from their base on a new PR, and so is
-  every ticket stacked on them, with the old PR closed;
+- tickets whose text changed are rebuilt from their base and pushed to their
+  existing PR as one new commit, and so is every ticket stacked on them;
 - tickets the plan drops are canceled, with their PRs closed;
 - new tickets start.
 
 Merged tickets stay as they are.
+
+## Merging PRs in any order
+
+You can merge an approved PR before the others. Within about five minutes the
+PR sync sees it, retargets the PRs that were stacked on it to the base branch,
+and merges the latest base branch into every open ticket of the initiative
+that now builds on it (the ones above take it through their stack). Those
+tickets keep their approval and are not reviewed again. Only a merge conflict
+sends a ticket to a fixer, and once the verifier approves that fix it is
+approved again.
 
 Feedback that arrives while a ticket is busy (building, in review, being fixed)
 is not left behind: once the ticket's last step ends, a fixer picks it up.

@@ -50,6 +50,12 @@ or anything else.
   tickets built side by side that edit the same lines (one routes file, one
   registry) unless the plan says how their PRs merge. When more tickets can
   build at once than the initiative runs at a time, note it.
+- **The owner's PR shape.** A helper, constant or model planned into a ticket
+  that doesn't call it from production code (only later tickets or tests do)
+  is a finding: it moves to the first ticket that calls it. So is a refactor
+  of existing code folded into a ticket that changes behaviour (it needs its
+  own refactor-only ticket), a planned function name without a verb that
+  says what it does, and a planned function that takes a callable.
 - **Edge cases and tests.** The edge cases that really apply are listed and
   owned by a ticket; the test strategy uses test layers that exist in this repo.
 - **Measurability.** Success criteria and outcomes are measurable. Reject

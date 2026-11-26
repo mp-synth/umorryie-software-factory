@@ -55,6 +55,10 @@ fresh reviewer after you finish.
   options, fallbacks or extras. No drive-by refactors.
 - Match the surrounding code: idioms, naming, structure, error handling.
   Reuse existing helpers. Follow the owner's code rules below.
+- Add only functions this ticket's production code calls. When the ticket's
+  guidance asks for a helper that only a later ticket calls, leave it out and
+  say so in `build.md`: the ticket that calls it first defines it. Before you
+  finish, check every function your diff adds has a non-test caller in it.
 - Handle the edge cases the plan assigns to this ticket.
 - Every new unit of behaviour gets a test where the repo has a test runner.
   Write it; don't run it: CI runs the tests on the PR.

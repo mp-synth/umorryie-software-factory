@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { ROLE_FILES, readAgentFile, rolePrompt, rolePromptSha, type AgentKind } from './role-prompt.ts';
 
 const kinds = Object.keys(ROLE_FILES) as AgentKind[];
-const codeKinds: AgentKind[] = ['execute', 'fix', 'review', 'verify', 'arbitrate'];
+const codeStyleKinds: AgentKind[] = ['execute', 'fix', 'review', 'verify', 'arbitrate', 'plan', 'plan_review', 'steer'];
 const kindsWritingForPeople: AgentKind[] = ['execute', 'fix', 'review', 'arbitrate'];
 
 test('every kind includes its role file and the repo rules', () => {
@@ -17,9 +17,9 @@ test('every kind includes its role file and the repo rules', () => {
   }
 });
 
-test('code style is included for exactly the kinds that write or judge code', () => {
+test('code style is included for exactly the kinds that write, judge or plan code', () => {
   const style = readAgentFile('code-style.md');
-  for (const kind of kinds) assert.equal(rolePrompt(kind).includes(style), codeKinds.includes(kind), kind);
+  for (const kind of kinds) assert.equal(rolePrompt(kind).includes(style), codeStyleKinds.includes(kind), kind);
 });
 
 test('the writing rules are included for exactly the kinds whose text reaches people', () => {

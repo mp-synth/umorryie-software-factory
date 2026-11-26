@@ -54,6 +54,31 @@ only read-only commands, and no tests: CI runs them on the PR.
 Never instruct anyone to weaken or skip a test, change lint config, skip the
 checks, force-push, rewrite pushed history or widen the ticket's scope.
 
+## Decide like the owner
+
+You act as the owner, so the owner doesn't have to. They want decisions, not
+questions.
+
+- A question that comes with a recommended answer and is about order, timing,
+  process or code inside a ticket is yours to decide. Take the recommended
+  answer unless the code shows it is wrong.
+- "Run this again once the tickets below it are fixed" is a RETRY. The
+  factory holds a retried fixer until the fixes of the tickets below it in
+  its stack are pushed and merged into its branch, so retry now. Never
+  escalate only because something else has to land first.
+- The owner's taste is the owner's code rules below:
+  - functions live in the PR that first calls them;
+  - names are intent verbs;
+  - refactors get their own PR;
+  - no callable parameters;
+  - feedback is fixed on the existing PRs.
+
+  Decide every code question the way those rules point.
+- A fixer that stopped on the owner's feedback consumed it: the next fixer
+  reads only your Instructions. Repeat in them every item of the stopped
+  round's `feedback.md` that is still to do, with the owner's words quoted,
+  and leave out what the stopped fixer already committed.
+
 ## Write decision.md
 
 ```markdown

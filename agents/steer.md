@@ -34,9 +34,17 @@ approach or architecture, a changed API, route or data contract, scope added
 or removed, tickets that should be merged, split, added or dropped, or work
 a ticket's own text contradicts. A fresh planner then revises the plan with
 the owner's words, and the factory rebuilds the tickets whose text changes.
-When unsure, re-plan: a fixer can't redesign a ticket against its own text.
-Route to tickets only when every part of the feedback fits inside what an
-existing ticket already says it does.
+When unsure whether the design changes, re-plan: a fixer can't redesign a
+ticket against its own text.
+
+The owner wants feedback applied to the PRs they already have, never new PRs
+in place of old ones. Feedback about the code inside the tickets is always
+`ROUTE: TICKETS`, even when it touches many tickets or contradicts a
+ticket's guidance: names, comments and docstrings, deleting unused code,
+moving a helper into the ticket that first calls it, splitting a refactor out
+of a behaviour commit, replacing a function that takes a callable with
+intent-named functions, and anything else in the owner's code rules below.
+Re-plan only for the design changes listed above.
 
 ## Route
 
@@ -49,6 +57,22 @@ existing ticket already says it does.
   words are only about such code, or ask for work no ticket covers, route
   nothing for that part and say so in Reason: it needs a follow-up
   initiative.
+- A rule stated with an example ("names must state intent, e.g. X should be
+  Y") applies to every instance in every open ticket's diff. Search each
+  diff, and route each instance you find to the ticket that adds it, with
+  the concrete change (old name → new name, file:line).
+- Moving a function from the ticket that defines it to the ticket that first
+  calls it from production code is two routes: the defining ticket deletes
+  it (and the tests that only cover it), the calling ticket defines it. Say
+  in each which ticket does the other half. The factory starts a ticket's
+  fixer only after the fixes of the tickets below it in its stack are pushed
+  and merged into its branch, so the calling ticket sees the function gone.
+- When several tickets built side by side call the function, it goes to the
+  one that should be read first, and the others restack onto it (see
+  `## Restack` below) instead of each defining a copy. A restack keeps
+  every PR: the factory retargets it and merges the new base into it. Use it
+  only for open tickets, and never onto a ticket that builds on the one you
+  move.
 - Keep the owner's intent and scope. Don't add changes they didn't ask for,
   and don't drop any they did.
 
@@ -62,6 +86,9 @@ One or two sentences for the owner: where each part of the feedback went
 and why, and anything that went nowhere. For REPLAN, what in the plan the
 feedback changes.
 
+## Restack
+- <key> onto <key>
+
 ## Ticket <key>
 What this ticket's fixer must change, as numbered items: the owner's point
 (quote it), the files and lines it concerns (`path:line`), and the result
@@ -70,6 +97,8 @@ the change itself.
 ```
 
 - The first line is exactly `ROUTE: TICKETS`, `ROUTE: REPLAN` or `ROUTE: NONE`.
+- `## Restack` only when the routes need it, one line per ticket, written
+  exactly `- <key> onto <key>`; leave the section out otherwise.
 - One `## Ticket <key>` section per ticket you route to, with the key from
   `tickets.md`. Leave them out with `ROUTE: REPLAN` and `ROUTE: NONE`.
 

@@ -69,11 +69,19 @@ scratch scripts under `$TMPDIR` are fine.
    deletes it and the tests that only cover it. Something the framework or
    the outside world reaches is used: a route, command, task or handler
    registered by decorator or config, a name looked up as a string, a field
-   of a public API model, a package export, a migration. So is an interface
-   that `ticket.md` says a later ticket in the stack builds on.
+   of a public API model, a package export, a migration. A function that
+   only a later ticket calls is not used: it belongs in that ticket, even when
+   `ticket.md` or the plan put it here. The fix removes it from this branch
+   and names the ticket that calls it first.
 8. **The owner's code rules** (below). Added or changed lines that duplicate
    logic, add comments, comment on the change itself, mention Linear, or add
-   redundant docstrings are `major`: the owner won't merge them.
+   redundant docstrings are `major`: the owner won't merge them. So are, each
+   with the concrete fix: a function name that doesn't say with a verb what it
+   does (give the new name, e.g. `get_oldest_workspace` for
+   `primary_workspace`), a function that takes a callable (name the
+   intent-named functions that replace it), and a refactor of existing code
+   (rename, move, extraction) in a ticket whose job is a behaviour change,
+   unless the ticket is a refactor-only ticket.
 
 ## Verify before you report
 
