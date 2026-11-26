@@ -45,6 +45,15 @@ where the two disagree.
 - When a name says what a docstring or comment said, delete that docstring
   or comment.
 
+### Helpers live in utils
+
+- A helper function, one that builds or derives a value for a flow such as
+  `build_a_class` or `get_end_date_for_an_object`, goes in a utils file or
+  folder (`utils.py`, `utils/`), not in the module whose flow calls it.
+  Add it to the existing utils of that package, or create one if it has none.
+- This binds helpers you add. Moving an existing helper into utils is a
+  refactor, so leave the ones your ticket doesn't touch where they are.
+
 ### No functions passed as arguments
 
 - Don't write a function that takes a callable (a callback, `sender=`, an
