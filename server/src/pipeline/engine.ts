@@ -3586,12 +3586,13 @@ async function getLandedMergeCommit(cwd: string, landed: Ticket): Promise<string
 
 async function findLandedTicketsMissingFrom(ticket: Ticket, all: Ticket[]): Promise<Ticket[]> {
   const wt = ticket.worktreePath!;
-  const missing: Ticket[] = [];
-  for (const landed of all.filter((t) => t.id !== ticket.id && t.status === 'merged' && t.prNumber)) {
-    const sha = await getLandedMergeCommit(wt, landed);
-    if (sha && (await gitx.revParse(wt, sha)) && !(await gitx.isAncestor(wt, sha, 'HEAD'))) missing.push(landed);
+  const landed: { ticket: Ticket; sha: string }[] = [];
+  for (const t of all.filter((t) => t.id !== ticket.id && t.status === 'merged' && t.prNumber)) {
+    const sha = await getLandedMergeCommit(wt, t);
+    if (sha) landed.push({ ticket: t, sha });
   }
-  return missing;
+  const missing = await gitx.findCommitsMissingFromHead(wt, landed.map((l) => l.sha));
+  return landed.filter((l) => missing.includes(l.sha)).map((l) => l.ticket);
 }
 
 // When a ticket of the initiative merges, every open ticket that now builds on the base branch merges the

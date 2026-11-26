@@ -412,6 +412,13 @@ export function worktreeChanges(before: WorktreeState, after: WorktreeState): st
   return changes;
 }
 
+// The commits (by sha) a branch does not have yet; a sha this clone doesn't know is left out, not reported.
+export async function findCommitsMissingFromHead(cwd: string, shas: string[]): Promise<string[]> {
+  const missing: string[] = [];
+  for (const sha of shas) if ((await revParse(cwd, sha)) && !(await isAncestor(cwd, sha, 'HEAD'))) missing.push(sha);
+  return missing;
+}
+
 export async function revParse(cwd: string, ref: string): Promise<string | null> {
   const r = await git(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
   return r.code === 0 ? r.stdout.trim() : null;
