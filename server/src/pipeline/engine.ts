@@ -2562,10 +2562,10 @@ async function askArbiterInsteadOfOwner(init: Initiative, ticket: Ticket | null)
   if (!waitsForOwner(init, ticket)) return;
   const s = repo.initiativeSettings(init);
   if (!s.autoArbiter) return;
-  const decided = await repo.arbiterDecisionsSinceOwner(init.id, ticket?.id ?? null);
+  const decided = await repo.arbiterDecisionsInARow(init.id, ticket?.id ?? null);
   if (decided >= s.maxArbiterDecisions) {
     const subject = ticket ? `${ticketLabel(ticket)}: the arbiter` : 'The arbiter';
-    await systemMessage({ initiativeId: init.id, ticketId: ticket?.id }, `${subject} decided ${decided} times since you last stepped in, so this waits for you.`);
+    await systemMessage({ initiativeId: init.id, ticketId: ticket?.id }, `${subject} decided ${decided} times in a row on this without it moving forward, so this waits for you.`);
     return;
   }
   await enqueue({ kind: 'arbitrate', initiativeId: init.id, ticketId: ticket?.id ?? null, trigger: 'auto' });

@@ -295,13 +295,21 @@ export async function listRunsById(id: string): Promise<Run[]> {
   return sql<Run[]>`${runsWithTitles()} where r.id = ${id}`;
 }
 
-export async function arbiterDecisionsSinceOwner(initiativeId: string, ticketId: string | null): Promise<number> {
+const isVerdict = (verdicts: string[]) => sql`upper(regexp_replace(verdict, '[[:space:]]+', '', 'g')) in ${sql(verdicts)}`;
+
+// The arbiter's decisions in a row on the same problem. The owner speaking (on the ticket or to the whole
+// initiative) starts a new row, and so does a ticket a reviewer or verifier approved since: what stops it
+// next is a new problem, not the loop the limit guards against.
+export async function arbiterDecisionsInARow(initiativeId: string, ticketId: string | null): Promise<number> {
   const [{ n }] = await sql<{ n: number }[]>`
     select count(*)::int as n from runs
     where ${ticketScope(initiativeId, ticketId)} and kind = 'arbitrate' and status = 'succeeded'
-      and upper(regexp_replace(verdict, '[[:space:]]+', '', 'g')) in ('DECISION:APPROVE', 'DECISION:RETRY')
-      and queued_at > coalesce(
-        (select max(created_at) from messages where ${ticketScope(initiativeId, ticketId)} and author = 'human'),
+      and ${isVerdict(['DECISION:APPROVE', 'DECISION:RETRY'])}
+      and queued_at > greatest(
+        (select max(created_at) from messages
+          where initiative_id = ${initiativeId} and author = 'human' and ${ticketId ? sql`(ticket_id is null or ticket_id = ${ticketId})` : sql`ticket_id is null`}),
+        (select max(finished_at) from runs
+          where ${ticketScope(initiativeId, ticketId)} and kind in ('review', 'verify') and status = 'succeeded' and ${isVerdict(['VERDICT:APPROVE'])}),
         'epoch'::timestamptz)`;
   return n;
 }
