@@ -64,7 +64,8 @@ where the two disagree.
   ticket that needs it.
 - Don't rename or restructure code the ticket doesn't need to touch.
 - Reuse the helpers and patterns lower PRs or the codebase already have
-  (validators, regex patterns, builders) instead of writing a second version.
+  (validators, regex patterns, builders, field types, error mappings) instead
+  of writing a second version.
 
 ## Learned rules
 
