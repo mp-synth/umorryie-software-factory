@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CLAUDE_CODE_ATTRIBUTION, pullRequestText } from './pull-request.ts';
+import { CLAUDE_CODE_ATTRIBUTION, isSamePullRequestText, pullRequestText, revisedPullRequestText } from './pull-request.ts';
 
 const withAttribution = (description: string) => `${description}\n\n${CLAUDE_CODE_ATTRIBUTION}`;
 
@@ -70,4 +70,34 @@ test('falls back to the ticket title for numbered, overlong or missing titles', 
   assert.equal(pullRequestText(buildMd(`${'x'.repeat(80)}\n\n${written}`), ticket).title, ticket.title);
   assert.equal(pullRequestText('STATUS: READY\n\n## Summary\n- done', ticket).title, ticket.title);
   assert.equal(pullRequestText(null, ticket).body, fallbackBody);
+});
+
+test("a fixer's rewritten PR text replaces the description only when it is complete and valid", () => {
+  const fix = [
+    'FIX: APPLIED',
+    '',
+    '## Summary',
+    '- Sent emails after commit',
+    '',
+    '## Pull request',
+    'Send workspace invitations after the provisioning commits',
+    '',
+    '### Why',
+    'Invitations went out before the provisioning was saved, so a rollback left people invited to nothing.',
+    '',
+    '### What',
+    '- Invitation emails go out once the provisioning is committed.',
+  ].join('\n');
+  assert.deepEqual(revisedPullRequestText(fix), {
+    title: 'Send workspace invitations after the provisioning commits',
+    body: withAttribution('## Why\n\nInvitations went out before the provisioning was saved, so a rollback left people invited to nothing.\n\n## What\n\n- Invitation emails go out once the provisioning is committed.'),
+  });
+  assert.equal(revisedPullRequestText('FIX: APPLIED\n\n## Summary\n- Fixed lint'), null, 'no section: the description stays');
+  assert.equal(revisedPullRequestText(fix.replace('### What\n- Invitation emails go out once the provisioning is committed.', '### What\n- Changed service/billing/provisionings.py')), null, 'a file path: the description stays');
+  assert.equal(revisedPullRequestText(fix.replace('Send workspace invitations after the provisioning commits', 'Fix')), null, 'a bad title: the description stays');
+});
+
+test('PR text that differs only in surrounding whitespace is the same', () => {
+  assert.ok(isSamePullRequestText({ title: 'A title here', body: 'Body\n' }, { title: 'A title here ', body: 'Body' }));
+  assert.ok(!isSamePullRequestText({ title: 'A title here', body: 'Body' }, { title: 'A title here', body: 'Other body' }));
 });

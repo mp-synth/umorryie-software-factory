@@ -70,12 +70,30 @@ function renderDescription({ why, what }: Description): string {
   return `## Why\n\n${why}\n\n## What\n\n${what.map((b) => `- ${b}`).join('\n')}`;
 }
 
-export function pullRequestText(buildMd: string | null | undefined, ticket: Pick<Ticket, 'title' | 'what' | 'goal'>): PullRequestText {
-  const [firstLine = '', ...rest] = (buildMd ? section(buildMd, 'Pull request') ?? '' : '').split('\n');
+function parsePullRequest(md: string | null | undefined): { title: string | null; description: Description | null } {
+  const [firstLine = '', ...rest] = (md ? section(md, 'Pull request') ?? '' : '').split('\n');
   const title = stripTitleDecoration(firstLine);
-  const description = parseDescription(rest.filter((line) => !ATTRIBUTION_LINE.test(line)).join('\n'));
   return {
-    title: isOutcomeTitle(title) ? title : ticket.title,
-    body: `${renderDescription(description ?? { why: ticket.goal, what: [ticket.what] })}\n\n${CLAUDE_CODE_ATTRIBUTION}`,
+    title: isOutcomeTitle(title) ? title : null,
+    description: parseDescription(rest.filter((line) => !ATTRIBUTION_LINE.test(line)).join('\n')),
   };
+}
+
+function renderBody(description: Description): string {
+  return `${renderDescription(description)}\n\n${CLAUDE_CODE_ATTRIBUTION}`;
+}
+
+export function pullRequestText(buildMd: string | null | undefined, ticket: Pick<Ticket, 'title' | 'what' | 'goal'>): PullRequestText {
+  const { title, description } = parsePullRequest(buildMd);
+  return { title: title ?? ticket.title, body: renderBody(description ?? { why: ticket.goal, what: [ticket.what] }) };
+}
+
+/** The PR text a fixer rewrote for the PR as it stands after its commits, or null when it wrote none that is valid. */
+export function revisedPullRequestText(fixMd: string | null | undefined): PullRequestText | null {
+  const { title, description } = parsePullRequest(fixMd);
+  return title && description ? { title, body: renderBody(description) } : null;
+}
+
+export function isSamePullRequestText(a: PullRequestText, b: PullRequestText): boolean {
+  return a.title.trim() === b.title.trim() && a.body.trim() === b.body.trim();
 }

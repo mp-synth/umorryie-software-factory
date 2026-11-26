@@ -120,6 +120,11 @@ export async function editPr(cwd: string, prNumber: number, edit: { title: strin
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `gh pr edit exited ${r.code}`);
 }
 
+export async function prText(cwd: string, prNumber: number): Promise<{ title: string; body: string } | null> {
+  const r = await gh(cwd, ['pr', 'view', String(prNumber), '--json', 'title,body']);
+  return r.code === 0 ? (JSON.parse(r.stdout) as { title: string; body: string }) : null;
+}
+
 export interface MergeStatus {
   state: string;
   isDraft: boolean;

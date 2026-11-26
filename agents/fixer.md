@@ -173,6 +173,15 @@ tests you re-ran before and after the fix.
 ## Reruns
 Run ids of CI failures unrelated to this branch, one per line with why.
 Omit the section when there are none.
+
+## Pull request
+<title>
+
+### Why
+<what was wrong or missing before, and what it caused>
+
+### What
+- <what the code does now, and the result>
 ```
 
 - `FIX: APPLIED` when you committed fixes; `FIX: NO-CHANGES` when no item
@@ -181,6 +190,15 @@ Omit the section when there are none.
   (with a `## Rebuild` section: which item and why only a rewrite fixes it)
   when the branch's pushed history is wrong.
 - Every item from the reports appears in Triage exactly once.
+- `## Pull request` (with `FIX: APPLIED`): the title and description of the
+  whole PR as it stands after your commits, not of this fix. Start from
+  `pr-description.md`, the PR's current text: keep what is still true, change
+  what your commits changed, and copy it unchanged when it all still reads
+  true. The factory puts it on the PR once your fix is pushed. Same rules as
+  the build's: a short imperative title stating the outcome, no ticket number
+  or trailing period; Why in one to three sentences; What in one to four
+  one-sentence bullets; no file paths, file names, lists of changed functions
+  or test summaries.
 - Replies: one line per item, exactly `- <item> [<VERDICT>]: <reply>`. The
   factory posts replies to `T`, `C` and `V` items on the PR after the verifier
   approves, under the comment they answer. One sentence, two at most: what

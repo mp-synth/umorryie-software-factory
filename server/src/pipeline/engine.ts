@@ -68,7 +68,7 @@ import {
 } from './arbiter.ts';
 import { ticketLabel } from './labels.ts';
 import { adoptablePrs, adoptedKey, adoptedTicket, remoteBranchOf, reopenedTicket } from './adopted-prs.ts';
-import { pullRequestText } from './pull-request.ts';
+import { isSamePullRequestText, pullRequestText, revisedPullRequestText } from './pull-request.ts';
 import { earlierBranches, rebuildBlocker, startedAbove } from './rebuild.ts';
 import { planTicketSeqs, renameCanceledKeys, replanAwaitsAnswers, revisePlannedTickets, wasApproved } from './replan.ts';
 import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, renderStacking, section, slugify, validatePlan } from './plan.ts';
@@ -1956,6 +1956,21 @@ async function describeRebuiltPr(run: Run, init: Initiative, ticket: Ticket, tex
   }
 }
 
+// The fixer rewrites the PR text for the PR as it stands after its commits, so the description never lags
+// behind what was pushed. The newest fix that wrote one wins; a fix that wrote none (CI, lint) leaves it.
+async function describeFixedPr(run: Run, ticket: Ticket, fixes: Run[]): Promise<void> {
+  const revised = fixes.map((f) => revisedPullRequestText(f.outputMd)).find((t) => t !== null);
+  if (!revised || !ticket.prNumber) return;
+  try {
+    const current = await gh.prText(ticket.worktreePath!, ticket.prNumber);
+    if (current && isSamePullRequestText(current, revised)) return;
+    await gh.editPr(ticket.worktreePath!, ticket.prNumber, revised);
+    await log(run, `Updated the title and description of ${ticket.prUrl} to match the pushed fix.`);
+  } catch (err) {
+    await systemMessage(run, `${ticketLabel(ticket)}: the fix is pushed, but the PR description could not be updated: ${(err as Error).message}`);
+  }
+}
+
 async function closeSupersededPrs(run: Run, init: Initiative, ticket: Ticket, replacement: gh.PrRef): Promise<void> {
   for (const branch of earlierBranches(branchName(init, ticket), ticket.branch!)) {
     const old = await gh.findPr(ticket.worktreePath!, branch);
@@ -2203,10 +2218,12 @@ async function runFix(run: Run): Promise<void> {
     return;
   }
   const build = latestWithOutput(await lastRuns(ticket.id), 'execute');
+  const description = !collected.mechanicalOnly && ticket.prNumber ? await gh.prText(ticket.worktreePath!, ticket.prNumber) : null;
   const inputs = [
     ...collected.reports,
     writeTicket(init, ticket, all),
     ...(build?.outputPath && fs.existsSync(build.outputPath) ? [build.outputPath] : []),
+    ...(description ? [write(path.join(dir, 'pr-description.md'), `${description.title}\n\n${description.body}`)] : []),
     ...historyFiles(init, ticket, run.round),
   ];
   const model = collected.mechanicalOnly ? s.models.mechanicalFix : s.models.fix;
@@ -2459,6 +2476,7 @@ async function afterVerify(run: Run, step: StepResult, state: StepStates['verify
     const commits = (await gitx.git(wt, ['log', '--reverse', '--first-parent', '--format=- `%h` %s', `${start}..HEAD`])).stdout.trim();
     const fresh = await mustTicket(ticket.id);
     const pushed = commits && s.createPrs ? await publish(run, init, project, fresh) : false;
+    if (pushed) await describeFixedPr(run, await mustTicket(ticket.id), fixes);
     await postVerifiedReplies(run, await mustTicket(ticket.id), init, fixes, pushed ? commits : '', !commits || !!pushed);
     await agentMessage(run, `**Verifier approved fix round ${fixes[0].round} on ${ticketLabel(ticket)}.**${pushed ? ' Pushed.' : ''}\n\n${summaryOf(step.output!)}`);
     const fixedFactoryReview = fixDirs.some((d) => fs.existsSync(path.join(d, 'review.md')));
