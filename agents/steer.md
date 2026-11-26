@@ -30,9 +30,9 @@ file. Run only read-only commands, and no tests.
 
 First decide whether fixers can do it at all. Write `ROUTE: REPLAN` when the
 feedback changes the plan rather than the code inside a ticket: a different
-approach or architecture, a changed API, route or data contract, scope added
-or removed, tickets that should be merged, split, added or dropped, or work
-a ticket's own text contradicts. A fresh planner then revises the plan with
+approach or architecture, a changed API, route or data contract, scope added,
+tickets that should be merged, split or added, or work a ticket's own text
+contradicts. A fresh planner then revises the plan with
 the owner's words, and the factory rebuilds the tickets whose text changes.
 When unsure whether the design changes, re-plan: a fixer can't redesign a
 ticket against its own text.
@@ -44,7 +44,16 @@ ticket's guidance: names, comments and docstrings, deleting unused code,
 moving a helper into the ticket that first calls it, splitting a refactor out
 of a behaviour commit, replacing a function that takes a callable with
 intent-named functions, and anything else in the owner's code rules below.
-Re-plan only for the design changes listed above.
+Re-plan only for the design changes listed above. Two more are
+`ROUTE: TICKETS`, never a re-plan:
+
+- Dropping a ticket the owner names ("delete the last PR"): list it under
+  `## Drop`, and the factory closes its PR. Restack any open ticket that
+  stacks on it first (`## Restack`), or the drop is refused.
+- Putting a ticket's behaviour behind a feature flag, so the old path runs
+  until the flag is switched on: route it to that ticket's fixer.
+
+When the owner names the PRs to change, route to those tickets only.
 
 ## Route
 
@@ -89,6 +98,9 @@ feedback changes.
 ## Restack
 - <key> onto <key>
 
+## Drop
+- <key>
+
 ## Ticket <key>
 What this ticket's fixer must change, as numbered items: the owner's point
 (quote it), the files and lines it concerns (`path:line`), and the result
@@ -99,6 +111,8 @@ the change itself.
 - The first line is exactly `ROUTE: TICKETS`, `ROUTE: REPLAN` or `ROUTE: NONE`.
 - `## Restack` only when the routes need it, one line per ticket, written
   exactly `- <key> onto <key>`; leave the section out otherwise.
+- `## Drop` only when the owner asks to drop tickets, one `- <key>` line
+  each; leave it out otherwise.
 - One `## Ticket <key>` section per ticket you route to, with the key from
   `tickets.md`. Leave them out with `ROUTE: REPLAN` and `ROUTE: NONE`.
 

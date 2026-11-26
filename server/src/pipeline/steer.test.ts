@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Ticket } from '@factory/shared';
-import { parseRestacks, parseRoutes, renderTicketsForSteering, resolveTicketRef, routeBlocker, routeReason, routesByTicket } from './steer.ts';
+import { parseDrops, parseRestacks, parseRoutes, renderTicketsForSteering, resolveTicketRef, routeBlocker, routeReason, routesByTicket } from './steer.ts';
 
 const ticket = (seq: number, key: string, status: Ticket['status'] = 'approved', extra: Partial<Ticket> = {}) =>
   ({ id: `id-${key}`, seq, key, title: `Ticket ${key}`, status, branch: `factory/x/${key}`, worktreePath: `/wt/${key}`, prUrl: `https://github.com/o/r/pull/${seq}`, prState: 'OPEN', dependsOn: [], what: 'Does a thing.', baseRef: 'main', ...extra }) as Ticket;
@@ -74,6 +74,19 @@ test('the ticket list shows the stack, the diff and what can take changes', () =
   assert.match(md, /git -C \/wt\/retry diff factory\/x\/api-client\.\.\.HEAD/);
   assert.match(md, /Builds on: `main`/);
   assert.match(md, /git -C \/wt\/api-client diff origin\/main\.\.\.HEAD/);
+});
+
+test('reads drops of open tickets and refuses ones another open ticket still builds on', () => {
+  const t = (seq: number, key: string, dependsOn: string[], status: Ticket['status'] = 'approved') => ({ id: key, key, seq, title: key, status, dependsOn, needs: dependsOn });
+  const tickets = [t(1, 'core', []), t(4, 'flagged', ['core']), t(5, 'runbook', ['flagged']), t(3, 'gone', [], 'merged')];
+  const md = ['ROUTE: TICKETS', '', '## Drop', '- [05] runbook', '- core', '- gone', '- nope', '', '## Ticket flagged', 'Put it behind a flag.'].join('\n');
+  const { drops, rejected } = parseDrops(md, tickets);
+  assert.deepEqual(drops.map((d) => d.key), ['runbook']);
+  assert.equal(rejected.length, 3);
+  assert.match(rejected.join('\n'), /"gone".*merged/);
+  assert.match(rejected.join('\n'), /no such ticket/);
+  assert.match(rejected.join('\n'), /"core": \[04\] flagged still builds on it/);
+  assert.deepEqual(parseDrops('ROUTE: TICKETS\n\n## Drop\n- runbook\n- flagged', tickets).drops.map((d) => d.key), ['runbook', 'flagged']);
 });
 
 test('reads restacks of open tickets onto other open tickets and refuses the impossible ones', () => {

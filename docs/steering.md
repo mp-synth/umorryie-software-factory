@@ -22,12 +22,19 @@ moves into a ticket that tickets beside it also call, the router restacks
 those tickets onto it (`## Restack` in route.md): each keeps its PR, which is
 retargeted, and the stack sync merges the new base into it.
 
+Dropping a ticket you name ("the last PR can go") and putting a ticket's new
+behaviour behind a feature flag are fixes too, not re-plans: the router lists
+the dropped ticket under `## Drop`, the factory closes its PR and cancels it,
+and the flag goes to that ticket's fixer. A ticket another open ticket still
+builds on is only dropped once that one is restacked. When your feedback names
+the PRs to change, only those change.
+
 A stacked ticket's fixer waits while a ticket below it still has feedback to
 fix or is being fixed, and starts once that fix is pushed and merged into its
 branch, so it sees, for example, a function the ticket below just removed.
 
 When your words change the plan rather than code inside a ticket (another
-approach or architecture, a changed API or contract, scope added or dropped),
+approach or architecture, a changed API or contract, scope added),
 the router re-plans instead. A fresh planner revises the plan with your words
 and `tickets.md`, the built tickets with their PRs and diffs. Steps already
 running finish, but no new ticket starts. The revised plan goes through plan

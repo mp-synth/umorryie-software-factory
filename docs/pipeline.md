@@ -141,8 +141,8 @@ the code, then writes one of three decisions:
 
 The arbiter decides at most **Arbiter decisions in a row** times (3) per plan or
 ticket on the same problem; after that it waits for you. A new row starts with
-your next message there or to the whole initiative, and when a reviewer or
-verifier approves the ticket, so a ticket that moved on and stops again on new
+your next message there or to the whole initiative, when a reviewer or
+verifier approves the ticket, and when the plan reviewer passes the plan, so a ticket that moved on and stops again on new
 feedback still goes to the arbiter.
 Anything you do on that plan or ticket stops a running arbiter, and a decision
 that lands after you acted is not applied. While it decides, the ticket shows

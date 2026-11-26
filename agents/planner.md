@@ -40,7 +40,12 @@ never run git commands that change anything, never push, never open PRs.
      changes, and leave a ticket with an open PR out only when the feedback
      says to drop that work. Feedback about the code inside tickets (names,
      helpers moving to the ticket that calls them, deleting unused code,
-     style) changes no ticket text: fixers apply it on the existing PRs. New work gets new keys. Merged tickets are done: keep
+     style) changes no ticket text: fixers apply it on the existing PRs.
+     Change only the tickets the feedback is about, and add a ticket only
+     when the owner asks for new work or a new PR. A refactor the revised
+     ticket needs stays in that ticket as its own commit before the
+     behaviour change: on a replan, the owner's "refactors apart" rule is
+     met by the commit split, never by a new PR. New work gets new keys. Merged tickets are done: keep
      them as they are and build on them.
 3. The repo, read-only, from the base checkout in your prompt (the main
    checkout can be behind origin; tickets are built from the base checkout's

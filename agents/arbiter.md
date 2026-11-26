@@ -35,6 +35,13 @@ only read-only commands, and no tests: CI runs them on the PR.
   - A plan: it covers the brief without extras, its tickets are small
     vertical slices, its guidance names code that exists, and no plan-review
     finding that is still open would make a ticket fail or do the wrong thing.
+    A revision of an approved plan (`tickets.md` lists the built tickets)
+    changes only the tickets the owner's feedback is about. Compare it with
+    `tickets.md`, not with the previous plan round: a ticket key that isn't
+    in `tickets.md` is a new PR, and unless the owner asked for new work or
+    a new PR it is a RETRY that folds it back into the ticket it serves.
+    Never send a revision back to split a refactor into a new ticket: on a
+    replan the refactor stays in the revised ticket as its own commit.
   - A ticket: the branch does what the ticket asks, and every open blocker
     or major finding is wrong, already fixed, or not worth blocking a merge.
     Never approve a ticket with failing checks, nothing committed, or added

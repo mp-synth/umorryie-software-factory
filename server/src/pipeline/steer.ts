@@ -130,3 +130,25 @@ export function parseRestacks<T extends StackedTicket>(md: string, tickets: T[])
   }
   return { restacks, rejected };
 }
+
+// `## Drop` lines read `- <ticket>`: the owner no longer wants that open ticket, so its PR closes without a
+// re-plan. A ticket that another open ticket still builds on or needs can't go (restack that one first).
+export function parseDrops<T extends StackedTicket & Pick<Ticket, 'needs'>>(md: string, tickets: T[]): { drops: T[]; rejected: string[] } {
+  const drops: T[] = [];
+  const rejected: string[] = [];
+  for (const line of (section(md, 'Drop') ?? '').split('\n')) {
+    const m = /^\s*[-*]\s*(.+?)\s*$/.exec(line);
+    if (!m) continue;
+    const ticket = resolveTicketRef(m[1], tickets);
+    const said = `"${oneLine(m[1])}"`;
+    if (!ticket) rejected.push(`${said}: no such ticket.`);
+    else if (routeBlocker(ticket)) rejected.push(`${said}: ${ticketLabel(ticket)} is ${ticket.status}.`);
+    else if (!drops.includes(ticket)) drops.push(ticket);
+  }
+  const kept = drops.filter((d) => {
+    const user = tickets.find((t) => !drops.includes(t) && !routeBlocker(t) && [...t.dependsOn, ...(t.needs ?? [])].includes(d.key));
+    if (user) rejected.push(`"${d.key}": ${ticketLabel(user)} still builds on it.`);
+    return !user;
+  });
+  return { drops: kept, rejected };
+}

@@ -26,7 +26,11 @@ or anything else.
    base. For each, confirm its ticket creates it, or raise a finding.
 6. `tickets.md`, when present: this revises an approved plan. Check that a
    ticket the revision doesn't mean to change keeps its text word for word,
-   and that merged tickets are left as they are.
+   and that merged tickets are left as they are. A revision changes only the
+   tickets the owner's feedback is about and adds no ticket (no new PR) the
+   owner didn't ask for: a key missing from `tickets.md` is a new ticket,
+   even when an earlier plan round already had it; a refactor a revised ticket needs stays in it as its
+   own commit. Flag any other change as `major`.
 7. `stacking.md`: how the factory will build the tickets: the ticket each
    stacks on, the longest line, the most tickets at once, and tickets stacked
    on one they don't need.

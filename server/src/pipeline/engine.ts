@@ -79,7 +79,7 @@ import { describeIgnored, describePrWork, hasPrWork, prWorkFingerprint, prWorkFr
 import { writeRepoGuidance } from './repo-guidance.ts';
 import { BASE_COMMIT_FIELD, MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, ruleFile, type AgentKind } from './role-prompt.ts';
 import { hasHumanPrItems, isSteering, oneLine, parseProposedRules, renderTimeline, retroSummary, withLearnedRule, withoutLearnedRule } from './retro.ts';
-import { parseRestacks, parseRoutes, renderTicketsForSteering, routeBlocker, routeReason, routesByTicket } from './steer.ts';
+import { parseDrops, parseRestacks, parseRoutes, renderTicketsForSteering, routeBlocker, routeReason, routesByTicket } from './steer.ts';
 import { HELD_REASON, INTERRUPTED_REASON, ORPHAN_INITIATIVE_STATUSES, ORPHAN_REASON, orphanRunKind, restingInitiativeStatus, restingTicketStatus, shouldResumeInterrupted, startupFate, type StartupFate } from './recovery.ts';
 import { activeLanes, pickRunsToStart, type SchedulableRun } from './scheduler.ts';
 import { GUARANTEED_AGENTS_PER_INITIATIVE, agentCeiling, agentLimit, localWorkSlots, mostAgentsWithGuarantees, pressureOf, sampleMachine, thisMachine } from './capacity.ts';
@@ -1184,27 +1184,7 @@ async function applyRevisedPlan(init: Initiative): Promise<string[]> {
       blockedReason: null,
     });
   };
-  const closeOldPr = async (t: Ticket, why: string): Promise<string> => {
-    if (!t.prNumber) return '';
-    const live = await gh.prSnapshot(project.repoPath, t.prNumber).catch(() => null);
-    if (!live) return `, but ${t.prUrl} could not be read, so it was left as is`;
-    if (live.state !== 'OPEN') return '';
-    try {
-      await gh.closePr(project.repoPath, t.prNumber, why);
-      await repo.updateTicket(t.id, { prState: 'CLOSED' });
-      return `, ${t.prUrl} closed`;
-    } catch (err) {
-      return `, but ${t.prUrl} could not be closed (${(err as Error).message})`;
-    }
-  };
-
-  for (const t of drop) {
-    await cancelActive({ initiativeId: init.id, ticketId: t.id });
-    await removeTicketWorktree(project, init, t);
-    const closed = await closeOldPr(t, 'Closed: the revised plan no longer needs this change.');
-    await repo.updateTicket(t.id, { status: 'canceled', worktreePath: null });
-    notes.push(`${ticketLabel(t)}: dropped${closed}.`);
-  }
+  for (const t of drop) notes.push(await dropTicket(init, project, t, 'Closed: the revised plan no longer needs this change.'));
   for (const t of [...rebuild].sort((a, b) => b.seq - a.seq)) {
     const updated = await reviseText(t);
     await resetTicket(t.id);
@@ -1222,6 +1202,28 @@ async function applyRevisedPlan(init: Initiative): Promise<string[]> {
   }
   for (const t of restart) notes.push(`${ticketLabel(await reviseText(t))}: starts from the revised text.`);
   return notes;
+}
+
+async function closeTicketPr(project: Project, t: Ticket, why: string): Promise<string> {
+  if (!t.prNumber) return '';
+  const live = await gh.prSnapshot(project.repoPath, t.prNumber).catch(() => null);
+  if (!live) return `, but ${t.prUrl} could not be read, so it was left as is`;
+  if (live.state !== 'OPEN') return '';
+  try {
+    await gh.closePr(project.repoPath, t.prNumber, why);
+    await repo.updateTicket(t.id, { prState: 'CLOSED' });
+    return `, ${t.prUrl} closed`;
+  } catch (err) {
+    return `, but ${t.prUrl} could not be closed (${(err as Error).message})`;
+  }
+}
+
+async function dropTicket(init: Initiative, project: Project, t: Ticket, why: string): Promise<string> {
+  await cancelActive({ initiativeId: init.id, ticketId: t.id });
+  await removeTicketWorktree(project, init, t);
+  const closed = await closeTicketPr(project, t, why);
+  await repo.updateTicket(t.id, { status: 'canceled', worktreePath: null });
+  return `${ticketLabel(t)}: dropped${closed}.`;
 }
 
 export async function approvePlan(initiativeId: string, note?: string): Promise<void> {
@@ -2618,6 +2620,7 @@ async function planArbitration(run: Run, init: Initiative, project: Project, dir
       ...(init.planMd ? [write(path.join(dir, 'plan.md'), init.planMd)] : []),
       ...(approvable ? [write(path.join(dir, 'plan.json'), JSON.stringify(init.planJson, null, 2))] : []),
       ...(currentReview ? [write(path.join(dir, 'plan-review.md'), currentReview.outputMd!)] : []),
+      ...(await writeApprovedTickets(init, dir)),
       ...existing([path.join(planRoundDir(init, init.planRound), 'plan-paths.md'), path.join(planRoundDir(init, init.planRound + 1), 'plan-errors.md')]),
     ],
     approveBlocker: planApprovalBlocker(init),
@@ -2847,8 +2850,16 @@ async function afterSteer(run: Run, step: StepResult, state: StepStates['steer']
     await repo.updateTicket(ticket.id, { dependsOn: [onto.key], needs: [...new Set([...(ticket.needs ?? []), onto.key])] });
     outcome.push(`- ${ticketLabel(ticket)}: now stacks on ${ticketLabel(onto)}. Its PR stays; the stack sync retargets it and merges ${ticketLabel(onto)} into it.`);
   }
+  const afterRestacks = restacks.length ? await repo.listTickets(init.id) : tickets;
+  const { drops, rejected: undroppable } = verdict === 'TICKETS' ? parseDrops(step.output!, afterRestacks) : { drops: [], rejected: [] };
+  outcome.push(...undroppable.map((r) => `- Drop ${r} Not dropped.`));
+  if (drops.length) {
+    const project = await mustProject(init.projectId);
+    for (const t of drops) outcome.push(`- ${await dropTicket(init, project, t, 'Closed: the owner no longer needs this change.')}`);
+  }
   const sent: Ticket[] = [];
   for (const { ticket, instructions } of routed) {
+    if (drops.some((d) => d.id === ticket.id)) continue;
     const blocker = routeBlocker(ticket);
     if (blocker) {
       outcome.push(`- ${ticketLabel(ticket)}: not sent, ${blocker}.`);
