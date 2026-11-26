@@ -178,8 +178,10 @@ PR's exact failing CI or conflict and the PR is unchanged, the ticket stops
 with the failing checks as its reason and goes to the arbiter, which sends a
 new fixer the check's error and cause (or a rerun of a flaky job). Review
 threads and comments a fixer already answered keep waiting for people. A
-GitHub Actions check still in progress after an hour is a hung runner: the
-sweep cancels its run and starts it again, once per run. Turn it off
+GitHub Actions job still shown in progress after an hour is hung: the sweep
+starts it again, once per run, cancelling the run first when it is still
+going (a finished run that still lists the job as running only needs the job
+again). Turn it off
 or run it now in **Settings**. **More → Fix PRs now** on an initiative runs the
 same sweep for that initiative right away; it also retries a PR state the loop
 already handled and includes tickets that need you.

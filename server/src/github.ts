@@ -275,8 +275,8 @@ export interface PrSnapshot {
   supersededChecks: PrCheck[];
   pendingChecks: string[];
   finishedChecks: number;
-  /** GitHub Actions runs of checks that have run far longer than any CI job should: a hung runner. */
-  hungRunIds: string[];
+  /** GitHub Actions jobs that have shown "in progress" far longer than any CI job runs. */
+  hungJobs: HungJob[];
   comments: { author: string; body: string; createdAt: string; url: string }[];
   reviews: { author: string; state: string; body: string; submittedAt: string }[];
 }
@@ -289,14 +289,24 @@ export function ciStateOf(snap: Pick<PrSnapshot, 'failingChecks' | 'pendingCheck
   return snap.finishedChecks ? 'green' : 'none';
 }
 
-export type PrCi = Pick<PrSnapshot, 'state' | 'headRefOid' | 'failingChecks' | 'supersededChecks' | 'pendingChecks' | 'finishedChecks' | 'hungRunIds'>;
+export type PrCi = Pick<PrSnapshot, 'state' | 'headRefOid' | 'failingChecks' | 'supersededChecks' | 'pendingChecks' | 'finishedChecks' | 'hungJobs'>;
 
 export const HUNG_CHECK_MS = 60 * 60_000;
 const RUNNING_STATES = ['IN_PROGRESS', 'QUEUED', 'PENDING', 'WAITING'];
 
-export function hungRunIdsOf(checks: CheckRun[], now: number): string[] {
-  const hung = checks.filter((c) => (c.status ?? '').toUpperCase() === 'IN_PROGRESS' && now - (Date.parse(c.startedAt ?? '') || now) > HUNG_CHECK_MS);
-  return [...new Set(hung.map((c) => actionsRunId(c.detailsUrl ?? null)).filter((id): id is string => !!id))];
+export interface HungJob {
+  runId: string;
+  jobId: string;
+}
+
+export function hungJobsOf(checks: CheckRun[], now: number): HungJob[] {
+  const jobs = new Map<string, HungJob>();
+  for (const c of checks) {
+    if ((c.status ?? '').toUpperCase() !== 'IN_PROGRESS' || now - (Date.parse(c.startedAt ?? '') || now) <= HUNG_CHECK_MS) continue;
+    const ids = c.detailsUrl?.match(/\/actions\/runs\/(\d+)\/job\/(\d+)/);
+    if (ids) jobs.set(ids[2], { runId: ids[1], jobId: ids[2] });
+  }
+  return [...jobs.values()];
 }
 
 function ciOf(d: { state: string; headRefOid: string; statusCheckRollup?: CheckRun[] | null }): PrCi {
@@ -312,7 +322,7 @@ function ciOf(d: { state: string; headRefOid: string; statusCheckRollup?: CheckR
     supersededChecks: superseded,
     pendingChecks,
     finishedChecks: checks.length - pendingChecks.length,
-    hungRunIds: hungRunIdsOf(checks, Date.now()),
+    hungJobs: hungJobsOf(checks, Date.now()),
   };
 }
 
@@ -488,17 +498,22 @@ export async function rerunFailedOnce(cwd: string, runId: string): Promise<'reru
 const MAX_RUN_ATTEMPTS_FOR_A_HUNG_RUN = 2;
 const CANCEL_WAIT_MS = 3 * 60_000;
 
-// A hung run is cancelled and started again, at most once: a second hang is left for GitHub's own job timeout.
-export async function restartHungRun(cwd: string, runId: string): Promise<'restarted' | 'already-restarted' | 'failed'> {
-  const attempt = await gh(cwd, ['api', `repos/{owner}/{repo}/actions/runs/${runId}`, '-q', '.run_attempt']);
-  if (attempt.code !== 0) return 'failed';
-  if (Number(attempt.stdout.trim()) >= MAX_RUN_ATTEMPTS_FOR_A_HUNG_RUN) return 'already-restarted';
+// A hung job is started again, at most once per run: a second hang is left for GitHub's own job timeout.
+// A run that already finished only shows a stale job status (GitHub never recorded the job's end), and
+// running that job again replaces it; a run still going is cancelled first.
+export async function restartHungJob(cwd: string, job: HungJob): Promise<'restarted' | 'already-restarted' | 'failed'> {
+  const run = await gh(cwd, ['api', `repos/{owner}/{repo}/actions/runs/${job.runId}`, '-q', '[.run_attempt, .status] | @tsv']);
+  if (run.code !== 0) return 'failed';
+  const [attempt, status] = run.stdout.trim().split('\t');
+  if (Number(attempt) >= MAX_RUN_ATTEMPTS_FOR_A_HUNG_RUN) return 'already-restarted';
+  if (status === 'completed') return (await gh(cwd, ['run', 'rerun', '--job', job.jobId])).code === 0 ? 'restarted' : 'failed';
+  const runId = job.runId;
   if ((await gh(cwd, ['run', 'cancel', runId])).code !== 0) return 'failed';
   for (const deadline = Date.now() + CANCEL_WAIT_MS; Date.now() < deadline; ) {
     await new Promise((resolve) => setTimeout(resolve, 10_000));
     const status = await gh(cwd, ['run', 'view', runId, '--json', 'status', '-q', '.status']);
     if (status.code === 0 && status.stdout.trim() === 'completed') {
-      return (await gh(cwd, ['run', 'rerun', runId])).code === 0 ? 'restarted' : 'failed';
+      return (await gh(cwd, ['run', 'rerun', runId, '--failed'])).code === 0 ? 'restarted' : 'failed';
     }
   }
   return 'failed';

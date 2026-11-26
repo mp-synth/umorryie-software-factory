@@ -3814,7 +3814,7 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
   }
   if (work) mergeabilityRechecks.known(t.id);
   if (!work) return false;
-  for (const runId of work.snap.hungRunIds) void restartHungRun(init, t, cwd, runId);
+  for (const job of work.snap.hungJobs) void restartHungJob(init, t, cwd, job);
   if (!hasPrWork(work)) {
     await noteSweepSkip(cwd, t, work, false);
     return false;
@@ -3839,16 +3839,17 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
 const restartingRuns = new Set<string>();
 const hungRunsReported = new Map<string, string>();
 
-async function restartHungRun(init: Initiative, t: Ticket, cwd: string, runId: string): Promise<void> {
+async function restartHungJob(init: Initiative, t: Ticket, cwd: string, job: gh.HungJob): Promise<void> {
+  const runId = job.runId;
   if (restartingRuns.has(runId)) return;
   restartingRuns.add(runId);
   try {
-    const outcome = await gh.restartHungRun(cwd, runId);
+    const outcome = await gh.restartHungJob(cwd, job);
     const minutes = gh.HUNG_CHECK_MS / 60_000;
     const what = {
-      restarted: `CI run ${runId} ran for over ${minutes} minutes without finishing, so it was cancelled and started again.`,
+      restarted: `CI run ${runId} showed a job in progress for over ${minutes} minutes, so the factory started it again.`,
       'already-restarted': `CI run ${runId} hung again after a restart; GitHub's own job timeout ends it.`,
-      failed: `CI run ${runId} ran for over ${minutes} minutes without finishing, and restarting it failed.`,
+      failed: `CI run ${runId} showed a job in progress for over ${minutes} minutes, and starting it again failed.`,
     }[outcome];
     if (hungRunsReported.get(runId) === outcome) return;
     hungRunsReported.set(runId, outcome);

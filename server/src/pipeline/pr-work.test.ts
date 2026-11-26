@@ -15,7 +15,7 @@ const snapshot = (patch: Partial<PrSnapshot> = {}): PrSnapshot => ({
   supersededChecks: [],
   pendingChecks: [],
   finishedChecks: 0,
-  hungRunIds: [],
+  hungJobs: [],
   comments: [],
   reviews: [],
   ...patch,

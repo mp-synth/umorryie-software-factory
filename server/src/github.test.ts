@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, humanChecksFrom, hungRunIdsOf, splitFailingChecks, type CheckRun } from './github.ts';
+import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, humanChecksFrom, hungJobsOf, splitFailingChecks, type CheckRun } from './github.ts';
 
 test('starts every factory comment with the automation prefix and keeps the loop marker', () => {
   const body = factoryCommentBody('Fixed the lint error.');
@@ -73,15 +73,15 @@ test('lists the checks only people turn green that still wait, newest run per na
   ]);
 });
 
-test('a check in progress for over an hour is a hung run; a queued one or a younger one is not', () => {
+test('a job in progress for over an hour is hung; a queued one, a younger one or a non-Actions check is not', () => {
   const now = Date.parse('2026-11-26T08:00:00Z');
-  const run = (id: string, status: string, startedAt: string): CheckRun => ({ name: `job-${id}`, status, startedAt, detailsUrl: `https://github.com/o/r/actions/runs/${id}/job/1` });
+  const job = (run: string, id: string, status: string, startedAt: string): CheckRun => ({ name: `job-${id}`, status, startedAt, detailsUrl: `https://github.com/o/r/actions/runs/${run}/job/${id}` });
   const checks = [
-    run('111', 'IN_PROGRESS', '2026-11-26T02:12:53Z'),
-    run('111', 'IN_PROGRESS', '2026-11-26T02:12:50Z'),
-    run('222', 'IN_PROGRESS', '2026-11-26T07:30:00Z'),
-    run('333', 'QUEUED', '2026-11-26T02:00:00Z'),
-    { name: 'status', status: 'IN_PROGRESS', startedAt: '2026-11-26T02:00:00Z' },
+    job('111', '1', 'IN_PROGRESS', '2026-11-26T02:12:53Z'),
+    job('111', '1', 'IN_PROGRESS', '2026-11-26T02:12:50Z'),
+    job('222', '2', 'IN_PROGRESS', '2026-11-26T07:30:00Z'),
+    job('333', '3', 'QUEUED', '2026-11-26T02:00:00Z'),
+    { name: 'status', status: 'IN_PROGRESS', startedAt: '2026-11-26T02:00:00Z', detailsUrl: 'https://ci.example.com/build/9' },
   ];
-  assert.deepEqual(hungRunIdsOf(checks, now), ['111']);
+  assert.deepEqual(hungJobsOf(checks, now), [{ runId: '111', jobId: '1' }]);
 });
