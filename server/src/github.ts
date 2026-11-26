@@ -291,12 +291,17 @@ export function ciStateOf(snap: Pick<PrSnapshot, 'failingChecks' | 'pendingCheck
 
 export type PrCi = Pick<PrSnapshot, 'state' | 'headRefOid' | 'failingChecks' | 'supersededChecks' | 'pendingChecks' | 'finishedChecks' | 'hungJobs'>;
 
+/** A job shown in progress this long on a run that already finished has a stale status, not a slow job. */
 export const HUNG_CHECK_MS = 60 * 60_000;
+/** GitHub's default job timeout (360 minutes) and a margin: a live run can legitimately run a job until then. */
+export const LIVE_HUNG_JOB_MS = (360 + 15) * 60_000;
 const RUNNING_STATES = ['IN_PROGRESS', 'QUEUED', 'PENDING', 'WAITING'];
 
 export interface HungJob {
   runId: string;
   jobId: string;
+  name: string;
+  startedAt: string;
 }
 
 export function hungJobsOf(checks: CheckRun[], now: number): HungJob[] {
@@ -304,7 +309,7 @@ export function hungJobsOf(checks: CheckRun[], now: number): HungJob[] {
   for (const c of checks) {
     if ((c.status ?? '').toUpperCase() !== 'IN_PROGRESS' || now - (Date.parse(c.startedAt ?? '') || now) <= HUNG_CHECK_MS) continue;
     const ids = c.detailsUrl?.match(/\/actions\/runs\/(\d+)\/job\/(\d+)/);
-    if (ids) jobs.set(ids[2], { runId: ids[1], jobId: ids[2] });
+    if (ids) jobs.set(ids[2], { runId: ids[1], jobId: ids[2], name: checkName(c), startedAt: c.startedAt! });
   }
   return [...jobs.values()];
 }
@@ -495,28 +500,93 @@ export async function rerunFailedOnce(cwd: string, runId: string): Promise<'reru
   return r.code === 0 ? 'rerun' : 'failed';
 }
 
-const MAX_RUN_ATTEMPTS_FOR_A_HUNG_RUN = 2;
-const CANCEL_WAIT_MS = 3 * 60_000;
+export interface ActionsJob {
+  name: string;
+  status: string;
+  conclusion: string;
+  startedAt: string;
+  completedAt: string;
+}
 
-// A hung job is started again, at most once per run: a second hang is left for GitHub's own job timeout.
-// A run that already finished only shows a stale job status (GitHub never recorded the job's end), and
-// running that job again replaces it; a run still going is cancelled first.
-export async function restartHungJob(cwd: string, job: HungJob): Promise<'restarted' | 'already-restarted' | 'failed'> {
-  const run = await gh(cwd, ['api', `repos/{owner}/{repo}/actions/runs/${job.runId}`, '-q', '[.run_attempt, .status] | @tsv']);
-  if (run.code !== 0) return 'failed';
-  const [attempt, status] = run.stdout.trim().split('\t');
-  if (Number(attempt) >= MAX_RUN_ATTEMPTS_FOR_A_HUNG_RUN) return 'already-restarted';
-  if (status === 'completed') return (await gh(cwd, ['run', 'rerun', '--job', job.jobId])).code === 0 ? 'restarted' : 'failed';
-  const runId = job.runId;
-  if ((await gh(cwd, ['run', 'cancel', runId])).code !== 0) return 'failed';
-  for (const deadline = Date.now() + CANCEL_WAIT_MS; Date.now() < deadline; ) {
+export interface HungJobFacts {
+  jobAttempt: number;
+  runAttempt: number;
+  runCompleted: boolean;
+  /** The same job in the run's previous attempt, when there is one. */
+  previous: ActionsJob | null;
+}
+
+export type HungJobAction = 'rerun-job' | 'cancel-and-rerun' | 'wait' | 'superseded' | 'already-restarted';
+
+// The factory cancels a hung job after LIVE_HUNG_JOB_MS, or leaves its stale status behind, so a previous
+// attempt that ended either way was hung and already started again.
+function ranHung(job: ActionsJob): boolean {
+  if (job.status !== 'completed') return true;
+  return job.conclusion === 'cancelled' && Date.parse(job.completedAt) - Date.parse(job.startedAt) > HUNG_CHECK_MS;
+}
+
+// A hung job is started again at most once: a second hang is left for GitHub's own job timeout.
+export function hungJobAction(job: HungJob, facts: HungJobFacts, now: number): HungJobAction {
+  if (facts.jobAttempt < facts.runAttempt) return 'superseded';
+  if (facts.previous && ranHung(facts.previous)) return 'already-restarted';
+  if (facts.runCompleted) return 'rerun-job';
+  return now - Date.parse(job.startedAt) > LIVE_HUNG_JOB_MS ? 'cancel-and-rerun' : 'wait';
+}
+
+async function hungJobFacts(cwd: string, job: HungJob): Promise<HungJobFacts | null> {
+  const [jobAttempt, run] = await Promise.all([
+    gh(cwd, ['api', `repos/{owner}/{repo}/actions/jobs/${job.jobId}`, '-q', '.run_attempt']),
+    gh(cwd, ['api', `repos/{owner}/{repo}/actions/runs/${job.runId}`, '-q', '[.run_attempt, .status] | @tsv']),
+  ]);
+  if (jobAttempt.code !== 0 || run.code !== 0) return null;
+  const [runAttempt, status] = run.stdout.trim().split('\t');
+  const facts: HungJobFacts = { jobAttempt: Number(jobAttempt.stdout.trim()), runAttempt: Number(runAttempt), runCompleted: status === 'completed', previous: null };
+  if (facts.runAttempt <= 1) return facts;
+  const earlier = await gh(cwd, [
+    'api', '--paginate', `repos/{owner}/{repo}/actions/runs/${job.runId}/attempts/${facts.runAttempt - 1}/jobs?per_page=100`,
+    '-q', '.jobs[] | [.name, .status, .conclusion // "", .started_at // "", .completed_at // ""] | @json',
+  ]);
+  if (earlier.code !== 0) return null;
+  const previous = earlier.stdout.split('\n').filter(Boolean)
+    .map((line) => JSON.parse(line) as string[])
+    .map(([name, status, conclusion, startedAt, completedAt]) => ({ name, status, conclusion, startedAt, completedAt }))
+    .find((j) => j.name === job.name);
+  return { ...facts, previous: previous ?? null };
+}
+
+const GRACEFUL_CANCEL_MS = 2 * 60_000;
+const FORCED_CANCEL_MS = 10 * 60_000;
+
+async function runCompletesWithin(cwd: string, runId: string, ms: number): Promise<boolean> {
+  for (const deadline = Date.now() + ms; Date.now() < deadline; ) {
     await new Promise((resolve) => setTimeout(resolve, 10_000));
     const status = await gh(cwd, ['run', 'view', runId, '--json', 'status', '-q', '.status']);
-    if (status.code === 0 && status.stdout.trim() === 'completed') {
-      return (await gh(cwd, ['run', 'rerun', runId, '--failed'])).code === 0 ? 'restarted' : 'failed';
-    }
+    if (status.code === 0 && status.stdout.trim() === 'completed') return true;
   }
-  return 'failed';
+  return false;
+}
+
+// `always()` steps keep a cancelled run going and a lost runner never confirms the cancel; force-cancel
+// skips both.
+async function cancelRun(cwd: string, runId: string): Promise<boolean> {
+  if ((await gh(cwd, ['run', 'cancel', runId])).code !== 0) return false;
+  if (await runCompletesWithin(cwd, runId, GRACEFUL_CANCEL_MS)) return true;
+  if ((await gh(cwd, ['api', '-X', 'POST', `repos/{owner}/{repo}/actions/runs/${runId}/force-cancel`])).code !== 0) return false;
+  return runCompletesWithin(cwd, runId, FORCED_CANCEL_MS);
+}
+
+export type HungJobOutcome = 'restarted' | 'already-restarted' | 'failed' | 'superseded' | 'wait';
+
+// A finished run only shows a stale job status (GitHub never recorded the job's end), and running that
+// job again replaces it; a run still going is cancelled first and its cancelled jobs run again.
+export async function restartHungJob(cwd: string, job: HungJob): Promise<HungJobOutcome> {
+  const facts = await hungJobFacts(cwd, job);
+  if (!facts) return 'failed';
+  const action = hungJobAction(job, facts, Date.now());
+  if (action === 'rerun-job') return (await gh(cwd, ['run', 'rerun', '--job', job.jobId])).code === 0 ? 'restarted' : 'failed';
+  if (action !== 'cancel-and-rerun') return action;
+  if (!(await cancelRun(cwd, job.runId))) return 'failed';
+  return (await gh(cwd, ['run', 'rerun', job.runId, '--failed'])).code === 0 ? 'restarted' : 'failed';
 }
 
 export async function failedLog(cwd: string, url: string | null): Promise<string | null> {

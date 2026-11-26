@@ -88,14 +88,17 @@ export function hasPrWork(w: PrWork): boolean {
 }
 
 // What keeps the PR from merging after a fixer already had this exact state, or null when nothing does
-// (threads and comments wait for people, not for another fixer).
-export function describeUnmergeablePr(w: PrWork): string | null {
+// (threads and comments wait for people, not for another fixer). A review approves every fix that
+// changes code, which lets the arbiter decide again, so only the ticket's rounds bound the retries.
+export function unmergeableStop(w: PrWork, rounds: { round: number; maxRounds: number }): { why: string; askArbiter: boolean } | null {
   const parts = [
     w.conflicting ? 'it conflicts with its base' : '',
     w.failingChecks.length ? `CI fails (${w.failingChecks.map((c) => c.name).join(', ')})` : '',
   ].filter(Boolean);
   if (!parts.length) return null;
-  return `${parts.join(' and ')} on ${w.snap.url}, and the PR is unchanged since a fixer had exactly this. It can't merge like this.`;
+  const why = `${parts.join(' and ')} on ${w.snap.url}, and the PR is unchanged since a fixer had exactly this. It can't merge like this.`;
+  if (rounds.round < rounds.maxRounds) return { why, askArbiter: true };
+  return { why: `${why} ${rounds.round} rounds of fixes did not get it there, so it waits for you.`, askArbiter: false };
 }
 
 export function prWorkFingerprint(w: PrWork): string {

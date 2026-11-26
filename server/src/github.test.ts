@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, humanChecksFrom, hungJobsOf, splitFailingChecks, type CheckRun } from './github.ts';
+import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, humanChecksFrom, hungJobAction, hungJobsOf, splitFailingChecks, type ActionsJob, type CheckRun, type HungJob } from './github.ts';
 
 test('starts every factory comment with the automation prefix and keeps the loop marker', () => {
   const body = factoryCommentBody('Fixed the lint error.');
@@ -83,5 +83,25 @@ test('a job in progress for over an hour is hung; a queued one, a younger one or
     job('333', '3', 'QUEUED', '2026-11-26T02:00:00Z'),
     { name: 'status', status: 'IN_PROGRESS', startedAt: '2026-11-26T02:00:00Z', detailsUrl: 'https://ci.example.com/build/9' },
   ];
-  assert.deepEqual(hungJobsOf(checks, now), [{ runId: '111', jobId: '1' }]);
+  assert.deepEqual(hungJobsOf(checks, now), [{ runId: '111', jobId: '1', name: 'job-1', startedAt: '2026-11-26T02:12:50Z' }]);
+});
+
+test('a hung job reruns at once on a finished run, but a live run only after GitHub default job timeout', () => {
+  const now = Date.parse('2026-11-26T08:00:00Z');
+  const hung = (startedAt: string): HungJob => ({ runId: '111', jobId: '1', name: 'test', startedAt });
+  const facts = { jobAttempt: 1, runAttempt: 1, runCompleted: false, previous: null };
+  assert.equal(hungJobAction(hung('2026-11-26T06:00:00Z'), { ...facts, runCompleted: true }, now), 'rerun-job');
+  assert.equal(hungJobAction(hung('2026-11-26T06:00:00Z'), facts, now), 'wait');
+  assert.equal(hungJobAction(hung('2026-11-26T01:30:00Z'), facts, now), 'cancel-and-rerun');
+});
+
+test('a hung job is started again once per run, whoever re-ran the run before', () => {
+  const now = Date.parse('2026-11-26T08:00:00Z');
+  const hung: HungJob = { runId: '111', jobId: '2', name: 'test', startedAt: '2026-11-26T06:00:00Z' };
+  const second = { jobAttempt: 2, runAttempt: 2, runCompleted: true };
+  const earlier = (patch: Partial<ActionsJob>): ActionsJob => ({ name: 'test', status: 'completed', conclusion: 'failure', startedAt: '2026-11-26T05:00:00Z', completedAt: '2026-11-26T05:10:00Z', ...patch });
+  assert.equal(hungJobAction(hung, { ...second, previous: earlier({}) }, now), 'rerun-job');
+  assert.equal(hungJobAction(hung, { ...second, previous: earlier({ status: 'in_progress', conclusion: '', completedAt: '' }) }, now), 'already-restarted');
+  assert.equal(hungJobAction(hung, { ...second, previous: earlier({ conclusion: 'cancelled', startedAt: '2026-11-25T22:00:00Z', completedAt: '2026-11-26T04:20:00Z' }) }, now), 'already-restarted');
+  assert.equal(hungJobAction(hung, { ...second, jobAttempt: 1, previous: null }, now), 'superseded');
 });

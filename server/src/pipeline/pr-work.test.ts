@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PrSnapshot, ReviewThread } from '../github.ts';
-import { describeIgnored, describePrWork, describeUnmergeablePr, hasPrWork, isBotCommand, isNoiseAuthor, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip } from './pr-work.ts';
+import { describeIgnored, describePrWork, hasPrWork, isBotCommand, isNoiseAuthor, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, unmergeableStop } from './pr-work.ts';
 
 const snapshot = (patch: Partial<PrSnapshot> = {}): PrSnapshot => ({
   number: 7,
@@ -116,10 +116,20 @@ test('describes what the sweep found in one phrase', () => {
 });
 
 test('a PR a fixer could not turn green or mergeable is described by what blocks the merge', () => {
+  const rounds = { round: 2, maxRounds: 5 };
   const red = prWorkFrom(snapshot({ mergeable: 'CONFLICTING', failingChecks: [{ name: 'test-unit', url: null }, { name: 'OpenAPI Contracts', url: null }] }), [], fresh);
-  assert.match(describeUnmergeablePr(red)!, /^it conflicts with its base and CI fails \(test-unit, OpenAPI Contracts\) on https:\/\/github.com\/o\/r\/pull\/7,/);
-  assert.equal(describeUnmergeablePr(prWorkFrom(snapshot(), [thread('a')], fresh)), null);
-  assert.equal(describeUnmergeablePr(prWorkFrom(snapshot({ failingChecks: [{ name: 'lint', url: null }], pendingChecks: ['test'] }), [], fresh)), null);
+  const stop = unmergeableStop(red, rounds)!;
+  assert.match(stop.why, /^it conflicts with its base and CI fails \(test-unit, OpenAPI Contracts\) on https:\/\/github.com\/o\/r\/pull\/7,/);
+  assert.equal(stop.askArbiter, true);
+  assert.equal(unmergeableStop(prWorkFrom(snapshot(), [thread('a')], fresh), rounds), null);
+  assert.equal(unmergeableStop(prWorkFrom(snapshot({ failingChecks: [{ name: 'lint', url: null }], pendingChecks: ['test'] }), [], fresh), rounds), null);
+});
+
+test('a PR still red after the ticket used its rounds waits for the owner instead of the arbiter', () => {
+  const red = prWorkFrom(snapshot({ failingChecks: [{ name: 'test-unit', url: null }] }), [], fresh);
+  const stop = unmergeableStop(red, { round: 5, maxRounds: 5 })!;
+  assert.equal(stop.askArbiter, false);
+  assert.match(stop.why, /5 rounds of fixes did not get it there, so it waits for you\.$/);
 });
 
 const review = (author: string, body = 'Looks mostly fine', state = 'COMMENTED') => ({ author, state, body, submittedAt: '2026-01-01T10:00:00Z' });

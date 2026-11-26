@@ -75,7 +75,7 @@ import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, render
 import { sizeNote } from './size.ts';
 import { malformedVerdictReason, outputFailure, parseVerdict } from './verdict.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
-import { describeIgnored, describePrWork, describeUnmergeablePr, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, type PrWork } from './pr-work.ts';
+import { describeIgnored, describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, unmergeableStop, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
 import { BASE_COMMIT_FIELD, MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, ruleFile, type AgentKind } from './role-prompt.ts';
 import { hasHumanPrItems, isSteering, oneLine, parseProposedRules, renderTimeline, retroSummary, withLearnedRule, withoutLearnedRule } from './retro.ts';
@@ -3814,6 +3814,7 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
   }
   if (work) mergeabilityRechecks.known(t.id);
   if (!work) return false;
+  forgetHungRunsReported(t.id, work.snap.hungJobs);
   for (const job of work.snap.hungJobs) void restartHungJob(init, t, cwd, job);
   if (!hasPrWork(work)) {
     await noteSweepSkip(cwd, t, work, false);
@@ -3837,7 +3838,14 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
 }
 
 const restartingRuns = new Set<string>();
-const hungRunsReported = new Map<string, string>();
+const hungRunsReported = new Map<string, { ticketId: string; outcome: gh.HungJobOutcome }>();
+
+function forgetHungRunsReported(ticketId: string, hung: gh.HungJob[]): void {
+  const stillHung = new Set(hung.map((j) => j.runId));
+  for (const [runId, reported] of hungRunsReported) {
+    if (reported.ticketId === ticketId && !stillHung.has(runId)) hungRunsReported.delete(runId);
+  }
+}
 
 async function restartHungJob(init: Initiative, t: Ticket, cwd: string, job: gh.HungJob): Promise<void> {
   const runId = job.runId;
@@ -3845,14 +3853,15 @@ async function restartHungJob(init: Initiative, t: Ticket, cwd: string, job: gh.
   restartingRuns.add(runId);
   try {
     const outcome = await gh.restartHungJob(cwd, job);
-    const minutes = gh.HUNG_CHECK_MS / 60_000;
+    if (outcome === 'wait' || outcome === 'superseded') return;
+    const shown = `CI job "${job.name}" in run ${runId} showed in progress for ${Math.round((Date.now() - Date.parse(job.startedAt)) / 60_000)} minutes`;
     const what = {
-      restarted: `CI run ${runId} showed a job in progress for over ${minutes} minutes, so the factory started it again.`,
-      'already-restarted': `CI run ${runId} hung again after a restart; GitHub's own job timeout ends it.`,
-      failed: `CI run ${runId} showed a job in progress for over ${minutes} minutes, and starting it again failed.`,
+      restarted: `${shown}, so the factory started it again.`,
+      'already-restarted': `${shown} after it was already started again once; GitHub's own job timeout ends it.`,
+      failed: `${shown}, and starting it again failed.`,
     }[outcome];
-    if (hungRunsReported.get(runId) === outcome) return;
-    hungRunsReported.set(runId, outcome);
+    if (hungRunsReported.get(runId)?.outcome === outcome) return;
+    hungRunsReported.set(runId, { ticketId: t.id, outcome });
     await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${what}`);
   } catch (err) {
     console.warn('[pr-sweep]', `${ticketLabel(t)}: restarting CI run ${runId}: ${(err as Error).message}`);
@@ -3864,11 +3873,11 @@ async function restartHungJob(init: Initiative, t: Ticket, cwd: string, job: gh.
 // Every PR has to end green and mergeable. One a fixer already had in this exact state stops, and the
 // arbiter decides what the next fixer must do, instead of the PR waiting for the owner to notice.
 async function stopUnmergeablePr(init: Initiative, t: Ticket, work: PrWork): Promise<void> {
-  const why = describeUnmergeablePr(work);
-  if (!why) return;
-  const blocked = await repo.updateTicket(t.id, { status: 'blocked', blockedReason: why });
-  await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${why}`);
-  await askArbiterInsteadOfOwner(init, blocked);
+  const stop = unmergeableStop(work, { round: t.round, maxRounds: repo.initiativeSettings(init).maxRounds });
+  if (!stop) return;
+  const blocked = await repo.updateTicket(t.id, { status: 'blocked', blockedReason: stop.why });
+  await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${stop.why}`);
+  if (stop.askArbiter) await askArbiterInsteadOfOwner(init, blocked);
 }
 
 async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: boolean): Promise<number> {

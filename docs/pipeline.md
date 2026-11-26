@@ -176,12 +176,14 @@ Meticulous visual diff). The ticket's detail lists them, with what the sweep
 ignored. Every PR has to end green and mergeable: when a fixer already had a
 PR's exact failing CI or conflict and the PR is unchanged, the ticket stops
 with the failing checks as its reason and goes to the arbiter, which sends a
-new fixer the check's error and cause (or a rerun of a flaky job). Review
-threads and comments a fixer already answered keep waiting for people. A
-GitHub Actions job still shown in progress after an hour is hung: the sweep
-starts it again, once per run, cancelling the run first when it is still
-going (a finished run that still lists the job as running only needs the job
-again). Turn it off
+new fixer the check's error and cause (or a rerun of a flaky job). Once the
+ticket has used its rounds, it waits for you instead. Review threads and
+comments a fixer already answered keep waiting for people. A GitHub Actions
+job is started again when it is hung, once per run. One shown in progress
+for an hour on a run that already finished only needs the job again. On a
+run still going, the sweep waits out GitHub's default 6-hour job timeout,
+then cancels the run (force-cancelling it after two minutes, which skips
+`always()` steps and a lost runner) and re-runs its cancelled jobs. Turn it off
 or run it now in **Settings**. **More → Fix PRs now** on an initiative runs the
 same sweep for that initiative right away; it also retries a PR state the loop
 already handled and includes tickets that need you.
