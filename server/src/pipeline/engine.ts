@@ -1283,6 +1283,13 @@ async function heldReviewReason(init: Initiative, ticket: Ticket): Promise<strin
   return null;
 }
 
+async function hasUnpushedCommits(ticket: Ticket): Promise<boolean> {
+  const remote = remoteBranchOf(ticket);
+  if (!remote || !ticket.worktreePath || !fs.existsSync(ticket.worktreePath)) return false;
+  const pushed = `origin/${remote}`;
+  return (await gitx.refExists(ticket.worktreePath, pushed)) && !(await gitx.isAncestor(ticket.worktreePath, 'HEAD', pushed));
+}
+
 async function lacksPushedHead(init: Initiative, ticket: Ticket, below: Ticket, { fetched = false } = {}): Promise<boolean> {
   const remote = remoteBranchOf(below);
   // Stack sync only merges into a ticket with an open PR; without one, nothing could bring the code in.
@@ -2903,6 +2910,9 @@ async function findFeedbackHold(init: Initiative, ticket: Ticket): Promise<strin
   const all = await repo.listTickets(init.id);
   const fixBelow = await findFixBelowHold(init, ticket, all);
   if (fixBelow) return fixBelow;
+  // The stack sync leaves a branch with unpushed commits alone (a fix that never got verified), so it would
+  // never merge the tickets below: the fixer merges them itself.
+  if (await hasUnpushedCommits(ticket)) return null;
   for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
     // A merge that conflicts is the fixer's job: it is in the ticket's feedback, so it does not hold the fixer back.
     if (below === stackBase(ticket, all) && heldConflicts.has(ticket.id)) continue;
