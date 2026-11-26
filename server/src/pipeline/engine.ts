@@ -8,7 +8,7 @@ import { sql } from '../db.ts';
 import { emitChange } from '../events.ts';
 import { repoShellEnv } from '../shell-env.ts';
 import { recordRunUsage } from '../usage.ts';
-import { attachAgent, claudeVersion, isProductionVariable, startDetachedAgent, type AgentResult, type AgentSink, type AgentSpec, type DetachedAgentHandle } from '../agents/claude.ts';
+import { AGENT_STALL_MS, attachAgent, claudeVersion, isProductionVariable, startDetachedAgent, type AgentResult, type AgentSink, type AgentSpec, type DetachedAgentHandle } from '../agents/claude.ts';
 import { LeftRunning, abandonSpool, followCommand, launchSpooled, removeSpool, spoolFate, wasLaunched, type CommandOutcome, type SpoolHandle, type SpoolOffsets } from '../agents/spool.ts';
 import * as gitx from '../git.ts';
 import * as gh from '../github.ts';
@@ -894,6 +894,12 @@ async function stoppedEarly(run: Run, step: StepResult, outputName: string): Pro
   if (result.canceled) {
     await finish(run, 'canceled');
     await revertAfterStop(run, null);
+    return true;
+  }
+  if (result.stalled) {
+    const minutes = AGENT_STALL_MS / 60_000;
+    await finish(run, 'failed', { error: `stalled: no output for ${minutes} minutes` });
+    await revertAfterStop(run, `${run.kind} agent printed nothing for ${minutes} minutes, so it was stopped`);
     return true;
   }
   if (result.timedOut) {

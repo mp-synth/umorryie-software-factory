@@ -14,6 +14,7 @@ const startedAt = Date.now();
 
 let child = null;
 let timedOut = false;
+let stalled = false;
 let canceled = false;
 let stopping = false;
 let recorded = false;
@@ -39,7 +40,7 @@ function recordExit(code, signal) {
   if (recorded) return;
   recorded = true;
   try {
-    writeAtomically('exit.json', { code, signal, timedOut, canceled, finishedAt: Date.now() });
+    writeAtomically('exit.json', { code, signal, timedOut, stalled, canceled, finishedAt: Date.now() });
   } finally {
     if (launch.scratchDir) fs.rmSync(launch.scratchDir, { recursive: true, force: true });
     process.exit(0);
@@ -107,12 +108,28 @@ function run() {
       stopProcessTree();
     });
   }
+  // An agent prints a line for every message and tool result. Silence this long means a hung tool or
+  // request, so stop it instead of waiting for the run's time limit.
+  let stallTimer = null;
+  const noteProgress = () => {
+    if (!launch.stallMs) return;
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      stalled = true;
+      stopProcessTree();
+    }, launch.stallMs);
+  };
+  noteProgress();
   const watch = launch.lingerAfterResultMs ? resultWatcher(() => setTimeout(stopProcessTree, launch.lingerAfterResultMs)) : () => {};
   child.stdout.on('data', (chunk) => {
     fs.writeSync(out, chunk);
+    noteProgress();
     watch(chunk);
   });
-  child.stderr.on('data', (chunk) => fs.writeSync(err, chunk));
+  child.stderr.on('data', (chunk) => {
+    fs.writeSync(err, chunk);
+    noteProgress();
+  });
   child.on('error', fail);
   child.on('close', recordExit);
 }

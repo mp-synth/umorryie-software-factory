@@ -120,7 +120,9 @@ a planner with questions (or planning that failed), and a ticket that needs
 you (an executor or fixer that reported BLOCKED, a review that still asks for
 changes or checks that still fail after the round limit, a verifier that
 blocked a fix twice, a rebuild that can't run, an agent that crashed or timed
-out). With **Arbiter decides for you** on (the default), each of these starts a
+out, a stack merge that still conflicts after a fixer tried). An agent that prints
+nothing for 20 minutes is stalled (no tool call runs that long) and is stopped
+then, not at the end of its time limit. With **Arbiter decides for you** on (the default), each of these starts a
 fresh, read-only arbiter (Fable) that never saw the work. It reads why the step
 stopped, the brief, what you said before, the latest output of every step and
 the code, then writes one of three decisions:

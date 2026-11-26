@@ -139,6 +139,20 @@ test('the supervisor enforces the timeout and removes the scratch directory with
   assert.equal(fs.existsSync(scratchDir), false);
 });
 
+test('the supervisor stops a process that prints nothing for the stall time, long before its time limit', async () => {
+  const dir = newSpool();
+  launch(dir, 'hang', { timeoutMs: 10_000, stallMs: 300 });
+  await until(() => !!readExit(dir), 4000);
+  assert.deepEqual([readExit(dir)!.stalled, readExit(dir)!.timedOut, readExit(dir)!.canceled], [true, false, false]);
+});
+
+test('a process that keeps printing is not stalled, however long it runs', async () => {
+  const dir = newSpool();
+  launch(dir, 'slow', { stallMs: 400 }, { FAKE_STEPS: '10', FAKE_STEP_MS: '100' });
+  const { end } = await followAll(dir);
+  assert.deepEqual(end.kind === 'exited' && [end.exit.code, end.exit.stalled], [0, false]);
+});
+
 test('the supervisor stops a process that lingers after its result line', async () => {
   const dir = newSpool();
   launch(dir, 'linger', { lingerAfterResultMs: 200 });

@@ -37,11 +37,14 @@ export interface AgentResult {
   numTurns: number | null;
   subtype: string | null;
   timedOut: boolean;
+  stalled: boolean;
   canceled: boolean;
   stderrTail: string;
 }
 
 const KILL_LINGERING_PROCESSES_AFTER_RESULT_MS = 30_000;
+// No agent tool call may run this long (Bash stops at 10 minutes), so this much silence means it hung.
+export const AGENT_STALL_MS = 20 * 60_000;
 
 export interface AgentEvent {
   type: RunEventType;
@@ -238,7 +241,7 @@ export function agentStream(redact: Redact = (text) => text) {
       stderrTail += text;
     },
     sawResult: (): boolean => result !== null,
-    result(end: { exitCode: number; timedOut: boolean; canceled: boolean }): AgentResult {
+    result(end: { exitCode: number; timedOut: boolean; stalled: boolean; canceled: boolean }): AgentResult {
       const usage = (result?.usage ?? {}) as Record<string, number>;
       return {
         exitCode: end.exitCode,
@@ -253,6 +256,7 @@ export function agentStream(redact: Redact = (text) => text) {
         numTurns: typeof result?.num_turns === 'number' ? result.num_turns : null,
         subtype: typeof result?.subtype === 'string' ? result.subtype : null,
         timedOut: end.timedOut,
+        stalled: end.stalled,
         canceled: end.canceled,
         stderrTail,
       };
@@ -262,7 +266,7 @@ export function agentStream(redact: Redact = (text) => text) {
 
 const CLAUDE_NOT_FOUND: AgentResult = {
   exitCode: 127, sessionId: null, resultText: null, isError: true, costUsd: null, inputTokens: null,
-  outputTokens: null, numTurns: null, subtype: null, timedOut: false, canceled: false,
+  outputTokens: null, numTurns: null, subtype: null, timedOut: false, stalled: false, canceled: false,
   stderrTail: 'claude CLI not found. Install Claude Code or set CLAUDE_BIN in .env.',
 };
 
@@ -280,6 +284,7 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
 
   const stream = agentStream(spec.redact);
   let timedOut = false;
+  let stalled = false;
   let canceled = false;
   let exited = false;
   let lingeringProcessesTimer: NodeJS.Timeout | null = null;
@@ -288,6 +293,15 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
     timedOut = true;
     killTree(child.pid);
   }, spec.timeoutMs);
+  let stallTimer: NodeJS.Timeout | null = null;
+  const noteProgress = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      stalled = true;
+      killTree(child.pid);
+    }, AGENT_STALL_MS);
+  };
+  noteProgress();
 
   child.on('exit', () => {
     exited = true;
@@ -295,21 +309,26 @@ export function startAgent(spec: AgentSpec, onEvent: (e: AgentEvent) => void): A
 
   const lines = readline.createInterface({ input: child.stdout });
   lines.on('line', (line) => {
+    noteProgress();
     stream.stdout(line).forEach(onEvent);
     if (stream.sawResult()) lingeringProcessesTimer ??= setTimeout(() => killTree(child.pid), KILL_LINGERING_PROCESSES_AFTER_RESULT_MS);
   });
 
   const stderrLines = readline.createInterface({ input: child.stderr });
-  stderrLines.on('line', (line) => stream.stderr(line).forEach(onEvent));
+  stderrLines.on('line', (line) => {
+    noteProgress();
+    stream.stderr(line).forEach(onEvent);
+  });
 
   const done = new Promise<AgentResult>((resolve) => {
     const finish = (code: number | null) => {
       clearTimeout(timer);
+      if (stallTimer) clearTimeout(stallTimer);
       if (lingeringProcessesTimer) clearTimeout(lingeringProcessesTimer);
       lines.close();
       stderrLines.close();
       if (scratchDir) fs.rm(scratchDir, { recursive: true, force: true }, () => {});
-      resolve(stream.result({ exitCode: code ?? 1, timedOut, canceled }));
+      resolve(stream.result({ exitCode: code ?? 1, timedOut, stalled, canceled }));
     };
     child.on('error', (err) => {
       stream.note(String(err));
@@ -355,7 +374,7 @@ function followAgent(
   };
   const conclude = (exit: SpoolExit | null, cancelRequested: boolean): AgentResult => {
     if (!exit) stream.note(SUPERVISOR_LOST);
-    return stream.result({ exitCode: exit?.code ?? 1, timedOut: !!exit?.timedOut, canceled: cancelRequested || !!exit?.canceled });
+    return stream.result({ exitCode: exit?.code ?? 1, timedOut: !!exit?.timedOut, stalled: !!exit?.stalled, canceled: cancelRequested || !!exit?.canceled });
   };
   return { ...superviseSpool(dir, opts.pid, onLines, conclude), scratchDir: opts.scratchDir };
 }
@@ -366,7 +385,7 @@ export function startDetachedAgent(spec: AgentSpec, dir: string, sink: AgentSink
   const scratchDir = makeScratchDir();
   const pid = launchSpooled(
     dir,
-    { bin, args: buildArgs(spec), cwd: spec.cwd, timeoutMs: spec.timeoutMs, lingerAfterResultMs: KILL_LINGERING_PROCESSES_AFTER_RESULT_MS, scratchDir, marker },
+    { bin, args: buildArgs(spec), cwd: spec.cwd, timeoutMs: spec.timeoutMs, lingerAfterResultMs: KILL_LINGERING_PROCESSES_AFTER_RESULT_MS, stallMs: AGENT_STALL_MS, scratchDir, marker },
     isolatedAgentEnv(spec, scratchDir),
   );
   return followAgent(dir, { pid, scratchDir, from: NOTHING_STORED, redact: spec.redact }, sink);

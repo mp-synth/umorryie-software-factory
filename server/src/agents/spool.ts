@@ -21,6 +21,7 @@ export interface SpoolLaunch {
   cwd: string;
   timeoutMs: number;
   lingerAfterResultMs?: number;
+  stallMs?: number;
   scratchDir?: string | null;
   marker?: string;
 }
@@ -29,6 +30,7 @@ export interface SpoolExit {
   code: number | null;
   signal: string | null;
   timedOut: boolean;
+  stalled?: boolean;
   canceled: boolean;
 }
 

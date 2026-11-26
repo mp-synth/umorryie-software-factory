@@ -65,6 +65,7 @@ test('maps a successful run to events and result fields', async () => {
       numTurns: 3,
       subtype: 'success',
       timedOut: false,
+      stalled: false,
       canceled: false,
       stderrTail: '',
     },
