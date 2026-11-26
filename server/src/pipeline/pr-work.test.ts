@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PrSnapshot, ReviewThread } from '../github.ts';
-import { describeIgnored, describePrWork, hasPrWork, isBotCommand, isNoiseAuthor, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip } from './pr-work.ts';
+import { describeIgnored, describePrWork, describeUnmergeablePr, hasPrWork, isBotCommand, isNoiseAuthor, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip } from './pr-work.ts';
 
 const snapshot = (patch: Partial<PrSnapshot> = {}): PrSnapshot => ({
   number: 7,
@@ -15,6 +15,7 @@ const snapshot = (patch: Partial<PrSnapshot> = {}): PrSnapshot => ({
   supersededChecks: [],
   pendingChecks: [],
   finishedChecks: 0,
+  hungRunIds: [],
   comments: [],
   reviews: [],
   ...patch,
@@ -112,6 +113,13 @@ test('describes what the sweep found in one phrase', () => {
   const work = prWorkFrom(snapshot({ mergeable: 'CONFLICTING', failingChecks: [{ name: 'lint', url: null }], comments: [comment('bob', '2026-01-01T10:00:00Z')] }), [], fresh);
   assert.equal(describePrWork(work), 'a merge conflict, 1 failing check and 1 unanswered comment');
   assert.equal(describePrWork(prWorkFrom(snapshot(), [thread('a'), thread('b')], fresh)), '2 unresolved review threads');
+});
+
+test('a PR a fixer could not turn green or mergeable is described by what blocks the merge', () => {
+  const red = prWorkFrom(snapshot({ mergeable: 'CONFLICTING', failingChecks: [{ name: 'test-unit', url: null }, { name: 'OpenAPI Contracts', url: null }] }), [], fresh);
+  assert.match(describeUnmergeablePr(red)!, /^it conflicts with its base and CI fails \(test-unit, OpenAPI Contracts\) on https:\/\/github.com\/o\/r\/pull\/7,/);
+  assert.equal(describeUnmergeablePr(prWorkFrom(snapshot(), [thread('a')], fresh)), null);
+  assert.equal(describeUnmergeablePr(prWorkFrom(snapshot({ failingChecks: [{ name: 'lint', url: null }], pendingChecks: ['test'] }), [], fresh)), null);
 });
 
 const review = (author: string, body = 'Looks mostly fine', state = 'COMMENTED') => ({ author, state, body, submittedAt: '2026-01-01T10:00:00Z' });

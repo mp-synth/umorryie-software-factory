@@ -126,6 +126,14 @@ verdict per finding inside its single reply.
   ids from the log tail and run exactly those, before your fix to reproduce
   the failure and after it to confirm they pass. Run no other tests, even
   when the repo's docs say to: the rest run in CI on the PR.
+- When those tests can't run here (a service they need is missing), fix from
+  the CI log: read the error, the test and the code it calls, and fix the
+  cause. A check failing on the PR is never NO-CHANGES because it passes or
+  can't run locally. Read the full log with
+  `gh run view <run-id> --log-failed` when the tail isn't enough. A check
+  that fails on something your branch doesn't touch (a runner or network
+  error, a test of code the branch doesn't touch) goes under `## Reruns` in
+  fix.md, one run id per line with why. The factory re-runs it once.
 - Then run the checks command from your prompt; it must pass.
 - When a fix changes behaviour that reaches a live dev service your prompt
   lists, re-run the matching live check from build.md's `## Live validation`
@@ -161,6 +169,10 @@ tests you re-ran before and after the fix.
 ## Replies
 - T1 [VALID]: Added the null check and a test for an empty cart (a1b2c3d).
 - C1 [INVALID]: `retry()` already caps attempts at 3 in `src/retry.ts:41`.
+
+## Reruns
+Run ids of CI failures unrelated to this branch, one per line with why.
+Omit the section when there are none.
 ```
 
 - `FIX: APPLIED` when you committed fixes; `FIX: NO-CHANGES` when no item

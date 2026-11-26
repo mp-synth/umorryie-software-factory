@@ -75,7 +75,7 @@ import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, render
 import { sizeNote } from './size.ts';
 import { malformedVerdictReason, outputFailure, parseVerdict } from './verdict.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
-import { describeIgnored, describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, type PrWork } from './pr-work.ts';
+import { describeIgnored, describePrWork, describeUnmergeablePr, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
 import { BASE_COMMIT_FIELD, MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, ruleFile, type AgentKind } from './role-prompt.ts';
 import { hasHumanPrItems, isSteering, oneLine, parseProposedRules, renderTimeline, retroSummary, withLearnedRule, withoutLearnedRule } from './retro.ts';
@@ -3814,6 +3814,7 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
   }
   if (work) mergeabilityRechecks.known(t.id);
   if (!work) return false;
+  for (const runId of work.snap.hungRunIds) void restartHungRun(init, t, cwd, runId);
   if (!hasPrWork(work)) {
     await noteSweepSkip(cwd, t, work, false);
     return false;
@@ -3821,6 +3822,7 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
   const fingerprint = prWorkFingerprint(work);
   if (!manual && fingerprint === t.prSweepFingerprint) {
     await noteSweepSkip(cwd, t, work, true);
+    await stopUnmergeablePr(init, t, work);
     return false;
   }
   if (!(await repo.claimPrSweep(t.id, fingerprint))) return false;
@@ -3832,6 +3834,40 @@ async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
   }
   await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: the PR sweep found ${describePrWork(work)} on ${work.snap.url}; a fresh fixer is on it.`);
   return true;
+}
+
+const restartingRuns = new Set<string>();
+const hungRunsReported = new Map<string, string>();
+
+async function restartHungRun(init: Initiative, t: Ticket, cwd: string, runId: string): Promise<void> {
+  if (restartingRuns.has(runId)) return;
+  restartingRuns.add(runId);
+  try {
+    const outcome = await gh.restartHungRun(cwd, runId);
+    const minutes = gh.HUNG_CHECK_MS / 60_000;
+    const what = {
+      restarted: `CI run ${runId} ran for over ${minutes} minutes without finishing, so it was cancelled and started again.`,
+      'already-restarted': `CI run ${runId} hung again after a restart; GitHub's own job timeout ends it.`,
+      failed: `CI run ${runId} ran for over ${minutes} minutes without finishing, and restarting it failed.`,
+    }[outcome];
+    if (hungRunsReported.get(runId) === outcome) return;
+    hungRunsReported.set(runId, outcome);
+    await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${what}`);
+  } catch (err) {
+    console.warn('[pr-sweep]', `${ticketLabel(t)}: restarting CI run ${runId}: ${(err as Error).message}`);
+  } finally {
+    restartingRuns.delete(runId);
+  }
+}
+
+// Every PR has to end green and mergeable. One a fixer already had in this exact state stops, and the
+// arbiter decides what the next fixer must do, instead of the PR waiting for the owner to notice.
+async function stopUnmergeablePr(init: Initiative, t: Ticket, work: PrWork): Promise<void> {
+  const why = describeUnmergeablePr(work);
+  if (!why) return;
+  const blocked = await repo.updateTicket(t.id, { status: 'blocked', blockedReason: why });
+  await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${why}`);
+  await askArbiterInsteadOfOwner(init, blocked);
 }
 
 async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: boolean): Promise<number> {

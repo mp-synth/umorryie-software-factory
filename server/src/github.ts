@@ -275,6 +275,8 @@ export interface PrSnapshot {
   supersededChecks: PrCheck[];
   pendingChecks: string[];
   finishedChecks: number;
+  /** GitHub Actions runs of checks that have run far longer than any CI job should: a hung runner. */
+  hungRunIds: string[];
   comments: { author: string; body: string; createdAt: string; url: string }[];
   reviews: { author: string; state: string; body: string; submittedAt: string }[];
 }
@@ -287,13 +289,21 @@ export function ciStateOf(snap: Pick<PrSnapshot, 'failingChecks' | 'pendingCheck
   return snap.finishedChecks ? 'green' : 'none';
 }
 
-export type PrCi = Pick<PrSnapshot, 'state' | 'headRefOid' | 'failingChecks' | 'supersededChecks' | 'pendingChecks' | 'finishedChecks'>;
+export type PrCi = Pick<PrSnapshot, 'state' | 'headRefOid' | 'failingChecks' | 'supersededChecks' | 'pendingChecks' | 'finishedChecks' | 'hungRunIds'>;
+
+export const HUNG_CHECK_MS = 60 * 60_000;
+const RUNNING_STATES = ['IN_PROGRESS', 'QUEUED', 'PENDING', 'WAITING'];
+
+export function hungRunIdsOf(checks: CheckRun[], now: number): string[] {
+  const hung = checks.filter((c) => (c.status ?? '').toUpperCase() === 'IN_PROGRESS' && now - (Date.parse(c.startedAt ?? '') || now) > HUNG_CHECK_MS);
+  return [...new Set(hung.map((c) => actionsRunId(c.detailsUrl ?? null)).filter((id): id is string => !!id))];
+}
 
 function ciOf(d: { state: string; headRefOid: string; statusCheckRollup?: CheckRun[] | null }): PrCi {
   const checks = (d.statusCheckRollup ?? []).filter((c) => !CHECKS_ONLY_HUMANS_TURN_GREEN.test(c.name ?? c.context ?? ''));
   const { failing, superseded } = splitFailingChecks(checks);
   const pendingChecks = checks
-    .filter((c) => ['IN_PROGRESS', 'QUEUED', 'PENDING', 'WAITING'].includes((c.status ?? c.state ?? '').toUpperCase()))
+    .filter((c) => RUNNING_STATES.includes((c.status ?? c.state ?? '').toUpperCase()))
     .map((c) => c.name ?? c.context ?? 'check');
   return {
     state: d.state,
@@ -302,6 +312,7 @@ function ciOf(d: { state: string; headRefOid: string; statusCheckRollup?: CheckR
     supersededChecks: superseded,
     pendingChecks,
     finishedChecks: checks.length - pendingChecks.length,
+    hungRunIds: hungRunIdsOf(checks, Date.now()),
   };
 }
 
@@ -472,6 +483,25 @@ export async function rerunFailedOnce(cwd: string, runId: string): Promise<'reru
   if (Number(attempt.stdout.trim()) > 1) return 'already-rerun';
   const r = await gh(cwd, ['run', 'rerun', runId, '--failed']);
   return r.code === 0 ? 'rerun' : 'failed';
+}
+
+const MAX_RUN_ATTEMPTS_FOR_A_HUNG_RUN = 2;
+const CANCEL_WAIT_MS = 3 * 60_000;
+
+// A hung run is cancelled and started again, at most once: a second hang is left for GitHub's own job timeout.
+export async function restartHungRun(cwd: string, runId: string): Promise<'restarted' | 'already-restarted' | 'failed'> {
+  const attempt = await gh(cwd, ['api', `repos/{owner}/{repo}/actions/runs/${runId}`, '-q', '.run_attempt']);
+  if (attempt.code !== 0) return 'failed';
+  if (Number(attempt.stdout.trim()) >= MAX_RUN_ATTEMPTS_FOR_A_HUNG_RUN) return 'already-restarted';
+  if ((await gh(cwd, ['run', 'cancel', runId])).code !== 0) return 'failed';
+  for (const deadline = Date.now() + CANCEL_WAIT_MS; Date.now() < deadline; ) {
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    const status = await gh(cwd, ['run', 'view', runId, '--json', 'status', '-q', '.status']);
+    if (status.code === 0 && status.stdout.trim() === 'completed') {
+      return (await gh(cwd, ['run', 'rerun', runId])).code === 0 ? 'restarted' : 'failed';
+    }
+  }
+  return 'failed';
 }
 
 export async function failedLog(cwd: string, url: string | null): Promise<string | null> {

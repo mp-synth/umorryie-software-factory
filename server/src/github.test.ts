@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, humanChecksFrom, splitFailingChecks, type CheckRun } from './github.ts';
+import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, humanChecksFrom, hungRunIdsOf, splitFailingChecks, type CheckRun } from './github.ts';
 
 test('starts every factory comment with the automation prefix and keeps the loop marker', () => {
   const body = factoryCommentBody('Fixed the lint error.');
@@ -71,4 +71,17 @@ test('lists the checks only people turn green that still wait, newest run per na
     { name: 'Code review', state: 'pending', description: 'needs review from @growth', url: 'https://x/1' },
     { name: 'Meticulous Tests', state: 'failing', description: 'Visual differences in 3 of 90 screens', url: null },
   ]);
+});
+
+test('a check in progress for over an hour is a hung run; a queued one or a younger one is not', () => {
+  const now = Date.parse('2026-11-26T08:00:00Z');
+  const run = (id: string, status: string, startedAt: string): CheckRun => ({ name: `job-${id}`, status, startedAt, detailsUrl: `https://github.com/o/r/actions/runs/${id}/job/1` });
+  const checks = [
+    run('111', 'IN_PROGRESS', '2026-11-26T02:12:53Z'),
+    run('111', 'IN_PROGRESS', '2026-11-26T02:12:50Z'),
+    run('222', 'IN_PROGRESS', '2026-11-26T07:30:00Z'),
+    run('333', 'QUEUED', '2026-11-26T02:00:00Z'),
+    { name: 'status', status: 'IN_PROGRESS', startedAt: '2026-11-26T02:00:00Z' },
+  ];
+  assert.deepEqual(hungRunIdsOf(checks, now), ['111']);
 });

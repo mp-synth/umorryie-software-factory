@@ -173,7 +173,13 @@ leaves an open PR alone, the ticket row says why: nothing to fix, waiting for
 CI, checking mergeability, a fixer already tried this exact state, or waiting
 on people, naming the checks only people turn green (a code-owner review, a
 Meticulous visual diff). The ticket's detail lists them, with what the sweep
-ignored. Turn it off
+ignored. Every PR has to end green and mergeable: when a fixer already had a
+PR's exact failing CI or conflict and the PR is unchanged, the ticket stops
+with the failing checks as its reason and goes to the arbiter, which sends a
+new fixer the check's error and cause (or a rerun of a flaky job). Review
+threads and comments a fixer already answered keep waiting for people. A
+GitHub Actions check still in progress after an hour is a hung runner: the
+sweep cancels its run and starts it again, once per run. Turn it off
 or run it now in **Settings**. **More → Fix PRs now** on an initiative runs the
 same sweep for that initiative right away; it also retries a PR state the loop
 already handled and includes tickets that need you.

@@ -74,6 +74,13 @@ questions.
   - feedback is fixed on the existing PRs.
 
   Decide every code question the way those rules point.
+- Every PR must end with green CI and no conflict. A PR whose CI still fails
+  or that still conflicts after a fixer is a RETRY, never an APPROVE. Read
+  the failing check's log (`gh pr checks <number>`, then
+  `gh run view <run-id> --log-failed`) and the branch, and say in
+  Instructions which check fails, the error, and the cause the fix must
+  address. A failure the branch doesn't cause (a runner or network error)
+  is a RETRY whose Instructions name the run id for the fixer's `## Reruns`.
 - A fixer that stopped on the owner's feedback consumed it: the next fixer
   reads only your Instructions. Repeat in them every item of the stopped
   round's `feedback.md` that is still to do, with the owner's words quoted,

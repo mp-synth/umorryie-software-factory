@@ -87,6 +87,17 @@ export function hasPrWork(w: PrWork): boolean {
   return w.conflicting || w.failingChecks.length > 0 || w.threads.length > 0 || w.comments.length > 0 || w.reviews.length > 0;
 }
 
+// What keeps the PR from merging after a fixer already had this exact state, or null when nothing does
+// (threads and comments wait for people, not for another fixer).
+export function describeUnmergeablePr(w: PrWork): string | null {
+  const parts = [
+    w.conflicting ? 'it conflicts with its base' : '',
+    w.failingChecks.length ? `CI fails (${w.failingChecks.map((c) => c.name).join(', ')})` : '',
+  ].filter(Boolean);
+  if (!parts.length) return null;
+  return `${parts.join(' and ')} on ${w.snap.url}, and the PR is unchanged since a fixer had exactly this. It can't merge like this.`;
+}
+
 export function prWorkFingerprint(w: PrWork): string {
   const state = {
     head: w.snap.headRefOid,
