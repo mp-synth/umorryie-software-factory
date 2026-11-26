@@ -13,8 +13,12 @@ export function isBot(login: string): boolean {
   return login.endsWith('[bot]');
 }
 
+export function ghEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' };
+}
+
 async function gh(cwd: string, args: string[], input?: string, timeoutMs = 60_000) {
-  return exec('gh', args, { cwd, input, timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' } });
+  return exec('gh', args, { cwd, input, timeoutMs, env: ghEnv() });
 }
 
 export async function ghUser(): Promise<string | null> {
@@ -257,10 +261,11 @@ function isSuperseded(c: CheckRun, all: CheckRun[]): boolean {
 export interface PrCheck {
   name: string;
   url: string | null;
+  workflowName?: string | null;
 }
 
 export function splitFailingChecks(checks: CheckRun[]): { failing: PrCheck[]; superseded: PrCheck[] } {
-  const toCheck = (c: CheckRun) => ({ name: checkName(c), url: checkUrl(c) });
+  const toCheck = (c: CheckRun) => ({ name: checkName(c), url: checkUrl(c), workflowName: c.workflowName ?? null });
   const bad = checks.filter(isFailing);
   return {
     failing: bad.filter((c) => !isSuperseded(c, checks)).map(toCheck),
@@ -282,8 +287,8 @@ export interface PrSnapshot {
   finishedChecks: number;
   /** GitHub Actions jobs that have shown "in progress" far longer than any CI job runs. */
   hungJobs: HungJob[];
-  comments: { author: string; body: string; createdAt: string; url: string }[];
-  reviews: { author: string; state: string; body: string; submittedAt: string }[];
+  comments: { author: string; authorIsBot?: boolean; body: string; createdAt: string; url: string }[];
+  reviews: { author: string; authorIsBot?: boolean; state: string; body: string; submittedAt: string }[];
 }
 
 export type CiState = 'green' | 'red' | 'pending' | 'none';
@@ -319,7 +324,7 @@ export function hungJobsOf(checks: CheckRun[], now: number): HungJob[] {
   return [...jobs.values()];
 }
 
-function ciOf(d: { state: string; headRefOid: string; statusCheckRollup?: CheckRun[] | null }): PrCi {
+export function ciOf(d: { state: string; headRefOid: string; statusCheckRollup?: CheckRun[] | null }): PrCi {
   const checks = (d.statusCheckRollup ?? []).filter((c) => !CHECKS_ONLY_HUMANS_TURN_GREEN.test(c.name ?? c.context ?? ''));
   const { failing, superseded } = splitFailingChecks(checks);
   const pendingChecks = checks
@@ -387,8 +392,35 @@ export async function prSnapshot(cwd: string, prNumber: number): Promise<PrSnaps
     'pr', 'view', String(prNumber), '--json',
     'number,url,state,isDraft,mergeable,baseRefName,headRefOid,statusCheckRollup,comments,reviews',
   ]);
-  if (r.code !== 0) return null;
-  const d = JSON.parse(r.stdout);
+  return r.code === 0 ? prSnapshotFrom(JSON.parse(r.stdout)) : null;
+}
+
+/** `__typename` is only there when GraphQL was asked for it; `gh pr view` leaves it out. */
+export interface AuthorNode {
+  login: string;
+  __typename?: string;
+}
+
+export interface SnapshotSource {
+  number: number;
+  url: string;
+  state: string;
+  isDraft: boolean;
+  mergeable: string;
+  baseRefName: string;
+  headRefOid: string;
+  statusCheckRollup?: CheckRun[] | null;
+  comments?: { author?: AuthorNode | null; body: string; createdAt: string; url: string }[] | null;
+  reviews?: { author?: AuthorNode | null; state: string; body: string; submittedAt: string }[] | null;
+}
+
+const authorIsBot = (author: AuthorNode) => author.__typename === 'Bot' || isBot(author.login);
+
+function authorOf(author: AuthorNode | null | undefined): { author: string; authorIsBot?: boolean } {
+  return { author: author?.login ?? 'unknown', ...(author?.__typename ? { authorIsBot: authorIsBot(author) } : {}) };
+}
+
+export function prSnapshotFrom(d: SnapshotSource): PrSnapshot {
   const notMarker = (body: string) => !body.includes(FACTORY_MARKER);
   return {
     ...ciOf(d),
@@ -398,21 +430,11 @@ export async function prSnapshot(cwd: string, prNumber: number): Promise<PrSnaps
     mergeable: d.mergeable,
     baseRefName: d.baseRefName,
     comments: (d.comments ?? [])
-      .filter((c: { body: string }) => notMarker(c.body))
-      .map((c: { author?: { login: string }; body: string; createdAt: string; url: string }) => ({
-        author: c.author?.login ?? 'unknown',
-        body: c.body,
-        createdAt: c.createdAt,
-        url: c.url,
-      })),
+      .filter((c) => notMarker(c.body))
+      .map((c) => ({ ...authorOf(c.author), body: c.body, createdAt: c.createdAt, url: c.url })),
     reviews: (d.reviews ?? [])
-      .filter((c: { body: string; state: string }) => notMarker(c.body) && (c.body.trim() || c.state === 'CHANGES_REQUESTED'))
-      .map((c: { author?: { login: string }; state: string; body: string; submittedAt: string }) => ({
-        author: c.author?.login ?? 'unknown',
-        state: c.state,
-        body: c.body,
-        submittedAt: c.submittedAt,
-      })),
+      .filter((c) => notMarker(c.body) && (c.body.trim() || c.state === 'CHANGES_REQUESTED'))
+      .map((c) => ({ ...authorOf(c.author), state: c.state, body: c.body, submittedAt: c.submittedAt })),
   };
 }
 
@@ -430,25 +452,16 @@ export interface ReviewThread {
   comments: { author: string; body: string }[];
 }
 
-interface ThreadNode {
+export interface ThreadNode {
   id: string;
   isResolved: boolean;
   isOutdated: boolean;
   path: string;
   line: number | null;
-  comments: { nodes: { databaseId: number; author?: { login: string; __typename?: string }; body: string; createdAt: string }[] };
+  comments: { nodes: { databaseId: number; author?: AuthorNode | null; body: string; createdAt: string }[] };
 }
 
-export async function unresolvedThreads(cwd: string, prNumber: number): Promise<ReviewThread[] | null> {
-  const repo = await gh(cwd, ['repo', 'view', '--json', 'owner,name']);
-  if (repo.code !== 0) return null;
-  const { owner, name } = JSON.parse(repo.stdout) as { owner: { login: string }; name: string };
-  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:50){nodes{databaseId author{login __typename} body createdAt}}}}}}}`;
-  const r = await gh(cwd, [
-    'api', 'graphql', '-f', `query=${query}`, '-F', `owner=${owner.login}`, '-F', `name=${name}`, '-F', `number=${prNumber}`,
-  ]);
-  if (r.code !== 0) return null;
-  const nodes: ThreadNode[] = JSON.parse(r.stdout)?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+export function threadsFrom(nodes: ThreadNode[]): ReviewThread[] {
   return nodes
     .filter((t) => !t.isResolved && t.comments.nodes.length > 0)
     .map((t) => {
@@ -458,7 +471,7 @@ export async function unresolvedThreads(cwd: string, prNumber: number): Promise<
         id: t.id,
         rootCommentId: all[0].databaseId,
         rootAuthor: all[0].author?.login ?? 'unknown',
-        rootIsBot: all[0].author?.__typename === 'Bot' || isBot(all[0].author?.login ?? ''),
+        rootIsBot: !!all[0].author && authorIsBot(all[0].author),
         path: t.path,
         line: t.line,
         outdated: t.isOutdated,
@@ -470,6 +483,18 @@ export async function unresolvedThreads(cwd: string, prNumber: number): Promise<
       };
     })
     .filter((t) => t.comments.length > 0);
+}
+
+export async function unresolvedThreads(cwd: string, prNumber: number): Promise<ReviewThread[] | null> {
+  const repo = await gh(cwd, ['repo', 'view', '--json', 'owner,name']);
+  if (repo.code !== 0) return null;
+  const { owner, name } = JSON.parse(repo.stdout) as { owner: { login: string }; name: string };
+  const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:50){nodes{databaseId author{login __typename} body createdAt}}}}}}}`;
+  const r = await gh(cwd, [
+    'api', 'graphql', '-f', `query=${query}`, '-F', `owner=${owner.login}`, '-F', `name=${name}`, '-F', `number=${prNumber}`,
+  ]);
+  if (r.code !== 0) return null;
+  return threadsFrom(JSON.parse(r.stdout)?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []);
 }
 
 export async function replyToThread(cwd: string, prNumber: number, rootCommentId: number, body: string): Promise<void> {
@@ -491,10 +516,16 @@ export function actionsRunId(url: string | null): string | null {
 }
 
 export async function checkConclusionOn(cwd: string, ref: string, checkName: string): Promise<string | null> {
+  return (await checkRunOn(cwd, ref, checkName))?.conclusion ?? null;
+}
+
+export async function checkRunOn(cwd: string, ref: string, checkName: string): Promise<{ conclusion: string; url: string | null } | null> {
   const r = await gh(cwd, [
-    'api', '-X', 'GET', `repos/{owner}/{repo}/commits/${ref}/check-runs`, '-f', `check_name=${checkName}`, '-q', '.check_runs[0].conclusion // ""',
+    'api', '-X', 'GET', `repos/{owner}/{repo}/commits/${ref}/check-runs`, '-f', `check_name=${checkName}`, '-q', '.check_runs[0] | [.conclusion // "", .details_url // ""] | @tsv',
   ]);
-  return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+  if (r.code !== 0 || !r.stdout.trim()) return null;
+  const [conclusion, url] = r.stdout.trim().split('\t');
+  return conclusion ? { conclusion, url: url || null } : null;
 }
 
 export async function rerunFailedOnce(cwd: string, runId: string): Promise<'rerun' | 'already-rerun' | 'failed'> {

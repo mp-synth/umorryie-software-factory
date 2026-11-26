@@ -1,0 +1,68 @@
+{
+ "data": {
+  "rateLimit": {
+   "cost": 1,
+   "remaining": 4970,
+   "limit": 5000,
+   "resetAt": "2026-11-26T20:09:39Z"
+  },
+  "search": {
+   "pageInfo": {
+    "hasNextPage": true,
+    "endCursor": "Y3Vyc29yOjI="
+   },
+   "nodes": [
+    {
+     "number": 21180,
+     "url": "https://github.com/acme/widgets/pull/21180",
+     "title": "PR 21180",
+     "state": "OPEN",
+     "isDraft": false,
+     "isCrossRepository": false,
+     "headRefName": "feature/dispatch-once",
+     "headRefOid": "64162cf70c22069136ed65f76d13956867d28a9a",
+     "baseRefName": "master",
+     "mergeable": "MERGEABLE",
+     "updatedAt": "2026-11-26T15:58:19Z",
+     "reviewDecision": "REVIEW_REQUIRED",
+     "commits": {
+      "nodes": [
+       {
+        "commit": {
+         "statusCheckRollup": {
+          "state": "PENDING"
+         }
+        }
+       }
+      ]
+     }
+    },
+    {
+     "number": 21146,
+     "url": "https://github.com/acme/widgets/pull/21146",
+     "title": "PR 21146",
+     "state": "OPEN",
+     "isDraft": true,
+     "isCrossRepository": false,
+     "headRefName": "factory/feature-1234abcd/04-apply-usage-events-together",
+     "headRefOid": "e7a3bce80f7803b644ddfba180afa6e2614ede0a",
+     "baseRefName": "factory/feature-1234abcd/03-kcl-group-handler",
+     "mergeable": "MERGEABLE",
+     "updatedAt": "2026-11-26T15:51:23Z",
+     "reviewDecision": "REVIEW_REQUIRED",
+     "commits": {
+      "nodes": [
+       {
+        "commit": {
+         "statusCheckRollup": {
+          "state": "PENDING"
+         }
+        }
+       }
+      ]
+     }
+    }
+   ]
+  }
+ }
+}

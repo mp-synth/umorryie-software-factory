@@ -51,10 +51,15 @@ export function parseAcceptance(reviewMd: string | null | undefined): Acceptance
 }
 
 export function gateResult(verdict: string | null | undefined): string | null {
-  return /^GATE:\s*(PASS|FAIL|SKIPPED)\b/i.exec(verdict ?? '')?.[1].toUpperCase() ?? null;
+  return /^GATE:\s*(PASS|FAIL|SKIPPED|WAITING)\b/i.exec(verdict ?? '')?.[1].toUpperCase() ?? null;
 }
 
-const GATE_TEXT: Record<string, string> = { PASS: 'checks passed', FAIL: 'checks failed', SKIPPED: 'no checks configured' };
+const GATE_TEXT: Record<string, string> = {
+  PASS: 'checks passed',
+  FAIL: 'checks failed',
+  SKIPPED: 'no checks configured',
+  WAITING: 'checks wait on work outside this repository',
+};
 const FINDING_HEADER = /^(?:R[\d.]+\s+)?\[?(blocker|major|minor|nit)\]?\s+(.+)$/i;
 const LOCATED_CLAIM = /^`?([^\s`]*[./:][^\s`]*)`?\s+[—–-]{1,2}\s+(.+)$/;
 const SCENARIO = /^[-*]\s*\*{0,2}failure scenario\*{0,2}:\*{0,2}\s*/i;

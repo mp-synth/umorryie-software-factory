@@ -6,7 +6,11 @@ import { section } from './plan.ts';
 export interface Route {
   ref: string;
   instructions: string;
+  /** The change needs nothing from the fixes routed to the tickets below it, so its fixer starts at once. */
+  independent: boolean;
 }
+
+const INDEPENDENT = /\(independent\)/i;
 
 export function parseRoutes(md: string): Route[] {
   const heading = /^##\s+Ticket\s+(.+?)\s*$/gim;
@@ -14,7 +18,7 @@ export function parseRoutes(md: string): Route[] {
     .map((m) => {
       const rest = md.slice(m.index! + m[0].length);
       const end = rest.search(/^##\s+/m);
-      return { ref: m[1], instructions: (end === -1 ? rest : rest.slice(0, end)).trim() };
+      return { ref: m[1].replace(INDEPENDENT, '').trim(), instructions: (end === -1 ? rest : rest.slice(0, end)).trim(), independent: INDEPENDENT.test(m[1]) };
     })
     .filter((r) => r.instructions);
 }
@@ -30,6 +34,7 @@ export function resolveTicketRef<T extends Pick<Ticket, 'key' | 'seq'>>(ref: str
 export interface TicketRoute<T> {
   ticket: T;
   instructions: string;
+  independent: boolean;
 }
 
 export function routesByTicket<T extends Pick<Ticket, 'id' | 'key' | 'seq'>>(routes: Route[], tickets: T[]): { routed: TicketRoute<T>[]; unknownRefs: string[] } {
@@ -42,8 +47,8 @@ export function routesByTicket<T extends Pick<Ticket, 'id' | 'key' | 'seq'>>(rou
       continue;
     }
     const earlier = routed.get(ticket.id);
-    if (earlier) earlier.instructions = `${earlier.instructions}\n\n${route.instructions}`;
-    else routed.set(ticket.id, { ticket, instructions: route.instructions });
+    if (earlier) Object.assign(earlier, { instructions: `${earlier.instructions}\n\n${route.instructions}`, independent: earlier.independent && route.independent });
+    else routed.set(ticket.id, { ticket, instructions: route.instructions, independent: route.independent });
   }
   return { routed: [...routed.values()], unknownRefs };
 }

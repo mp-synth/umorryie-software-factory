@@ -40,7 +40,10 @@
 - plan.json is validated (schema, bullet lengths, sizes, dependency DAG) before
   any ticket exists; an invalid plan goes back to a fresh planner with the errors.
 - The checks command comes from the project settings in the DB, so a branch can't
-  change the checks it is judged by. Checks failures never reach a reviewer.
+  change the command it is judged by. An absolute path in a checks or fix command
+  still reads that script from the referenced checkout: editing it takes effect
+  immediately for later gates, without changing the project setting or ticket
+  branch. Checks failures never reach a reviewer.
 - No secrets: Postgres listens on loopback only with trust auth, so there is no
   password to store. Agents use your existing `claude` login.
 - PRs are opened as drafts, and the factory marks them ready only with
@@ -54,8 +57,8 @@
   numbers; if the executor's text breaks those rules the ticket's own goal and
   what are used instead.
   Dependent tickets open stacked PRs, linked as a stack on GitHub.
-- `agents/code-style.md` holds the owner's code rules (no duplication, no
-  comments, no change-comments, no redundant docstrings). The executor, fixer
-  and reviewer get it with every prompt, and the reviewer treats violations as
-  major findings.
+- `agents/code-style.md` holds the owner's code rules (no duplication, comments
+  only for reasons that code cannot express, no change-comments, no redundant
+  docstrings). The executor, fixer and reviewer get it with every prompt, and
+  the reviewer treats violations as major findings.
 

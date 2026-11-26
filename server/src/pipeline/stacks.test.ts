@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TicketStatus } from '@factory/shared';
-import { findFeedbackBlocker, getStackDepth, nextStackStep, sortBottomUp, stackBase, stackChain, stackStepMessage, syncTarget } from './stacks.ts';
+import { findFeedbackBlocker, gateTarget, openPrsBelow, getStackDepth, nextStackStep, sortBottomUp, stackBase, stackChain, stackStepMessage, syncTarget } from './stacks.ts';
 
 const ticket = (branch: string, baseRef: string, prNumber: number | null, prState: string | null = 'OPEN', prHeadRef: string | null = null) => ({
   branch,
@@ -92,6 +92,12 @@ test('syncTarget moves a PR onto the base branch once everything below it merged
   assert.equal(syncTarget({ ...two, baseRef: 'main' }, [one, two], 'main'), null);
 });
 
+test('syncTarget preserves a bottom PR manually retargeted to another branch', () => {
+  const retargeted = member('01', null, 'approved', 10, 'release/1.2');
+  assert.deepEqual(syncTarget(retargeted, [retargeted], 'main'), { parent: null, target: 'release/1.2' });
+  assert.equal(gateTarget(retargeted, [retargeted], 'main'), 'release/1.2');
+});
+
 test('reports a sibling that cannot join because another PR already sits on its parent', () => {
   const step = nextStackStep([10, 13], { pr: 10, stack: { number: 99, pullRequests: [10, 11] } });
   assert.deepEqual(step, { kind: 'taken', parent: 10, top: 11 });
@@ -144,4 +150,40 @@ test('feedback waits while a ticket below has feedback to fix or is being fixed'
 test('merged tickets below never hold feedback', () => {
   const all = [stacked('a', [], 'merged'), stacked('b', ['a'])];
   assert.equal(findFeedbackBlocker(all[1], all, new Set(['a'])), null);
+});
+
+const pr = (key: string, dependsOn: string[], prNumber: number | null, status: TicketStatus = 'approved') => ({
+  key,
+  id: key,
+  dependsOn,
+  status,
+  branch: `factory/x/${key}`,
+  prHeadRef: null,
+  baseRef: dependsOn.length ? `factory/x/${dependsOn[0]}` : 'master',
+  prNumber,
+  prState: prNumber ? 'OPEN' : null,
+});
+
+test('the gate merges in the PR below, or the base branch for the bottom PR', () => {
+  const all = [pr('a', [], 1), pr('b', ['a'], 2), pr('c', ['b'], null)];
+  assert.equal(gateTarget(all[0], all, 'master'), 'master');
+  assert.equal(gateTarget(all[1], all, 'master'), 'factory/x/a');
+  const unpushed = [pr('a', [], null), pr('b', ['a'], 2)];
+  assert.equal(gateTarget(unpushed[1], unpushed, 'master'), null);
+});
+
+test('once the PR below merged, the gate merges in the base branch', () => {
+  const all = [pr('a', [], 1, 'merged'), pr('b', ['a'], 2)];
+  assert.equal(gateTarget(all[1], all, 'master'), 'master');
+});
+
+test('lists the open PRs below a ticket lowest first, skipping merged and unpushed ones', () => {
+  const all = [pr('a', [], 1, 'merged'), pr('b', ['a'], 2), pr('c', ['b'], null), pr('d', ['c'], 4), pr('e', ['d'], 5)];
+  assert.deepEqual(openPrsBelow(all[4], all).map((t) => t.key), ['b', 'd']);
+  assert.deepEqual(openPrsBelow(all[1], all), []);
+});
+
+test("an adopted PR's gate merges in the branch that PR targets, not the initiative's base", () => {
+  const adopted = { ...pr('x', [], 7), prHeadRef: 'someone/feature', baseRef: 'release/1.2' };
+  assert.equal(gateTarget(adopted, [adopted], 'master'), 'release/1.2');
 });

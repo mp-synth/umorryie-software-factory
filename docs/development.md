@@ -3,8 +3,9 @@
 `pnpm dev` runs the server without file watching. A restart does not stop the
 agents, so restart as often as you like while you change the factory, or use
 `pnpm --filter @factory/server dev:watch` to restart on every save. With the
-launchd jobs installed, the watch restarts the server for you once your changes
-typecheck; `pnpm service restart` does the same by hand: it sends the server
+launchd jobs installed, `pnpm service promote` loads your changes once they
+typecheck and the server tests pass; `pnpm service restart` restarts without
+those checks: it sends the server
 SIGTERM (and a second one if it is still waiting after 30 seconds), and launchd
 starts it again from the checkout.
 

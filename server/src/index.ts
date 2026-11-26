@@ -13,6 +13,8 @@ import { loadLoginShellPath } from './shell-env.ts';
 import { stopSignals } from './stop-signals.ts';
 import { recordDiscoveryUsageWith } from './discovery.ts';
 import { backfillUsage, recordDiscoveryUsage } from './usage.ts';
+import { emptyTrash } from './discard.ts';
+import { stampConsole, watchEventLoop } from './watchdog.ts';
 
 function stopAfterLosingTheLock(): never {
   console.error('[server] another factory server now holds this database; this one stops at once and leaves the running agents to it');
@@ -20,6 +22,7 @@ function stopAfterLosingTheLock(): never {
 }
 
 async function main(): Promise<void> {
+  stampConsole();
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? 'warn' },
     bodyLimit: 5 * 1024 * 1024,
@@ -41,7 +44,8 @@ async function main(): Promise<void> {
   await migrate();
   if (!(await loadLoginShellPath())) console.warn('[shell] could not read your login shell PATH; repo commands use the server PATH');
   startLiveServices();
-  await recoverOnStartup();
+  void emptyTrash().catch((err) => console.warn('[discard]', (err as Error).message));
+  watchEventLoop();
   await app.register(routes);
 
   const indexHtml = path.join(config.webDist, 'index.html');
@@ -53,8 +57,11 @@ async function main(): Promise<void> {
     });
   }
 
+  // Recovery owns unfinished runs and PR sweep claims. Do not expose mutating routes or start new work until
+  // it has established one consistent owner for all of them; launchd retries the whole startup on failure.
+  await recoverOnStartup();
   await app.listen({ port: config.port, host: config.host });
-  startScheduler();
+  await startScheduler();
   recordDiscoveryUsageWith(recordDiscoveryUsage);
   backfillUsage()
     .then((n) => n && console.log(`[usage] recorded ${n} agent session(s) from their transcripts`))

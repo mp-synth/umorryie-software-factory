@@ -40,8 +40,12 @@ Large repos: don't read broadly. Grep those files for "lint", "format",
 - The static checks a pull request must pass, scoped to the change so it
   finishes in a few minutes on a large repo: formatting, lint and type checks
   on what changed.
-- No tests, not even the affected ones: CI runs them on the pull request, and
-  the factory's agents run a test only after it fails there.
+- The tests of the files the change touches: its own test files and the
+  tests that mirror its changed source files. The factory runs this command
+  before the PR stacked on this one takes a fix, so CI must not fail where
+  it passed. Never the full suite or an import-graph selection that can grow
+  to it (an affected-tests plugin reaches most tests once a shared module
+  changes): that blast radius stays with CI. Diff against `$FACTORY_BASE`.
 - `$FACTORY_BASE` holds the ref the branch is diffed against (for example
   `origin/master`). Use it for every tool that takes a base:
   `--from-ref "$FACTORY_BASE" --to-ref HEAD`, `--affected-base "$FACTORY_BASE"`,

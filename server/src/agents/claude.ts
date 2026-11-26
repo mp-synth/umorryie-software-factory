@@ -24,6 +24,8 @@ export interface AgentSpec {
   loadUserSettings: boolean;
   env?: Record<string, string>;
   redact?: Redact;
+  /** Continue this earlier session (forked, so the earlier one stays as it was) instead of starting a fresh one. */
+  resumeSession?: string | null;
 }
 
 export interface AgentResult {
@@ -45,6 +47,8 @@ export interface AgentResult {
 const KILL_LINGERING_PROCESSES_AFTER_RESULT_MS = 30_000;
 // No agent tool call may run this long (Bash stops at 10 minutes), so this much silence means it hung.
 export const AGENT_STALL_MS = 20 * 60_000;
+// Agents and the tools they run yield to the server, so a machine full of agents still answers the UI and schedules work.
+const AGENT_NICE = 5;
 
 export interface AgentEvent {
   type: RunEventType;
@@ -79,6 +83,27 @@ export function resolveClaudeBin(): string | null {
     }
   }) ?? null;
   return cachedBin;
+}
+
+/**
+ * Whether an agent can work right now: the smallest model answers one word. Returns what it printed when it
+ * could not (signed out, out of allowance), or null when it answered.
+ */
+export async function probeAgent(model: string | null = null): Promise<string | null> {
+  const bin = resolveClaudeBin();
+  if (!bin) return 'claude CLI not found';
+  const r = await exec(bin, ['-p', 'Reply with the word ok.', '--model', cliModel(model ?? 'haiku'), '--output-format', 'json', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'], {
+    timeoutMs: 120_000,
+    env: { ...freshAgentEnv(), ...CONTEXT_FREE_SESSION },
+    cwd: os.tmpdir(),
+  });
+  if (r.code !== 0) return (r.stdout + r.stderr).trim().slice(0, 300) || `claude exited ${r.code}`;
+  try {
+    const result = JSON.parse(r.stdout) as { is_error?: boolean; result?: string };
+    return result.is_error ? String(result.result ?? 'error').slice(0, 300) : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function claudeVersion(): Promise<string | null> {
@@ -173,6 +198,7 @@ export function buildArgs(spec: AgentSpec): string[] {
     '--setting-sources', spec.loadUserSettings ? 'user,project,local' : 'project,local',
   ];
   if (spec.effort) args.push('--effort', spec.effort);
+  if (spec.resumeSession) args.push('--resume', spec.resumeSession, '--fork-session');
   if (spec.maxBudgetUsd) args.push('--max-budget-usd', String(spec.maxBudgetUsd));
   for (const d of spec.addDirs) args.push('--add-dir', d);
   return args;
@@ -385,7 +411,7 @@ export function startDetachedAgent(spec: AgentSpec, dir: string, sink: AgentSink
   const scratchDir = makeScratchDir();
   const pid = launchSpooled(
     dir,
-    { bin, args: buildArgs(spec), cwd: spec.cwd, timeoutMs: spec.timeoutMs, lingerAfterResultMs: KILL_LINGERING_PROCESSES_AFTER_RESULT_MS, stallMs: AGENT_STALL_MS, scratchDir, marker },
+    { bin, args: buildArgs(spec), cwd: spec.cwd, timeoutMs: spec.timeoutMs, lingerAfterResultMs: KILL_LINGERING_PROCESSES_AFTER_RESULT_MS, stallMs: AGENT_STALL_MS, scratchDir, marker, nice: AGENT_NICE },
     isolatedAgentEnv(spec, scratchDir),
   );
   return followAgent(dir, { pid, scratchDir, from: NOTHING_STORED, redact: spec.redact }, sink);

@@ -32,8 +32,10 @@ or anything else.
    even when an earlier plan round already had it; a refactor a revised ticket needs stays in it as its
    own commit. Flag any other change as `major`.
 7. `stacking.md`: how the factory will build the tickets: the ticket each
-   stacks on, the longest line, the most tickets at once, and tickets stacked
-   on one they don't need.
+   stacks on, the longest line, the most tickets at once, tickets stacked on
+   one they don't need (or chained because they touch the same files), the
+   PRs that fall outside the single GitHub stack, and tickets without a write
+   set.
 
 ## Check
 
@@ -54,6 +56,18 @@ or anything else.
   tickets built side by side that edit the same lines (one routes file, one
   registry) unless the plan says how their PRs merge. When more tickets can
   build at once than the initiative runs at a time, note it.
+- **Write sets.** Every ticket lists the files it creates or edits under
+  `touches`; flag a ticket without one, and a shared file (a README, a
+  registry, an errors module) two tickets both list without saying which one
+  owns it. Generated files are marked `generated:`.
+- **One GitHub stack.** A GitHub stack is a single line of PRs: a ticket
+  that stacks beside a sibling on the same ticket falls outside it (and
+  skips CI that runs only for the stack). Flag such forks unless the plan
+  needs them.
+- **Foundations and lockfiles.** A ticket that defines the contract others
+  build on (an API shape, a schema, error codes) is marked `foundation`. A
+  change to `uv.lock`, `pyproject.toml`, `package.json` dependencies or seed
+  data is its own ticket at the bottom of the stack.
 - **The owner's PR shape.** A helper, constant or model planned into a ticket
   that doesn't call it from production code (only later tickets or tests do)
   is a finding: it moves to the first ticket that calls it. So is a refactor

@@ -42,7 +42,9 @@ export function findFeedbackBlocker<T extends StackMember & { id: string }>(tick
 export function syncTarget<T extends StackMember & StackFields>(ticket: T, all: T[], baseBranch: string): { parent: T | null; target: string } | null {
   const parent = stackBase(ticket, all);
   if (parent) return isOpenPr(parent) ? { parent, target: remoteBranchOf(parent)! } : null;
-  return ticket.baseRef === baseBranch ? null : { parent: null, target: baseBranch };
+  if (ticket.dependsOn.length) return ticket.baseRef === baseBranch ? null : { parent: null, target: baseBranch };
+  const target = ticket.baseRef ?? baseBranch;
+  return target === baseBranch ? null : { parent: null, target };
 }
 
 export type StackStep =
@@ -104,4 +106,23 @@ export function stackStepMessage(step: StackStep, chain: number[]): string | nul
     case 'done':
       return null;
   }
+}
+
+/**
+ * The branch a ticket's gate merges in before its checks, as CI checks a PR merged with its target: the
+ * remote branch of the open PR below it, or the branch its PR targets (the base branch for a factory ticket,
+ * whatever an adopted PR targets). Null when the ticket below has no open PR yet, so there is nothing pushed
+ * to merge.
+ */
+export function gateTarget<T extends StackMember & StackFields>(ticket: T, all: T[], baseBranch: string): string | null {
+  const below = stackBase(ticket, all);
+  if (!below) return ticket.dependsOn.length ? baseBranch : ticket.baseRef ?? baseBranch;
+  return isOpenPr(below) ? remoteBranchOf(below) : null;
+}
+
+/** The tickets below this one whose PRs are open, lowest first. */
+export function openPrsBelow<T extends StackMember & StackFields>(ticket: T, all: T[]): T[] {
+  const chain: T[] = [];
+  for (let below = stackBase(ticket, all); below && chain.length < all.length; below = stackBase(below, all)) chain.unshift(below);
+  return chain.filter(isOpenPr);
 }

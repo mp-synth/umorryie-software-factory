@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { exec, git, isGitRepo, killTree, remoteUrl, withRepoLock, type ExecResult } from '../git.ts';
+import { discardDir } from '../discard.ts';
 import { repoShellEnv } from '../shell-env.ts';
 import { fetchNotionPage, notionPageId, type NotionPage } from './notion.ts';
 
@@ -462,7 +463,7 @@ class Linker {
     const dir = mirrorDirOf(this.o.mirrorsRoot, slug);
     const local = await this.localCloneOf(slug);
     return withRepoLock(dir, async () => {
-      if (standalone || !borrowedDirsExist(dir)) fs.rmSync(dir, { recursive: true, force: true });
+      if (standalone || !borrowedDirsExist(dir)) discardDir(dir);
       if (!fs.existsSync(path.join(dir, 'HEAD'))) await this.createMirror(dir, slug, local, standalone);
       const alternates = alternatesFile(dir);
       if (local && !fs.existsSync(alternates) && !fs.existsSync(path.join(dir, STANDALONE_MARK))) {
@@ -575,7 +576,7 @@ class Linker {
     return withRepoLock(mirror.dir, async () => {
       if (checkoutUsable(dir) && (await this.git(dir, ['rev-parse', 'HEAD'])).stdout.trim() === sha) return dir;
       await this.git(mirror.dir, ['worktree', 'prune']);
-      if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+      if (fs.existsSync(dir)) discardDir(dir);
       fs.mkdirSync(path.dirname(dir), { recursive: true });
       const r = await this.git(mirror.dir, ['worktree', 'add', '--quiet', '--detach', '--force', dir, sha], FETCH_TIMEOUT_MS);
       if (r.code !== 0) throw new Error(`git worktree add failed: ${gitError(r)}`);
@@ -871,7 +872,7 @@ async function removeCheckouts(dir: string, links: ResolvedLink[], mirrorsRoot: 
         if (l.sha) await git(mirror, ['update-ref', '-d', factoryRef(l.sha)]);
       });
     }
-    fs.rmSync(l.checkout, { recursive: true, force: true });
+    discardDir(l.checkout);
   }
   for (const m of mirrors) await withRepoLock(m, () => git(m, ['worktree', 'prune']));
 }
@@ -881,6 +882,6 @@ async function removeCheckouts(dir: string, links: ResolvedLink[], mirrorsRoot: 
 export function removeLinks(dir: string, mirrorsRoot: string): Promise<void> {
   return withRepoLock(dir, async () => {
     await removeCheckouts(dir, Object.values(readState(dir).links), mirrorsRoot);
-    fs.rmSync(dir, { recursive: true, force: true });
+    discardDir(dir);
   });
 }

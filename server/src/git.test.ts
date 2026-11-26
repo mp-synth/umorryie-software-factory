@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { carryTreeOnto, catchUpWith, checkOutAgain, countsTowardSize, diffLines, ensureWorktree, fetchOrigin, git, linesInNumstat, restoreHistoryFrom, untouchedWorktreeBranch, waitForEarlierCheckout, withRepoLock, worktreeChanges, worktreeState } from './git.ts';
+import { carryTreeOnto, catchUpWith, checkOutAgain, commitPaths, countsTowardSize, diffLines, ensureWorktree, exec, fetchOrigin, git, linesInNumstat, mergeInto, restoreHistoryFrom, untouchedWorktreeBranch, waitForEarlierCheckout, withRepoLock, worktreeChanges, worktreeState } from './git.ts';
 
 async function run(cwd: string, ...args: string[]): Promise<string> {
   const r = await git(cwd, args);
@@ -50,6 +50,16 @@ async function rewriteOnGithub(github: string, dir: string): Promise<void> {
 }
 
 const head = (dir: string, ref = 'HEAD') => run(dir, 'rev-parse', ref);
+
+test('exec stops waiting for inherited pipes without timing out a command that already succeeded', async () => {
+  const descendant = "setTimeout(() => {}, 3000)";
+  const command = `const { spawn } = require('node:child_process'); spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['ignore', 1, 2] }).unref()`;
+  const result = await exec(process.execPath, ['-e', command], { timeoutMs: 1000, pipeCloseTimeoutMs: 100 });
+
+  assert.equal(result.code, 0);
+  assert.equal(result.timedOut, false);
+  assert.match(result.stderr, /output pipes remained open/);
+});
 
 test('leaves a branch alone when the agent only added commits', async () => {
   const { dir, base } = await repoWithBase();
@@ -180,6 +190,40 @@ test('ignores an untracked scratch file', async () => {
   fs.writeFileSync(path.join(dir, 'scratch.txt'), 'notes\n');
 
   assert.deepEqual(worktreeChanges(before, await worktreeState(dir)), []);
+});
+
+test('commitPaths commits only explicit files and leaves pre-existing work alone', async () => {
+  const { dir, base } = await repoWithBase();
+  await commitFile(dir, 'unrelated.txt', 'original\n', 'add unrelated');
+  fs.writeFileSync(path.join(dir, 'unrelated.txt'), 'staged before autofix\n');
+  await run(dir, 'add', 'unrelated.txt');
+  fs.writeFileSync(path.join(dir, 'scratch.txt'), 'pre-existing untracked\n');
+  fs.writeFileSync(path.join(dir, 'base.txt'), 'formatted\n');
+  fs.writeFileSync(path.join(dir, 'generated.txt'), 'generated\n');
+
+  const commit = await commitPaths(dir, 'chore: apply autofix', ['base.txt', 'generated.txt']);
+
+  assert.equal(commit, await head(dir));
+  assert.deepEqual((await run(dir, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')).split('\n').sort(), ['base.txt', 'generated.txt']);
+  assert.equal(await run(dir, 'show', 'HEAD:base.txt'), 'formatted');
+  assert.equal(await run(dir, 'show', 'HEAD:generated.txt'), 'generated');
+  assert.equal(await run(dir, 'show', 'HEAD:unrelated.txt'), 'original');
+  assert.equal(fs.readFileSync(path.join(dir, 'scratch.txt'), 'utf8'), 'pre-existing untracked\n');
+  assert.match(await run(dir, 'status', '--porcelain'), /^M  unrelated\.txt\n\?\? scratch\.txt$/m);
+  assert.equal(await run(dir, 'rev-parse', 'HEAD~2'), base);
+});
+
+test('mergeInto does not commit unrelated staged work when merge never started', async () => {
+  const { dir } = await repoWithBase();
+  fs.writeFileSync(path.join(dir, 'base.txt'), 'staged before merge\n');
+  await run(dir, 'add', 'base.txt');
+  const before = await head(dir);
+
+  const merged = await mergeInto(dir, 'missing-ref');
+
+  assert.equal(merged.ok, false);
+  assert.equal(await head(dir), before);
+  assert.equal(await run(dir, 'status', '--porcelain'), 'M  base.txt');
 });
 
 test('countsTowardSize leaves out tests and lockfiles', () => {

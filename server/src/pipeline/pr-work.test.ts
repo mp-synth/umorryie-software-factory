@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PrSnapshot, ReviewThread } from '../github.ts';
-import { describeIgnored, describePrWork, hasPrWork, isBotCommand, isNoiseAuthor, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, unmergeableStop } from './pr-work.ts';
+import { type ClassifyCheck, describeIgnored, describePrWork, hasPrWork, isBotCommand, isNoiseAuthor, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, unmergeableStop } from './pr-work.ts';
 
 const snapshot = (patch: Partial<PrSnapshot> = {}): PrSnapshot => ({
   number: 7,
@@ -125,11 +125,11 @@ test('a PR a fixer could not turn green or mergeable is described by what blocks
   assert.equal(unmergeableStop(prWorkFrom(snapshot({ failingChecks: [{ name: 'lint', url: null }], pendingChecks: ['test'] }), [], fresh), rounds), null);
 });
 
-test('a PR still red after the ticket used its rounds waits for the owner instead of the arbiter', () => {
+test('a PR still red after the ticket used its rounds goes to the arbiter, not the owner', () => {
   const red = prWorkFrom(snapshot({ failingChecks: [{ name: 'test-unit', url: null }] }), [], fresh);
   const stop = unmergeableStop(red, { round: 5, maxRounds: 5 })!;
-  assert.equal(stop.askArbiter, false);
-  assert.match(stop.why, /5 rounds of fixes did not get it there, so it waits for you\.$/);
+  assert.equal(stop.askArbiter, true);
+  assert.match(stop.why, /5 rounds of fixes did not get it there, so the arbiter decides what happens next\.$/);
 });
 
 const review = (author: string, body = 'Looks mostly fine', state = 'COMMENTED') => ({ author, state, body, submittedAt: '2026-01-01T10:00:00Z' });
@@ -279,6 +279,15 @@ test('says why the sweep left a clean PR alone and what only people can move', (
   assert.match(skip.ignored[0], /approval agent/);
 });
 
+test('deduplicates a people-only check whose name contains a colon', () => {
+  const work = { ...prWorkFrom(snapshot({ finishedChecks: 1 }), [], fresh), waitingOn: ['CI: review: only people turn it green'] };
+  const skip = sweepSkip(work, {
+    alreadyHandled: false,
+    humanChecks: [{ name: 'CI: review', state: 'pending', description: 'needs review from @growth', url: null }],
+  });
+  assert.deepEqual(skip.waitingOn, ['CI: review: needs review from @growth']);
+});
+
 test('tells CI still running, unknown mergeability and an already-tried state apart', () => {
   const failing = [{ name: 'lint', url: null }];
   assert.equal(sweepSkip(prWorkFrom(snapshot({ pendingChecks: ['test'] }), [], fresh), noHumans).reason, 'ci-running');
@@ -296,4 +305,37 @@ test('treats a skip as unchanged until the PR or its reasons change', () => {
   assert.equal(sameSweepSkip(a, { ...a }), true);
   assert.equal(sameSweepSkip(a, { ...a, headSha: 'def' }), false);
   assert.equal(sameSweepSkip(a, { ...a, waitingOn: ['Code review: needs review from @growth'] }), false);
+});
+
+test('a bot’s top-level comment or review body and any approval name no work', () => {
+  const snap = snapshot({
+    comments: [{ author: 'appsec-bot', body: 'Scan finished.', createdAt: '2026-01-01T10:00:00Z', url: 'https://x/1', authorIsBot: true }],
+    reviews: [
+      { author: 'alice', state: 'APPROVED', body: 'Looks good to me', submittedAt: '2026-01-01T10:00:00Z' },
+      { author: 'cursor', state: 'COMMENTED', body: 'Two notes', submittedAt: '2026-01-01T10:00:00Z', authorIsBot: true },
+      { author: 'bob', state: 'COMMENTED', body: 'Why this name?', submittedAt: '2026-01-01T10:00:00Z' },
+    ],
+  });
+  const work = prWorkFrom(snap, [], fresh);
+  assert.equal(work.comments.length, 0);
+  assert.deepEqual(work.reviews.map((r) => r.author), ['bob']);
+  assert.equal(work.ignored.length, 3);
+});
+
+test('the check policy keeps ignored and people-only checks away from a fixer', () => {
+  const snap = snapshot({ failingChecks: [{ name: 'lint', url: null }, { name: 'Cursor Bugbot', url: null }, { name: 'OpenAPI breaking changes', url: null }] });
+  const classify = (c: { name: string }) =>
+    c.name === 'lint' ? { class: 'must-fix' as const, note: null, needsLog: false } : c.name === 'Cursor Bugbot' ? { class: 'ignore' as const, note: null, needsLog: false } : { class: 'people-only' as const, note: 'a breaking-change approval', needsLog: false };
+  const work = prWorkFrom(snap, [], { ...fresh, classify });
+  assert.deepEqual(work.failingChecks.map((c) => c.name), ['lint']);
+  assert.deepEqual(work.waitingOn, ['OpenAPI breaking changes: a breaking-change approval']);
+  assert.ok(work.ignored.some((line) => line.includes('Cursor Bugbot')));
+});
+
+test('a check whose policy rule depends on its log counts as work until the log is read', () => {
+  const snap = snapshot({ failingChecks: [{ name: 'tests', url: null }] });
+  const classify: ClassifyCheck = () => ({ class: 'ignore', note: null, needsLog: true });
+  const work = prWorkFrom(snap, [], { lastFixAt: null, noiseCommentAuthors: [], classify });
+  assert.deepEqual(work.failingChecks.map((c) => c.name), ['tests']);
+  assert.deepEqual(work.ignored, []);
 });

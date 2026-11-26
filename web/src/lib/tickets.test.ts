@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { Run, Ticket } from '@factory/shared';
-import { dependenciesOf, primaryTicketAction, ticketFilterOf } from './tickets';
+import type { PrSweepSkip, Run, Ticket } from '@factory/shared';
+import { dependenciesOf, primaryTicketAction, sweepSkipLabel, ticketFilterOf } from './tickets';
 
 const ticket = (key: string, status: Ticket['status'], extra: Partial<Ticket> = {}) => ({ id: key, key, seq: 1, status, dependsOn: [], branch: null, ...extra }) as Ticket;
 
@@ -21,6 +21,7 @@ describe('primaryTicketAction', () => {
     assert.deepEqual(next(ticket('a', 'todo')), { kind: 'act', label: 'Build', action: 'run' });
     assert.deepEqual(next(ticket('a', 'built')), { kind: 'act', label: 'Review', action: 'review' });
     assert.deepEqual(next(ticket('a', 'blocked', { branch: 'b', gateStatus: 'fail' })), { kind: 'act', label: 'Re-run checks', action: 'check' });
+    assert.deepEqual(next(ticket('a', 'blocked', { branch: 'b', gateStatus: 'waiting' })), { kind: 'act', label: 'Re-run checks', action: 'check' });
     assert.deepEqual(next(ticket('a', 'blocked', { branch: 'b' })), { kind: 'act', label: 'Fix', action: 'fix' });
     assert.deepEqual(next(ticket('a', 'blocked')), { kind: 'act', label: 'Retry build', action: 'run' });
     assert.equal(next(ticket('a', 'approved')), null);
@@ -48,6 +49,15 @@ describe('dependenciesOf', () => {
     assert.deepEqual(
       waitingOn.map((t) => t.key),
       ['c'],
+    );
+  });
+});
+
+describe('sweepSkipLabel', () => {
+  it('does not describe external work as waiting on people', () => {
+    assert.equal(
+      sweepSkipLabel({ reason: 'waiting-on', waitingOn: ['API contracts: waits for a backend release'] } as PrSweepSkip),
+      'waiting on people or external work',
     );
   });
 });

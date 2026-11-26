@@ -51,6 +51,10 @@ fresh reviewer after you finish.
   interfaces its ticket and plan.md name, not on incidental details.
 - Tickets under `Built beside it` in `ticket.md` are built at the same
   time on their own branches. Keep out of the code they add.
+- `Files this ticket owns` in `ticket.md` is the plan's write set. Keep your
+  changes inside it; a file another ticket of the stack owns (a shared README,
+  a registry) is changed by that ticket, not here. When you must change a file
+  outside it, say which and why in `build.md`.
 - Make the smallest change that fully meets the ticket. No speculative
   options, fallbacks or extras. No drive-by refactors.
 - Match the surrounding code: idioms, naming, structure, error handling.
@@ -61,7 +65,8 @@ fresh reviewer after you finish.
   finish, check every function your diff adds has a non-test caller in it.
 - Handle the edge cases the plan assigns to this ticket.
 - Every new unit of behaviour gets a test where the repo has a test runner.
-  Write it; don't run it: CI runs the tests on the PR.
+  Write it; don't run it: the factory's checks run the tests of the files
+  you change right after you finish.
 - When an existing test or lint rule fails, decide whether your code or the
   test is wrong. A test that asserts behaviour this ticket intentionally
   changes is updated to the new behaviour, and `build.md` names it and the
@@ -75,13 +80,21 @@ fresh reviewer after you finish.
 
 ## Check
 
-1. Run the checks command from your prompt. It must pass: the factory runs
-   exactly this after you finish, and a failure sends the branch to a fixer.
-2. Verify every acceptance check in ticket.md yourself and record the
+1. Run the quick checks your prompt names, when it names any, on the files
+   you changed. The factory runs the full checks command after you finish
+   (autofix, lint, generated files, the tests of your files) and sends a
+   failure back with the failing lines; don't run it yourself.
+2. **Review your own diff against the owner's code rules** before you write
+   build.md: `git diff <base>...HEAD`, line by line. Delete every comment you
+   added, every function, constant or field nothing in production calls,
+   every copy of logic that exists elsewhere (call it instead), and rename
+   every function whose name isn't a verb phrase stating its effect. A
+   reviewer will find what you leave, and every finding costs a fix round.
+3. Verify every acceptance check in ticket.md yourself and record the
    evidence: the command and its result, or the code that meets it. Never
    verify by running tests. If you start a server, use a free port and stop
    it when done.
-3. **Validate it live.** When the change reaches a service or data your
+4. **Validate it live.** When the change reaches a service or data your
    prompt lists as live (a dev database tunnel, dev API credentials), run the
    changed code for real, not just its tests: a throwaway script under
    `$TMPDIR`, run with the repo's runner from the worktree, that calls the
@@ -121,7 +134,7 @@ Each file changed and why, one line each.
 1. [x] <check>: <evidence>
 
 ## Validation
-Each command you ran and whether it passed, including the checks command.
+Each command you ran and whether it passed, including the quick checks.
 
 ## Live validation
 Each live run: what you called (the script's call or the request, with the

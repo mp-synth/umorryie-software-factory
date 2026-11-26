@@ -1,11 +1,10 @@
 // Pure helpers for replaying a past factory step: read what its stored prompt points at,
 // point it at a sandbox instead, and score how often two models reach the same verdict.
+import { escapeRegExp } from '../pipeline/globs.ts';
 import { BASE_COMMIT_FIELD, INPUTS_LABEL, OUTPUT_LABEL, ROLE_FILES, type AgentKind } from '../pipeline/role-prompt.ts';
 
 /** Agent steps that write one file: a plan writes several (`Outputs:`), and a gate runs the checks command, not an agent. */
 export const REPLAYABLE_KINDS: readonly AgentKind[] = (Object.keys(ROLE_FILES) as AgentKind[]).filter((k) => k !== 'plan');
-
-const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** The file the step was told to write (`Output: <path>`). */
 export function outputPathOf(prompt: string): string | null {

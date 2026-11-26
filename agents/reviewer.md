@@ -36,7 +36,10 @@ scratch scripts under `$TMPDIR` are fine.
    (the fixer's triage, including rebuttals marked INVALID).
 6. `checks.md`: the checks command already ran on this commit; don't re-run
    it. Run no tests (CI runs them on the PR): confirm a finding by tracing the
-   code.
+   code. `rules-report.md`, when listed, is a script's list of candidates
+   for the owner's code rules (functions nothing calls, blocks that repeat
+   code elsewhere): check each in the code and report the real ones; it can
+   be wrong about framework-registered symbols.
 
 ## Look for, in this order
 
@@ -74,8 +77,9 @@ scratch scripts under `$TMPDIR` are fine.
    `ticket.md` or the plan put it here. The fix removes it from this branch
    and names the ticket that calls it first.
 8. **The owner's code rules** (below). Added or changed lines that duplicate
-   logic, add comments, comment on the change itself, mention Linear, or add
-   redundant docstrings are `major`: the owner won't merge them. So are, each
+   logic, add comments that restate the code or whose reason can be expressed
+   in code, comment on the change itself, mention Linear, or add redundant
+   docstrings are `major`: the owner won't merge them. So are, each
    with the concrete fix: a function name that doesn't say with a verb what it
    does (give the new name, e.g. `get_oldest_workspace` for
    `primary_workspace`), a function that takes a callable (name the

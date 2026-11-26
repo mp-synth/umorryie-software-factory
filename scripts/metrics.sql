@@ -109,4 +109,56 @@ where kind = 'fix' and status = 'succeeded'
 group by role_sha, model
 order by max(queued_at) desc;
 
+\echo
+\echo '== Gate escapes: the gate passed on a head whose CI then failed (needs migration 017) =='
+select (to_regclass('ci_results') is not null)::int as has_ci_results \gset
+\if :has_ci_results
+with gated_heads as (
+  select distinct g.ticket_id, g.head_sha
+  from runs g
+  join initiatives i on i.id = g.initiative_id
+  join projects p on p.id = i.project_id
+  where g.kind = 'gate' and g.verdict = 'GATE: PASS' and g.head_sha is not null
+    and g.prompt is not distinct from p.checks_command
+)
+select count(*) filter (where c.state = 'red') as escapes, count(*) as gated_heads_with_ci,
+  round(100.0 * count(*) filter (where c.state = 'red') / nullif(count(*), 0), 1) as escape_pct
+from gated_heads g join ci_results c on c.ticket_id = g.ticket_id and c.head_sha = g.head_sha;
+
+\echo
+\echo '== Escaped checks, most frequent first (needs migration 017) =='
+with gated_heads as (
+  select distinct g.ticket_id, g.head_sha
+  from runs g
+  join initiatives i on i.id = g.initiative_id
+  join projects p on p.id = i.project_id
+  where g.kind = 'gate' and g.verdict = 'GATE: PASS' and g.head_sha is not null
+    and g.prompt is not distinct from p.checks_command
+)
+select f.check_name, count(*) as escapes
+from gated_heads g join ci_results c on c.ticket_id = g.ticket_id and c.head_sha = g.head_sha and c.state = 'red'
+cross join lateral jsonb_array_elements_text(c.failing) as f(check_name)
+group by 1 order by 2 desc limit 15;
+\else
+\echo 'Migration 017 is not applied; gate escape metrics are unavailable.'
+\endif
+
+\echo
+\echo '== Gate outcomes, with the gates that could not finish (INFRA) and reused results =='
+select coalesce(verdict, status) as gate, count(*) as runs,
+  count(*) filter (where output_md like '%Reused the passing result%') as reused,
+  round((percentile_cont(0.5) within group (order by extract(epoch from (finished_at - started_at))))::numeric) as p50_seconds
+from runs where kind = 'gate' and finished_at is not null
+group by 1 order by 2 desc;
+
+\echo
+\echo '== Fix runs started after the ticket was first approved =='
+with first_approval as (
+  select ticket_id, min(finished_at) as at from runs
+  where kind = 'review' and status = 'succeeded' and verdict like 'VERDICT: APPROVE%' group by 1
+)
+select count(*) as fix_runs, count(*) filter (where r.queued_at > a.at) as after_approval
+from runs r left join first_approval a on a.ticket_id = r.ticket_id
+where r.kind = 'fix';
+
 rollback;

@@ -1,14 +1,16 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ACTIVE_TICKET_STATUSES, DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, SETTLED_TICKET_STATUSES, SIDE_RUN_KINDS, isSideRun, type AppSettings, type CapacityStatus, type Initiative, type MachinePressure, type Message, type Project, type Rule, type RuleRole, type RuleScope, type Run, type RunKind, type Ticket } from '@factory/shared';
+import { ACTIVE_TICKET_STATUSES, DEFAULT_INITIATIVE_SETTINGS, PR_SWEEP_CLAIM_MINUTES, PR_SWEEP_INTERVAL_MINUTES, SETTLED_TICKET_STATUSES, SIDE_RUN_KINDS, isSideRun, type AppSettings, type CapacityStatus, type GatePurpose, type Initiative, type MachinePressure, type Message, type PrSweepSkip, type Project, type Rule, type RuleRole, type RuleScope, type Run, type RunKind, type Ticket, type TicketStatus } from '@factory/shared';
 import { agentEnvironment, type AgentEnvironment, type Redact } from '../agent-env.ts';
 import { agentLiveServicesNote } from '../live-services.ts';
+import { discardDir } from '../discard.ts';
 import { ROOT, config } from '../config.ts';
 import { sql } from '../db.ts';
 import { emitChange } from '../events.ts';
 import { repoShellEnv } from '../shell-env.ts';
 import { recordRunUsage } from '../usage.ts';
-import { AGENT_STALL_MS, attachAgent, claudeVersion, isProductionVariable, startDetachedAgent, type AgentResult, type AgentSink, type AgentSpec, type DetachedAgentHandle } from '../agents/claude.ts';
+import { AGENT_STALL_MS, attachAgent, claudeVersion, isProductionVariable, probeAgent, startDetachedAgent, type AgentResult, type AgentSink, type AgentSpec, type DetachedAgentHandle } from '../agents/claude.ts';
 import { LeftRunning, abandonSpool, followCommand, launchSpooled, removeSpool, spoolFate, wasLaunched, type CommandOutcome, type SpoolHandle, type SpoolOffsets } from '../agents/spool.ts';
 import * as gitx from '../git.ts';
 import * as gh from '../github.ts';
@@ -45,7 +47,7 @@ import {
   writePlanMd,
   writeTicket,
 } from './files.ts';
-import { dependencyReady, hasOpenPr, reviewWaitsFor } from './readiness.ts';
+import { dependencyReady, hasOpenPr, passedGateAt, reviewWaitsFor } from './readiness.ts';
 import { removeLinks, resolveLinks } from './links.ts';
 import { mergedTicketCleanups } from './cleanup.ts';
 import { gateBody } from './gate-output.ts';
@@ -75,7 +77,7 @@ import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, render
 import { sizeNote } from './size.ts';
 import { malformedVerdictReason, outputFailure, parseVerdict } from './verdict.ts';
 import { mergeNewestFirst, parseReplies, parseRerunIds, planReplies, renderCommentReply, type PrItems } from './pr-replies.ts';
-import { describeIgnored, describePrWork, hasPrWork, prWorkFingerprint, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, unmergeableStop, type PrWork } from './pr-work.ts';
+import { describeIgnored, describePrWork, hasPrWork, prWorkFrom, reviewAfterFix, sameSweepSkip, sweepSkip, unmergeableStop, type ClassifyCheck, type PrWork } from './pr-work.ts';
 import { writeRepoGuidance } from './repo-guidance.ts';
 import { BASE_COMMIT_FIELD, MECHANICAL_FIXER_FILE, DISALLOWED_TOOLS, EFFORT, TOOLS, header, rolePrompt, rolePromptSha, ruleFile, type AgentKind } from './role-prompt.ts';
 import { hasHumanPrItems, isSteering, oneLine, parseProposedRules, renderTimeline, retroSummary, withLearnedRule, withoutLearnedRule } from './retro.ts';
@@ -83,9 +85,18 @@ import { parseDrops, parseRestacks, parseRoutes, renderTicketsForSteering, route
 import { HELD_REASON, INTERRUPTED_REASON, ORPHAN_INITIATIVE_STATUSES, ORPHAN_REASON, orphanRunKind, restingInitiativeStatus, restingTicketStatus, shouldResumeInterrupted, startupFate, type StartupFate } from './recovery.ts';
 import { activeLanes, pickRunsToStart, type SchedulableRun } from './scheduler.ts';
 import { GUARANTEED_AGENTS_PER_INITIATIVE, agentCeiling, agentLimit, localWorkSlots, mostAgentsWithGuarantees, pressureOf, sampleMachine, thisMachine } from './capacity.ts';
-import { fairLimiter } from './limiter.ts';
-import { findFeedbackBlocker, nextStackStep, sortBottomUp, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
-import { autoMergeStep, MERGE_QUEUE_ATTEMPTS_PER_HEAD, possibleDraftPrs } from './auto-merge.ts';
+import { fairLimiter, slotPool } from './limiter.ts';
+import { invalidateRemembered, Remembered } from './memory.ts';
+import { periodic } from './periodic.ts';
+import { classifyCheck } from './check-policy.ts';
+import { decideSweep, sweepDecisionFingerprint } from './sweep-decision.ts';
+import { failedJobLog, failedJobLogs, ghRunner, githubBudget, openPrsLight, prDetails, prStates, repoOf, type LightPr } from '../pr-view.ts';
+import { agentUnavailable, pauseReason } from './agent-health.ts';
+import { batteryHold, keepAwake, readBattery } from '../machine-state.ts';
+import { addedDefinitions, checkOwnerRules, renderOwnerRules } from './owner-rules.ts';
+import { escapeRegExp, globPattern } from './globs.ts';
+import { findFeedbackBlocker, gateTarget, nextStackStep, openPrsBelow, sortBottomUp, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
+import { autoMergeStep, landingTops, MERGE_QUEUE_ATTEMPTS_PER_HEAD, possibleDraftPrs } from './auto-merge.ts';
 
 export class PipelineError extends Error {
   constructor(message: string, public status = 409) {
@@ -197,6 +208,23 @@ async function unverifiedFix(ticketId: string): Promise<Run | null> {
   return fixesAwaitingVerification(await lastRuns(ticketId))[0] ?? null;
 }
 
+/**
+ * Fix rounds on this ticket since it last moved forward: its build, an approving review, or the owner saying
+ * something new on this ticket. Every trigger counts (review, checks, CI, conflicts, the sweep), so `maxRounds` bounds the
+ * attempts at one problem, not the ticket's lifetime.
+ */
+async function failedRoundsInARow(ticketId: string): Promise<number> {
+  const [{ n }] = await sql<{ n: number }[]>`
+    select count(*)::int as n from runs f
+    where f.ticket_id = ${ticketId} and f.kind = 'fix' and f.status in ('succeeded', 'failed')
+      and f.queued_at > greatest(
+        (select max(queued_at) from runs where ticket_id = ${ticketId} and kind = 'execute' and status = 'succeeded'),
+        (select max(finished_at) from runs where ticket_id = ${ticketId} and kind = 'review' and status = 'succeeded' and ${repo.isVerdict(['VERDICT:APPROVE'])}),
+        (select max(m.created_at) from messages m where m.ticket_id = ${ticketId} and m.author = 'human'),
+        'epoch'::timestamptz)`;
+  return n;
+}
+
 async function diffBase(project: Project, ticket: Ticket): Promise<string> {
   const base = ticket.baseRef ?? 'main';
   if (base.startsWith('factory/')) return base;
@@ -235,6 +263,7 @@ export async function enqueue(opts: {
   trigger: 'auto' | 'manual';
   question?: string;
   replan?: boolean;
+  purpose?: GateMarker;
 }): Promise<Run> {
   const init = await mustInitiative(opts.initiativeId);
   const s = repo.initiativeSettings(init);
@@ -282,7 +311,7 @@ export async function enqueue(opts: {
     switch (opts.kind) {
       case 'execute': {
         const all = await repo.listTickets(init.id);
-        const waiting = t.dependsOn
+        const waiting = startsAfter(init, t)
           .map((k) => all.find((x) => x.key === k))
           .filter((d) => d && !['approved', 'merged'].includes(d.status) && !d.branch);
         if (waiting.length) {
@@ -340,8 +369,10 @@ export async function enqueue(opts: {
       round,
       trigger: opts.trigger,
       model,
-      effort: opts.kind === 'gate' ? null : EFFORT[opts.kind as Exclude<RunKind, 'gate'>],
+      effort: opts.kind === 'gate' ? null : s.efforts[opts.kind as AgentKind] ?? EFFORT[opts.kind as AgentKind],
       prompt: opts.question ?? null,
+      gatePurpose: opts.purpose?.purpose ?? null,
+      gateRestingStatus: opts.purpose?.status ?? null,
     })
     .catch((err) => {
       if (isSecondActiveAgent(err)) throw new PipelineError(`another agent is already active for this ${ticketId ? 'ticket' : 'plan'}`);
@@ -358,12 +389,13 @@ function isSecondActiveAgent(err: unknown): boolean {
 
 const localWork = fairLimiter(() => localWorkSlots(thisMachine()));
 
-function heavyLocalWork<T>(run: Run, what: string, work: () => Promise<T>): Promise<T> {
+// Checks and setups use several cores each (test workers, installs), so they take that much of the machine.
+function heavyLocalWork<T>(run: Run, what: string, work: () => Promise<T>, weight = 1): Promise<T> {
   const waiting = () =>
-    void log(run, `Waiting to ${what}: this machine runs ${localWorkSlots(thisMachine())} setups, checks and checkouts at once, shared between the initiatives.`).catch((err) =>
+    void log(run, `Waiting to ${what}: this machine shares ${localWorkSlots(thisMachine())} cores between setups, checks and checkouts of every initiative.`).catch((err) =>
       console.warn('[local-work]', err.message),
     );
-  return localWork.run(run.initiativeId, work, waiting);
+  return localWork.run(run.initiativeId, work, waiting, weight);
 }
 
 async function agentPool(app: AppSettings, lanes: number) {
@@ -382,6 +414,7 @@ export async function capacityStatus(): Promise<CapacityStatus> {
   const lanes = activeLanes(unfinished);
   const pool = await agentPool(app, lanes);
   return {
+    paused: await newAgentsHold(),
     autoScale: app.autoScaleAgents,
     limit: pool.limit,
     ceiling: pool.ceiling,
@@ -394,6 +427,43 @@ export async function capacityStatus(): Promise<CapacityStatus> {
     loadPerCore: pool.sample.loadPerCore,
     pressure: pool.pressure,
   };
+}
+
+let agentPause: string | null = null;
+let reportedHold: string | null = null;
+
+async function batteryPause(): Promise<string | null> {
+  return batteryHold(await readBattery(), (await repo.getAppSettings()).minBatteryPercent);
+}
+
+/** Why no new step starts now: Claude signed out or out of allowance, or the Mac low on battery. */
+async function newAgentsHold(): Promise<string | null> {
+  if (agentPause) return agentPause;
+  return batteryPause();
+}
+
+// The model whose allowance ran out: a probe with a smaller one would answer while every real step still fails.
+let pausedModel: string | null = null;
+
+async function pauseAgents(reason: string, model: string | null): Promise<void> {
+  if (agentPause === reason) return;
+  agentPause = reason;
+  pausedModel = model;
+  await repo.remember('agent-pause', reason);
+  await repo.remember('agent-pause-model', model);
+  console.warn(`[scheduler] new agents wait: ${reason}`);
+}
+
+async function resumeAgentsWhenAvailable(): Promise<void> {
+  if (!agentPause) return;
+  const still = await probeAgent(pausedModel);
+  if (still) return;
+  agentPause = null;
+  pausedModel = null;
+  await repo.remember('agent-pause', null);
+  await repo.remember('agent-pause-model', null);
+  console.log('[scheduler] an agent can start again; resuming');
+  kick();
 }
 
 let reportedPressure: MachinePressure = 'ok';
@@ -410,13 +480,15 @@ function reportPressureChange(pressure: MachinePressure, limit: number, loadPerC
 
 let ticking = false;
 let tickAgain = false;
+// Nothing starts until startup recovery has followed or put back the runs an earlier server left.
+let scheduling = false;
 
 export function kick(): void {
   setImmediate(() => void tick());
 }
 
 async function tick(): Promise<void> {
-  if (serverExit) return;
+  if (serverExit || !scheduling) return;
   if (ticking) {
     tickAgain = true;
     return;
@@ -435,7 +507,16 @@ async function tick(): Promise<void> {
     const guarantee = app.autoScaleAgents
       ? { agentsPerInitiative: GUARANTEED_AGENTS_PER_INITIATIVE, slots: Math.max(mostAgentsWithGuarantees(pool.ceiling) - running.length, 0) }
       : undefined;
-    const candidates = queued.map((q) => ({ ...q, concurrency: repo.initiativeSettings({ settings: q.settings }).concurrency }));
+    const battery = await batteryPause();
+    const hold = agentPause ?? battery;
+    if (hold !== reportedHold) {
+      reportedHold = hold;
+      if (hold) console.warn(`[scheduler] holding new agents: ${hold}`);
+    }
+    // Gates do not need Claude, so an account outage must not stop them. They are heavy local work, so a low
+    // battery stops them together with agents.
+    const startable = hold ? (battery ? [] : queued.filter((q) => q.kind === 'gate')) : queued;
+    const candidates = startable.map((q) => ({ ...q, concurrency: repo.initiativeSettings({ settings: q.settings }).concurrency }));
     for (const q of pickRunsToStart(candidates, running, slots, guarantee)) {
       const [claimed] = await sql<Run[]>`
         update runs set status = 'running', started_at = now() where id = ${q.id} and status = 'queued' returning *`;
@@ -454,21 +535,43 @@ async function tick(): Promise<void> {
   }
 }
 
-export function startScheduler(): void {
+export async function startScheduler(): Promise<void> {
+  agentPause = await repo.recall('agent-pause');
+  pausedModel = await repo.recall('agent-pause-model');
+  scheduling = true;
   setInterval(() => void tick(), 1500).unref();
-  setInterval(() => void autoSyncPrs(), 5 * 60_000).unref();
-  setInterval(() => void pollRunningCi(), CI_POLL_MS).unref();
-  const sweepInBackground = async () => {
-    try {
+  periodic('pr-sync', 5 * 60_000, autoSyncPrs);
+  periodic('ci-poll', CI_POLL_MS, pollRunningCi);
+  periodic(
+    'pr-sweep',
+    PR_SWEEP_INTERVAL_MINUTES * 60_000,
+    async () => {
       if ((await repo.getAppSettings()).sweepOpenPrs) await sweepOpenPrs();
-    } catch (err) {
-      console.error('[pr-sweep]', err);
-    }
-  };
-  setInterval(sweepInBackground, PR_SWEEP_INTERVAL_MINUTES * 60_000).unref();
-  setTimeout(sweepInBackground, 60_000).unref();
-  setInterval(() => void watchBases(), BASE_WATCH_MS).unref();
+    },
+    { firstAfterMs: 60_000 },
+  );
+  periodic('base-watch', BASE_WATCH_MS, watchBases);
+  periodic('agent-probe', AGENT_PROBE_MS, resumeAgentsWhenAvailable);
+  periodic('keep-awake', 15_000, holdMacAwake, { firstAfterMs: 0 });
+  periodic(
+    'forget-finished',
+    6 * 60 * 60_000,
+    async () => {
+      if (await repo.forgetFinishedTickets()) invalidateRemembered();
+    },
+    { firstAfterMs: 10 * 60_000 },
+  );
+  void retryInfraGates().catch((err) => console.warn('[gate-retry]', (err as Error).message));
   kick();
+}
+
+const AGENT_PROBE_MS = 3 * 60_000;
+
+async function holdMacAwake(): Promise<void> {
+  // Queued steps count only when they can start: a paused pool or a low battery is no reason to stay up.
+  const startable = async () => !(await newAgentsHold()) && (await sql`select 1 from runs where status in ('queued','running') limit 1`).length > 0;
+  const wanted = (await repo.getAppSettings()).keepAwake && (inFlight.size > 0 || (await startable()));
+  keepAwake(wanted);
 }
 
 const STEPS: Record<RunKind, (run: Run) => Promise<void>> = {
@@ -532,11 +635,15 @@ async function wrapUp(run: Run): Promise<void> {
   await syncIfReviewHeld(run).catch((err) => console.warn('[held-reviews]', err.message));
 }
 
-// A ticket whose review was held during its own run could not be synced then (it was busy).
+// A sync that ran while this ticket was busy held off: its own held review or PR, and the PRs stacked on it,
+// get another sync now that it is idle.
 async function syncIfReviewHeld(run: Run): Promise<void> {
   if (!run.ticketId || isSideRun(run.kind)) return;
   const [init, ticket] = await Promise.all([repo.getInitiative(run.initiativeId), repo.getTicket(run.ticketId)]);
-  if (init && ticket && fs.existsSync(heldReviewMarker(init, ticket))) void syncStack(init.id);
+  if (!init || !ticket) return;
+  const held = [heldReviewMarker(init, ticket), heldPublishMarker(init, ticket)].some((m) => fs.existsSync(m));
+  const all = held || !hasOpenPr(ticket) ? [] : await repo.listTickets(init.id);
+  if (held || all.some((t) => hasOpenPr(t) && stackBase(t, all)?.id === ticket.id)) void syncStack(init.id);
 }
 
 async function supervise(run: Run, work: () => Promise<void>): Promise<void> {
@@ -579,7 +686,7 @@ async function agentMessage(run: Pick<Run, 'initiativeId' | 'ticketId' | 'id'>, 
   await repo.addMessage({ initiativeId: run.initiativeId, ticketId: run.ticketId, runId: run.id, author: 'agent', kind, body });
 }
 
-type StoppedStep = Pick<Run, 'initiativeId' | 'ticketId' | 'kind'> & { id?: string };
+type StoppedStep = Pick<Run, 'initiativeId' | 'ticketId' | 'kind'> & Partial<Pick<Run, 'id' | 'gatePurpose' | 'gateRestingStatus'>>;
 
 const STEPS_THAT_LEAVE_STATUS_ALONE: Partial<Record<RunKind, string>> = {
   ask: 'The advisor could not answer',
@@ -604,7 +711,7 @@ async function revertAfterStop(run: StoppedStep, reason: string | null, failed =
   }
   const t = await repo.getTicket(run.ticketId);
   if (!t) return;
-  const status = restingTicketStatus(run.kind, !!t.branch, failed);
+  const status = gateMarkerOf(run)?.status || restingTicketStatus(run.kind, !!t.branch, failed);
   await repo.updateTicket(t.id, { status, blockedReason: status === 'blocked' ? reason ?? 'Canceled before it finished.' : null });
   if (reason) await systemMessage(run, `${ticketLabel(t)}: ${reason}`);
   await refreshInitiativeStatus(run.initiativeId);
@@ -637,7 +744,7 @@ function environmentNote(environment: AgentEnvironment, referenceDirs: string[])
 export function projectAgentSpec(
   project: Project,
   app: AppSettings,
-  opts: { kind: AgentKind; cwd: string; prompt: string; model: string; effort?: string | null; roleFile?: string; addDirs: string[]; env?: Record<string, string>; projectRules?: Rule[] },
+  opts: { kind: AgentKind; cwd: string; prompt: string; model: string; effort?: string | null; roleFile?: string; addDirs: string[]; env?: Record<string, string>; projectRules?: Rule[]; resumeSession?: string | null },
 ): AgentSpec {
   const environment = agentEnvironment(project.repoPath, project.copyFiles ?? []);
   const referenceDirs = (project.referenceDirs ?? []).filter((d) => fs.existsSync(d));
@@ -655,6 +762,7 @@ export function projectAgentSpec(
     loadUserSettings: app.loadUserSettings,
     env: { ...environment.vars, ...opts.env },
     redact: environment.redact,
+    resumeSession: opts.resumeSession ?? null,
   };
 }
 
@@ -815,6 +923,7 @@ async function runAgent<K extends AgentKind>(
     model?: string;
     roleFile?: string;
     env?: Record<string, string>;
+    resumeSession?: string | null;
   },
   state: StepStates[K],
 ): Promise<void> {
@@ -841,6 +950,7 @@ async function runAgent<K extends AgentKind>(
     addDirs: [opts.runDir, initiativeDir(init)],
     env: opts.env,
     projectRules: await repo.acceptedProjectRules(project.id),
+    resumeSession: opts.resumeSession ?? null,
   });
   const ticket = TICKET_DIFF_STEPS.includes(opts.kind) && run.ticketId ? await repo.getTicket(run.ticketId) : null;
   const baseSha = ticket ? await gitx.revParse(opts.cwd, await diffBase(project, ticket)) : null;
@@ -907,6 +1017,12 @@ async function stoppedEarly(run: Run, step: StepResult, outputName: string): Pro
     await revertAfterStop(run, `${run.kind} agent timed out`);
     return true;
   }
+  const unavailable = result.isError ? agentUnavailable(`${result.resultText ?? ''}\n${result.stderrTail}`) : null;
+  if (unavailable && !step.worktreeChanges.length) {
+    await pauseAgents(pauseReason(unavailable), unavailable.kind === 'allowance' ? run.model : null);
+    await requeue(run, `No agent can work right now (${unavailable.message}); this step waits in the queue and starts again once one can.`);
+    return true;
+  }
   const why = step.worktreeChanges.length
     ? `read-only step changed the worktree: ${step.worktreeChanges.join('; ')}`
     : outputFailure(result, output, outputName);
@@ -916,6 +1032,13 @@ async function stoppedEarly(run: Run, step: StepResult, outputName: string): Pro
     return true;
   }
   return false;
+}
+
+async function requeue(run: Run, why: string): Promise<void> {
+  const [row] = await sql<Run[]>`update runs set status = 'queued', started_at = null, pid = null where id = ${run.id} and status = 'running' returning *`;
+  if (!row) return;
+  touchRun(row);
+  await log(row, why);
 }
 
 async function failMalformedVerdict(run: Run, output: string | null): Promise<void> {
@@ -1008,8 +1131,8 @@ async function afterPlan(run: Run, step: StepResult, state: StepStates['plan']):
   const canceledKeys = new Set(existingTickets.filter((t) => t.status === 'canceled').map((t) => t.key));
   const renaming = renameCanceledKeys(raw, canceledKeys, new Set(existingTickets.map((t) => t.key)));
   raw = renaming.raw;
-  const { plan, stacked, order, errors } = raw ? validatePlan(raw, s.maxTickets) : { errors: ['plan.json is missing or not valid JSON'] };
-  if (!plan || !stacked || !order || errors.length) {
+  const { plan, stacked, needs: needsOf, order, errors } = raw ? validatePlan(raw, s.maxTickets, { line: s.lineInPlanOrder }) : { errors: ['plan.json is missing or not valid JSON'] };
+  if (!plan || !stacked || !needsOf || !order || errors.length) {
     await finish(run, 'failed', { error: `plan.json rejected: ${errors.slice(0, 5).join('; ')}` });
     const previousRejections = await sql<{ n: number }[]>`
       select count(*)::int as n from runs where initiative_id = ${init.id} and kind = 'plan' and status = 'failed' and error like 'plan.json rejected%'
@@ -1037,11 +1160,11 @@ async function afterPlan(run: Run, step: StepResult, state: StepStates['plan']):
     await tx`delete from tickets where initiative_id = ${init.id} and status = 'proposed'`;
     for (const o of order) {
       const t = stacked.find((x) => x.key === o.key)!;
-      const needs = plan.tickets.find((x) => x.key === o.key)!.depends_on;
+      const needs = needsOf.get(o.key)!;
       await tx`
-        insert into tickets (initiative_id, key, seq, wave, title, what, goal, outcome, guidance, acceptance, depends_on, needs, size, status)
+        insert into tickets (initiative_id, key, seq, wave, title, what, goal, outcome, guidance, acceptance, depends_on, needs, touches, foundation, size, status)
         values (${init.id}, ${t.key}, ${seqs.get(o.key)!}, ${o.wave}, ${t.title}, ${t.what}, ${t.goal}, ${t.outcome},
-          ${tx.json(t.guidance)}, ${tx.json(t.acceptance)}, ${tx.json(t.depends_on)}, ${tx.json(needs)}, ${t.size}, 'proposed')
+          ${tx.json(t.guidance)}, ${tx.json(t.acceptance)}, ${tx.json(t.depends_on)}, ${tx.json(needs)}, ${tx.json(t.touches ?? [])}, ${t.foundation ?? false}, ${t.size}, 'proposed')
         on conflict (initiative_id, key) do nothing`;
     }
   });
@@ -1074,10 +1197,10 @@ async function runPlanReview(run: Run): Promise<void> {
     write(path.join(dir, 'plan.md'), init.planMd ?? ''),
     write(path.join(dir, 'plan.json'), JSON.stringify(init.planJson, null, 2)),
   ];
-  const { plan, stacked } = init.planJson ? validatePlan(init.planJson, s.maxTickets) : {};
+  const { plan, stacked } = init.planJson ? validatePlan(init.planJson, s.maxTickets, { line: s.lineInPlanOrder }) : {};
   if (plan && stacked) {
-    const asItems = (tickets: { key: string; depends_on: string[] }[]) => tickets.map((t) => ({ key: t.key, dependsOn: t.depends_on }));
-    inputs.push(write(path.join(dir, 'stacking.md'), renderStacking(asItems(plan.tickets), asItems(stacked), s.concurrency)));
+    const asItems = (tickets: { key: string; depends_on: string[]; touches?: string[] }[]) => tickets.map((t) => ({ key: t.key, dependsOn: t.depends_on, touches: t.touches }));
+    inputs.push(write(path.join(dir, 'stacking.md'), renderStacking(asItems(plan.tickets), asItems(stacked), s.concurrency, { line: s.lineInPlanOrder })));
   }
   for (let r = 1; r < init.planRound; r++) {
     const prev = path.join(planRoundDir(init, r), 'plan-review.md');
@@ -1155,14 +1278,16 @@ async function startApprovedPlan(init: Initiative, approval: Pick<Message, 'auth
 // ones stacked on them), restart unstarted ones from their new text, drop the rest.
 // Each revised ticket gets its new text, as a proposed ticket, before anything else touches it.
 async function applyRevisedPlan(init: Initiative): Promise<string[]> {
-  const { plan, stacked, order } = init.planJson ? validatePlan(init.planJson, repo.initiativeSettings(init).maxTickets) : {};
-  if (!plan || !stacked || !order) return [];
-  const needsOf = (key: string) => plan.tickets.find((p) => p.key === key)!.depends_on;
+  const { plan, stacked, needs, order } = init.planJson ? validatePlan(init.planJson, repo.initiativeSettings(init).maxTickets, { line: repo.initiativeSettings(init).lineInPlanOrder }) : {};
+  if (!plan || !stacked || !needs || !order) return [];
+  const needsOf = (key: string) => needs.get(key)!;
   const { keep, rebuild, restart, drop } = revisePlannedTickets(stacked, order, await repo.listTickets(init.id));
-  // A kept ticket on the same base keeps building, but what it needs and its wave follow the revision.
-  for (const { ticket, order: o } of keep) {
+  // A kept ticket on the same base keeps building, but what it needs, its wave and its write set follow the revision.
+  for (const { ticket, spec, order: o } of keep) {
     const needs = needsOf(ticket.key);
-    if (ticket.wave !== o.wave || (ticket.needs ?? []).join() !== needs.join()) await repo.updateTicket(ticket.id, { needs, wave: o.wave });
+    const touches = spec.touches ?? [];
+    const changed = ticket.wave !== o.wave || (ticket.needs ?? []).join() !== needs.join() || (ticket.touches ?? []).join() !== touches.join() || !!ticket.foundation !== !!spec.foundation;
+    if (changed) await repo.updateTicket(ticket.id, { needs, wave: o.wave, touches, foundation: spec.foundation ?? false });
   }
   if (!rebuild.length && !restart.length && !drop.length) return [];
   const project = await mustProject(init.projectId);
@@ -1178,6 +1303,8 @@ async function applyRevisedPlan(init: Initiative): Promise<string[]> {
       acceptance: spec.acceptance,
       dependsOn: spec.depends_on,
       needs: needsOf(t.key),
+      touches: spec.touches ?? [],
+      foundation: spec.foundation ?? false,
       size: spec.size,
       wave: o.wave,
       status: 'proposed',
@@ -1250,15 +1377,14 @@ export async function startReadyTickets(initiativeId: string, manual = false): P
   if (applyingRevisedPlans.has(init.id) || (await replanInFlight(init))) return 0;
   const tickets = await repo.listTickets(init.id);
   const s = repo.initiativeSettings(init);
-  const rules = { waitForCi: s.dependentsWaitForCi, startWhenBuilt: s.dependentsStartWhenBuilt };
+  const rules = { waitForCi: s.dependentsWaitForCi, startWhenBuilt: s.dependentsStartWhenBuilt || s.lineInPlanOrder, foundationCheckpoint: s.foundationCheckpoint };
+  const project = await mustProject(init.projectId);
   let started = 0;
   for (const t of tickets) {
     if (t.status !== 'todo') continue;
-    const ready = t.dependsOn.every((k) => {
-      const d = tickets.find((x) => x.key === k);
-      return d && dependencyReady(d, rules);
-    });
-    if (!ready) continue;
+    const deps = startsAfter(init, t).map((k) => tickets.find((x) => x.key === k));
+    const checked = await Promise.all(deps.map(async (d) => d && { ...d, gatePassedAtHead: hasOpenPr(d) ? await passedChecksAtPushedHead(project, d) : undefined }));
+    if (!checked.every((d) => d && dependencyReady(d, rules))) continue;
     try {
       await enqueue({ kind: 'execute', initiativeId: init.id, ticketId: t.id, trigger: manual ? 'manual' : 'auto' });
       started++;
@@ -1270,13 +1396,24 @@ export async function startReadyTickets(initiativeId: string, manual = false): P
   return started;
 }
 
+/** The tickets a ticket waits for before it starts: the one it stacks on, or in one line in plan order, the ones it needs. */
+function startsAfter(init: Initiative, t: Ticket): string[] {
+  return repo.initiativeSettings(init).lineInPlanOrder ? t.needs ?? t.dependsOn : t.dependsOn;
+}
+
+/** The code dependency a first review waits for; a line-only PR predecessor does not serialize review. */
+function reviewBase(init: Initiative, ticket: Ticket, all: Ticket[]): Ticket | null {
+  return repo.initiativeSettings(init).lineInPlanOrder ? buildsOn(init, ticket, all) : stackBase(ticket, all);
+}
+
 /**
  * Why a ticket's first review waits, or null when it can start: the ticket below is not approved
  * yet (see `reviewWaitsFor`), or its latest pushed code is not merged into this branch yet.
  */
 async function heldReviewReason(init: Initiative, ticket: Ticket): Promise<string | null> {
   const s = repo.initiativeSettings(init);
-  const below = stackBase(ticket, await repo.listTickets(init.id));
+  const all = await repo.listTickets(init.id);
+  const below = reviewBase(init, ticket, all);
   const waitsFor = reviewWaitsFor(ticket, below, s.dependentsStartWhenBuilt);
   if (waitsFor) return `The review waits until ${ticketLabel(waitsFor)}, the ticket below it, is approved, so it reads this ticket on top of the code that merges under it.`;
   if (s.dependentsStartWhenBuilt && ticket.lastVerdict === null && below && (await lacksPushedHead(init, ticket, below))) {
@@ -1296,8 +1433,151 @@ async function lacksPushedHead(init: Initiative, ticket: Ticket, below: Ticket, 
   const remote = remoteBranchOf(below);
   // Stack sync only merges into a ticket with an open PR; without one, nothing could bring the code in.
   if (!hasOpenPr(below) || !remote || !ticket.worktreePath || !hasOpenPr(ticket)) return false;
-  if (!fetched) await gitx.fetchOrigin((await mustProject(init.projectId)).repoPath, { refs: [gitx.trackingRefspec(remote)] });
+  if (!fetched) {
+    const result = await gitx.fetchOrigin((await mustProject(init.projectId)).repoPath, { refs: [gitx.trackingRefspec(remote)] });
+    if (result.code !== 0) return true;
+  }
+  if (!(await gitx.refExists(ticket.worktreePath, `origin/${remote}`))) return true;
   return !(await gitx.isAncestor(ticket.worktreePath, `origin/${remote}`, 'HEAD'));
+}
+
+// The ticket's latest gate passed on the commit its PR shows now: its checks ran with its base merged in,
+// so its CI should pass too. A project without a checks command has nothing to prove.
+async function passedChecksAtPushedHead(project: Project, ticket: Ticket): Promise<boolean> {
+  const remote = remoteBranchOf(ticket);
+  if (!project.checksCommand?.trim() || !remote || !ticket.worktreePath || !fs.existsSync(ticket.worktreePath)) return true;
+  const pushed = await gitx.revParse(ticket.worktreePath, `origin/${remote}`);
+  if (!pushed) return false;
+  return passedGateAt(await lastRuns(ticket.id), pushed, 'checks', project.checksCommand);
+}
+
+// The lowest open PR below the ticket whose pushed head has not passed the checks. Lowest first: its gate
+// may merge and push, which changes every head above it. One fetch brings every branch below.
+async function findUnreadyBelow(project: Project, ticket: Ticket, all: Ticket[]): Promise<Ticket | null> {
+  const below = openPrsBelow(ticket, all).filter((t) => remoteBranchOf(t));
+  if (!below.length) return null;
+  await gitx.fetchOrigin(project.repoPath, { refs: below.map((t) => gitx.trackingRefspec(remoteBranchOf(t)!)) });
+  for (const t of below) if (!(await passedChecksAtPushedHead(project, t))) return t;
+  return null;
+}
+
+/**
+ * Why the factory started a gate outside the build and fix rounds. readiness: prove a PR below is green before
+ * the PRs above take fixes. sync: check the merge of the PR below before it is pushed. repair: settle a PR's
+ * deterministic failures by script before any agent. publish: open a held PR once the one before it in the line
+ * is open. Each holds the status the ticket returns to.
+ */
+interface GateMarker {
+  purpose: GatePurpose;
+  status: TicketStatus;
+}
+
+function gateMarkerOf(run: Pick<Run, 'gatePurpose' | 'gateRestingStatus'>): GateMarker | null {
+  const { gatePurpose: purpose, gateRestingStatus: status } = run;
+  return purpose && status && SETTLED_TICKET_STATUSES.includes(status) ? { purpose, status } : null;
+}
+
+/** Re-runs a ticket's gate by hand, preserving an INFRA/WAITING purpose gate instead of turning it into a build gate. */
+export async function checkTicket(ticketId: string): Promise<Run> {
+  const ticket = await mustTicket(ticketId);
+  const [lastGate] =
+    ticket.gateStatus === 'fail' || ticket.gateStatus === 'infra' || ticket.gateStatus === 'waiting'
+      ? await sql<Run[]>`select * from runs where ticket_id = ${ticket.id} and kind = 'gate' order by queued_at desc limit 1`
+      : [];
+  return enqueue({
+    kind: 'gate',
+    initiativeId: ticket.initiativeId,
+    ticketId: ticket.id,
+    trigger: 'manual',
+    purpose: lastGate ? gateMarkerOf(lastGate) ?? undefined : undefined,
+  });
+}
+
+const PURPOSE_NOTE: Record<GatePurpose, string> = {
+  readiness: 'runs its checks with the branch it targets merged in, so the PRs above it take their fixes only once its CI should pass.',
+  sync: 'merges the latest PR below it and checks the result before pushing, so nothing above it is pushed broken.',
+  repair: "runs the project's autofix and checks on the PR first; an agent starts only if a script can't settle it.",
+  publish: 'the PR before it in the line is open now, so it checks the merge of that branch and opens its PR on it.',
+};
+
+async function startPurposeGate(init: Initiative, ticket: Ticket, purpose: GatePurpose, from?: Run): Promise<boolean> {
+  if (!SETTLED_TICKET_STATUSES.includes(ticket.status) || !(await ticketIdle(ticket.id, from?.id))) return false;
+  try {
+    await enqueue({ kind: 'gate', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto', purpose: { purpose, status: ticket.status } });
+  } catch (err) {
+    console.warn(`[${purpose}-gate]`, (err as Error).message);
+    return false;
+  }
+  await systemMessage({ initiativeId: init.id, ticketId: ticket.id }, `${ticketLabel(ticket)}: ${PURPOSE_NOTE[purpose]}`);
+  return true;
+}
+
+// The head each ticket last failed to push, so a push that keeps failing is reported once.
+const failedPushes = new Map<string, string>();
+
+async function pushIfAhead(run: MessageScope, ticket: Ticket, what: string): Promise<'pushed' | 'current' | 'failed'> {
+  const wt = ticket.worktreePath!;
+  const remote = remoteBranchOf(ticket);
+  if (!remote || (await gitx.isAncestor(wt, 'HEAD', `origin/${remote}`))) return 'current';
+  const pushed = await gitx.push(wt, ticket.branch!, remote);
+  if (pushed.code !== 0) {
+    const head = await gitx.headSha(wt);
+    if (failedPushes.get(ticket.id) !== head) await systemMessage(run, `${ticketLabel(ticket)}: passed its checks, but pushing ${what} failed (the next stack sync tries again): ${(pushed.stderr || pushed.stdout).trim().slice(0, 500)}`);
+    if (head) failedPushes.set(ticket.id, head);
+    return 'failed';
+  }
+  failedPushes.delete(ticket.id);
+  await repo.updateTicket(ticket.id, { ciState: null, ciHeadSha: null });
+  return 'pushed';
+}
+
+async function finishPurposeGate(run: Run, init: Initiative, project: Project, ticket: Ticket, marker: GateMarker): Promise<void> {
+  await repo.updateTicket(ticket.id, { gateStatus: 'pass', status: marker.status });
+  const fixes = fixesAwaitingVerification(await lastRuns(ticket.id));
+  if (fixes.length && (await verificationNeeded(init, ticket, fixes))) {
+    await enqueue({ kind: 'verify', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+    return;
+  }
+  if (marker.purpose === 'publish' && marker.status === 'built') {
+    await publishAfterGate(run, init, project, await mustTicket(ticket.id));
+    return;
+  }
+  if (marker.purpose === 'publish') {
+    await publish(run, init, project, await mustTicket(ticket.id)).catch((err: Error) => systemMessage(run, `${ticketLabel(ticket)}: publishing failed: ${err.message}`));
+    await startHeldPublishes(init.id);
+    await refreshInitiativeStatus(init.id);
+    return;
+  }
+  const outcome = await pushIfAhead(run, ticket, marker.purpose === 'repair' ? "the factory's fixes" : 'the merge of its base');
+  if (outcome === 'pushed') {
+    await systemMessage(run, `${ticketLabel(ticket)}: passed its checks${marker.purpose === 'repair' ? ' after the factory fixed what scripts can' : ' with the branch it targets merged in'}, and pushed.`);
+    await announceHeldPush(run, init, await mustTicket(ticket.id));
+  } else if (marker.purpose === 'repair' && outcome === 'current') {
+    await systemMessage(run, `${ticketLabel(ticket)}: its checks pass here, so the PR's CI failure needs a fixer that reads the CI log.`);
+    await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+    return;
+  } else if (outcome === 'current') {
+    await systemMessage(run, `${ticketLabel(ticket)}: passed its checks at the commit its PR shows.`);
+  }
+  await refreshInitiativeStatus(init.id);
+  void syncStack(init.id);
+}
+
+async function agentCommits(worktree: string, range: string): Promise<string[]> {
+  const r = await gitx.git(worktree, ['log', '--format=%H %ae', range]);
+  return r.code === 0 ? r.stdout.split('\n').filter((l) => l && !l.endsWith(` ${gitx.FACTORY_EMAIL}`)).map((l) => l.slice(0, 40)) : [];
+}
+
+async function factoryCommits(worktree: string, range: string): Promise<string> {
+  const r = await gitx.git(worktree, ['log', '--format=%h %ae %s', range]);
+  return r.stdout.split('\n').filter((l) => l.includes(` ${gitx.FACTORY_EMAIL} `)).map((l) => `- ${l.replace(` ${gitx.FACTORY_EMAIL}`, '')}`).join('\n');
+}
+
+/** A verifier reads the fixer's commits and replies; rounds whose only commits are the factory's need none. */
+async function verificationNeeded(init: Initiative, ticket: Ticket, fixes: Run[]): Promise<boolean> {
+  if (fixes.some((f) => parseReplies(f.outputMd ?? '').replies.length > 0)) return true;
+  const start = await verifyRangeStart(init, ticket, fixes).catch(() => null);
+  return !start || (await agentCommits(ticket.worktreePath!, `${start}..HEAD`)).length > 0;
 }
 
 /** Marks a ticket whose first review the factory held; only those are started by `startHeldReviews`. */
@@ -1347,9 +1627,9 @@ async function startHeldReviews(initiativeId: string, { fromSync = false } = {})
   const waiting = all.filter(
     (t) => t.status === 'built' && t.lastVerdict === null && fs.existsSync(heldReviewMarker(init, t)) && t.worktreePath && fs.existsSync(path.join(t.worktreePath, '.git')),
   );
-  const due = waiting.filter((t) => !reviewWaitsFor(t, stackBase(t, all), true) && !startingHeldReviews.has(t.id));
+  const due = waiting.filter((t) => !reviewWaitsFor(t, reviewBase(init, t, all), true) && !startingHeldReviews.has(t.id));
   if (!due.length) return;
-  const parents = due.map((t) => stackBase(t, all)).filter((p): p is Ticket => !!p && hasOpenPr(p));
+  const parents = due.map((t) => reviewBase(init, t, all)).filter((p): p is Ticket => !!p && hasOpenPr(p));
   if (parents.length) await gitx.fetchOrigin(project.repoPath, { refs: parents.map((p) => gitx.trackingRefspec(remoteBranchOf(p)!)) });
   for (const t of due) {
     // Another pass may have picked this ticket up while this one fetched.
@@ -1357,7 +1637,7 @@ async function startHeldReviews(initiativeId: string, { fromSync = false } = {})
     startingHeldReviews.add(t.id);
     try {
       if (!(await ticketIdle(t.id))) continue;
-      const parent = stackBase(t, all);
+      const parent = reviewBase(init, t, all);
       // A held review only starts once the approved ticket below is in this branch; stack sync merges it.
       if (parent && (await lacksPushedHead(init, t, parent, { fetched: true }))) {
         if (!fromSync) void syncStack(init.id);
@@ -1428,7 +1708,7 @@ async function followSetup(run: Run, spool: repo.RunSpool, pid: number | undefin
 async function startSetup(run: Run, command: string, cwd: string, env: NodeJS.ProcessEnv): Promise<CommandOutcome> {
   const spool = await repo.insertRunSpool(run.id, spoolDir(run.id), SETUP_PHASE);
   const marker = `factory-setup-${run.id}`;
-  const pid = launchSpooled(spool.dir, { bin: 'bash', args: ['-c', command, marker], cwd, timeoutMs: SETUP_TIMEOUT_MS, marker }, env);
+  const pid = launchSpooled(spool.dir, { bin: 'bash', args: ['-c', command, marker], cwd, timeoutMs: SETUP_TIMEOUT_MS, marker, nice: LOCAL_WORK_NICE }, env);
   return followSetup(run, spool, pid);
 }
 
@@ -1465,7 +1745,7 @@ async function prepareWorktree(run: Run, init: Initiative, project: Project, tic
   }
   await log(run, `Running setup: ${command}`);
   const env = await shellEnvFor(project, ticket);
-  const setup = await heavyLocalWork(run, 'run the setup command', () => startSetup(run, command, ticket.worktreePath!, env));
+  const setup = await heavyLocalWork(run, 'run the setup command', () => startSetup(run, command, ticket.worktreePath!, env), CHECKS_WEIGHT);
   await concludeSetup(run, setup, marker);
 }
 
@@ -1516,6 +1796,18 @@ async function startedWorktreeBranch(run: Run, project: Project, wt: string, bas
   await log(run, `Removing a half-created worktree from an earlier attempt (${orphan || 'detached HEAD'})`);
   await gitx.removeWorktree(project.repoPath, wt, orphan || null);
   return null;
+}
+
+/**
+ * The ticket whose code a new branch starts from: the ticket it stacks on. In one line in plan order, when the
+ * ticket ahead in the line is not built yet, the latest ticket it really needs, so it builds side by side; its
+ * PR still opens on the ticket ahead, once that one is open.
+ */
+function buildsOn(init: Initiative, ticket: Ticket, all: Ticket[]): Ticket | null {
+  const below = stackBase(ticket, all);
+  if (!repo.initiativeSettings(init).lineInPlanOrder) return below;
+  const needed = all.filter((t) => (ticket.needs ?? []).includes(t.key) && t.branch && !['merged', 'canceled'].includes(t.status));
+  return needed.sort((a, b) => b.seq - a.seq)[0] ?? null;
 }
 
 /** A ticket's worktree, recorded or not: a run records the path only once the checkout is done, which takes minutes in a big repo. */
@@ -1569,10 +1861,11 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
     return checkedOut;
   }
 
-  const parent = stackBase(ticket, await repo.listTickets(init.id));
+  const all = await repo.listTickets(init.id);
+  const parent = buildsOn(init, ticket, all);
   const parentBranch = parent?.branch;
   const baseRef = parent && parentBranch ? await stackedBaseRef(run, project, parent) : await gitx.resolveBaseRef(project.repoPath, init.baseBranch);
-  const prBase = parentBranch ?? init.baseBranch;
+  const prBase = stackBase(ticket, all)?.branch ?? parentBranch ?? init.baseBranch;
   // A rebuilt ticket keeps the branch of the PR it already has, built again from the base here.
   const reuse = readRebuildState(rebuildStateFile(init, ticket.id)).reuse;
   const started = await startedWorktreeBranch(run, project, wt, baseRef, reuse?.branch ?? branchName(init, ticket));
@@ -1602,6 +1895,15 @@ function historyFiles(init: Initiative, t: Ticket, beforeRound: number): string[
 async function measureSize(ticket: Ticket, base: string): Promise<void> {
   const linesChanged = await gitx.diffLines(ticket.worktreePath!, base);
   if (linesChanged !== null) await repo.updateTicket(ticket.id, { linesChanged });
+}
+
+/** Files the build changed that its write set doesn't name: the plan's overlap check could not see them coming. */
+async function noteFilesOutsideWriteSet(run: Run, ticket: Ticket, base: string): Promise<void> {
+  const touches = (ticket.touches ?? []).map((p) => p.replace(/^generated:/, '').trim()).filter(Boolean);
+  if (!touches.length) return;
+  const changed = (await gitx.git(ticket.worktreePath!, ['diff', '--name-only', `${base}...HEAD`])).stdout.split('\n').filter(Boolean);
+  const outside = changed.filter((f) => !touches.some((p) => f === p || (p.endsWith('/') && f.startsWith(p)) || globPattern(p).test(f)));
+  if (outside.length) await log(run, `Changed outside the plan's write set for this ticket: ${outside.join(', ')}.`);
 }
 
 async function keepBranchHistory(run: Run, ticket: Ticket, start: string | null, fallbackMessage: string): Promise<void> {
@@ -1646,7 +1948,7 @@ async function runExecute(run: Run): Promise<void> {
       ['Branch', ticket.branch],
       ['Base', base],
       ['Round', String(run.round)],
-      ['Checks command', checksCommandIn(project, ticket.worktreePath)],
+      ['Quick checks (yours to run)', agentChecksCommand(project, ticket.worktreePath)],
       ['Setup command', project.setupCommand],
     ],
     inputs,
@@ -1656,7 +1958,7 @@ async function runExecute(run: Run): Promise<void> {
   const start = await gitx.headSha(ticket.worktreePath!);
   await runAgent(
     run,
-    { kind: 'execute', cwd: ticket.worktreePath!, prompt, runDir: dir, outputPath: out, env: factoryEnv(ticket, base) },
+    { kind: 'execute', cwd: ticket.worktreePath!, prompt, runDir: dir, outputPath: out, env: agentEnvFor(project, ticket, base) },
     { start, base, feedbackIds: feedback.map((f) => f.id) },
   );
 }
@@ -1688,6 +1990,7 @@ async function afterExecute(run: Run, step: StepResult, state: StepStates['execu
   }
   if (dirty) await log(run, `Warning: uncommitted changes left in the worktree:\n${dirty}`);
   await measureSize(ticket, base);
+  await noteFilesOutsideWriteSet(run, ticket, base);
   await finish(run, 'succeeded');
   await agentMessage(run, `**Built ${ticketLabel(ticket)}** (${ahead} commit${ahead > 1 ? 's' : ''}).\n\n${summaryOf(step.output!)}`);
   await enqueue({ kind: 'gate', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
@@ -1718,18 +2021,216 @@ async function followChecks(run: Run, spool: repo.RunSpool, pid: number | undefi
 
 async function startChecks(run: Run, command: string, cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<ChecksRun> {
   const started = Date.now();
-  const spool = await repo.insertRunSpool(run.id, spoolDir(run.id), { started });
+  const spool = await repo.insertRunSpool(run.id, spoolDir(run.id), { started, slot: Number(env.FACTORY_SLOT) || null });
   const marker = `factory-checks-${run.id}`;
-  const pid = launchSpooled(spool.dir, { bin: 'bash', args: ['-c', command, marker], cwd, timeoutMs, marker }, env);
+  const pid = launchSpooled(spool.dir, { bin: 'bash', args: ['-c', command, marker], cwd, timeoutMs, marker, nice: LOCAL_WORK_NICE }, env);
   await repo.updateRun(run.id, { pid: pid ?? null });
   return { outcome: await followChecks(run, spool, pid), started };
 }
 
 async function adoptChecks(run: Run, spool: repo.RunSpool): Promise<void> {
-  const { started } = spool.state as { started: number };
-  const outcome = await heavyLocalWork(run, 'follow the checks', () => followChecks(run, spool, undefined));
-  await afterGate(run, { outcome, started });
+  const { started, slot } = spool.state as { started: number; slot?: number | null };
+  const follow = () => followChecks(run, spool, undefined);
+  const reserved = recoveredTestSlots.get(run.id);
+  try {
+    const outcome = await heavyLocalWork(run, 'follow the checks', () => (reserved ? follow() : slot ? testSlots.holding(slot, follow) : follow()), CHECKS_WEIGHT);
+    await afterGate(run, { outcome, started });
+  } finally {
+    reserved?.release();
+    recoveredTestSlots.delete(run.id);
+  }
 }
+
+/** Resolves a merge conflict that touches only generated files: either side, then the project's generator. */
+async function regenerateConflicts(run: Run, project: Project, ticket: Ticket, conflicts: string[]): Promise<boolean> {
+  const wt = ticket.worktreePath!;
+  if (!project.fixCommand?.trim() || !(await allGenerated(project, wt, conflicts))) return false;
+  await gitx.git(wt, ['checkout', '--theirs', '--', ...conflicts]);
+  const untrackedBefore = new Set(await gitx.untrackedFiles(wt));
+  const fixed = await runFixCommand(run, project, ticket);
+  if (fixed.code !== 0) return false;
+  const tracked = (await gitx.git(wt, ['diff', '--name-only', '-z'])).stdout.split('\0').filter(Boolean);
+  const created = (await gitx.untrackedFiles(wt)).filter((file) => !untrackedBefore.has(file));
+  const regenerated = [...new Set([...tracked, ...created])];
+  if (!(await allGenerated(project, wt, regenerated))) return false;
+  const added = await gitx.git(wt, ['add', '-A', '--', ...regenerated]);
+  await log(run, `The merge conflicted only in generated files (${conflicts.join(', ')}); the factory regenerated ${regenerated.join(', ')}.`);
+  return added.code === 0;
+}
+
+async function allGenerated(project: Project, worktree: string, files: string[]): Promise<boolean> {
+  const marked = await gitx.generatedFiles(worktree, files);
+  const globs = (project.generatedPaths ?? []).map(globPattern);
+  return files.every((f) => marked.has(f) || globs.some((g) => g.test(f)));
+}
+
+// CI checks a PR merged with the branch it targets, so the gate does too: it merges that branch in first
+// and checks the result. The merge stays on the branch and goes out with the next push. A conflict fails
+// the gate, and its fixer resolves it, unless rerere or a regeneration settles it first.
+async function mergeBaseBeforeChecks(run: Run, init: Initiative, project: Project, ticket: Ticket): Promise<CommandOutcome | null> {
+  const target = gateTarget(ticket, await repo.listTickets(init.id), init.baseBranch);
+  const wt = ticket.worktreePath!;
+  if ((await gitx.worktreeState(wt)).tracked) {
+    return {
+      code: 1,
+      stdout: `The worktree has uncommitted changes. Commit or discard them before the gate runs; it will not pass code different from the branch head.`,
+      stderr: '',
+      timedOut: false,
+      canceled: false,
+    };
+  }
+  const unexpected = unexpectedUntracked(project, await gitx.untrackedFiles(wt));
+  if (unexpected.length) {
+    return {
+      code: 1,
+      stdout: `The worktree contains untracked files that are not configured local inputs: ${unexpected.join(', ')}. Remove or commit them before the gate runs.`,
+      stderr: '',
+      timedOut: false,
+      canceled: false,
+    };
+  }
+  if (!target) return null;
+  const fetched = await gitx.fetchOrigin(project.repoPath, { cwd: wt, refs: [gitx.trackingRefspec(target)] });
+  if (fetched.code !== 0 || !(await gitx.refExists(wt, `origin/${target}`))) {
+    return {
+      code: 75,
+      stdout: `Could not fetch \`${target}\`, so the gate cannot prove it checked what CI will run.`,
+      stderr: fetched.stderr,
+      timedOut: fetched.timedOut,
+      canceled: false,
+    };
+  }
+  if (await gitx.isAncestor(wt, `origin/${target}`, 'HEAD')) return null;
+  const merged = await gitx.mergeInto(wt, `origin/${target}`, (conflicts) => regenerateConflicts(run, project, ticket, conflicts));
+  if (merged.ok) {
+    await log(run, `Merged \`origin/${target}\` into the branch, so the checks run on what CI will run. ${merged.output.split('\n').filter((l) => l.startsWith('Resolved')).join(' ')}`.trim());
+    return null;
+  }
+  const stdout = [
+    `Merging \`origin/${target}\` into this branch conflicts (${merged.conflicts.join(', ') || 'see below'}), so the checks did not run.`,
+    `Run \`git fetch origin && git merge origin/${target}\`, resolve every conflict so both sides' behaviour and tests survive, and commit the merge. Never rebase or force-push.`,
+    '',
+    merged.output.slice(-3000),
+  ].join('\n');
+  return { code: 1, stdout, stderr: '', timedOut: false, canceled: false };
+}
+
+const FIX_COMMAND_TIMEOUT_MS = 15 * 60_000;
+const LOCAL_WORK_NICE = 10;
+const CHECKS_WEIGHT = 2;
+
+/** Runs the project's autofixers in the worktree. The caller commits what changed. */
+async function runFixCommand(run: Run, project: Project, ticket: Ticket): Promise<CommandOutcome> {
+  const command = project.fixCommand?.trim();
+  if (!command) return { code: 0, stdout: '', stderr: '', timedOut: false, canceled: false };
+  await log(run, `$ ${command}  (the project's autofix)`);
+  const env = await shellEnvFor(project, ticket);
+  const r = await heavyLocalWork(run, "run the project's autofix", () => gitx.exec('nice', ['-n', String(LOCAL_WORK_NICE), 'bash', '-c', command], { cwd: ticket.worktreePath!, env, timeoutMs: FIX_COMMAND_TIMEOUT_MS }), CHECKS_WEIGHT);
+  if (r.code !== 0) await log(run, `The autofix exited ${r.code}${r.timedOut ? ' (timed out)' : ''}:\n${(r.stdout + r.stderr).slice(-2000)}`);
+  return { ...r, canceled: false };
+}
+
+async function autofixAndCommit(run: Run, project: Project, ticket: Ticket): Promise<CommandOutcome | null> {
+  const wt = ticket.worktreePath!;
+  if (!project.fixCommand?.trim() || (await gitx.worktreeState(wt)).tracked) return null;
+  const untrackedBefore = new Set(await gitx.untrackedFiles(wt));
+  const fixed = await runFixCommand(run, project, ticket);
+  if (fixed.code !== 0) {
+    // A fixer that failed halfway leaves its edits behind; the checks and every later merge need a clean tree.
+    await gitx.resetHard(wt, 'HEAD');
+    const leftovers = (await gitx.untrackedFiles(wt)).filter((p) => !untrackedBefore.has(p));
+    for (const p of leftovers) fs.rmSync(path.join(wt, p), { force: true, recursive: true });
+    await log(run, "The autofix's changes were discarded; its failure is the gate result instead of checking a partially fixed tree.");
+    return fixed;
+  }
+  const tracked = (await gitx.git(wt, ['diff', '--name-only', '-z', 'HEAD'])).stdout.split('\0').filter(Boolean);
+  const created = (await gitx.untrackedFiles(wt)).filter((file) => !untrackedBefore.has(file));
+  const commit = await gitx.commitPaths(ticket.worktreePath!, "chore: apply the project's autofix", [...tracked, ...created]);
+  if (commit) await log(run, `The autofix changed files; committed them as ${commit.slice(0, 10)}.`);
+  return null;
+}
+
+function checksDigest(parts: (string | null | undefined)[]): string {
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 16);
+}
+
+function filesUnder(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...filesUnder(file));
+    else if (entry.isFile()) out.push(file);
+  }
+  return out;
+}
+
+function filesDigest(files: string[]): string {
+  const hash = createHash('sha256');
+  for (const file of [...new Set(files)].sort()) {
+    hash.update(file);
+    if (fs.existsSync(file) && fs.statSync(file).isFile()) hash.update(fs.readFileSync(file));
+    else hash.update('<missing>');
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+
+function environmentDigest(env: NodeJS.ProcessEnv): string {
+  return checksDigest(Object.entries(env).filter(([, value]) => value !== undefined).sort().flatMap(([key, value]) => [key, value]));
+}
+
+function commandFilePaths(commands: (string | null | undefined)[], cwd: string): string[] {
+  return commands.flatMap((command) => {
+    if (!command) return [];
+    return [...command.matchAll(/(?:^|\s)(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g)].flatMap((match) => {
+      const token = match[1] ?? match[2] ?? match[3];
+      if (!token?.includes('/') || token.includes('$')) return [];
+      const file = path.isAbsolute(token) ? token : path.resolve(cwd, token);
+      return fs.existsSync(file) && fs.statSync(file).isFile() ? [file] : [];
+    });
+  });
+}
+
+function unexpectedUntracked(project: Project, files: string[]): string[] {
+  const configured = project.copyFiles ?? [];
+  return files.filter((file) => !configured.some((input) => file === input || (input.endsWith('/') && file.startsWith(input))));
+}
+
+function gateInputsDigest(project: Project, worktree: string, command: string, env: NodeJS.ProcessEnv, localFiles: string[]): string {
+  const factoryScripts = [...filesUnder(path.join(ROOT, 'scripts', 'checks')), ...filesUnder(path.join(ROOT, 'scripts', 'fix'))];
+  const localInputs = [...(project.copyFiles ?? []), ...localFiles].map((file) => path.join(worktree, file));
+  const commandFiles = commandFilePaths([command, project.checksCommand, project.fixCommand, project.mergeCheckCommand], worktree);
+  return checksDigest([filesDigest([...factoryScripts, ...localInputs, ...commandFiles]), environmentDigest(env)]);
+}
+
+async function gateMutationReasons(
+  project: Project,
+  worktree: string,
+  command: string,
+  env: NodeJS.ProcessEnv,
+  expected: { head: string | null; inputsDigest: string; included: string[] },
+): Promise<string[]> {
+  const [state, untracked] = await Promise.all([gitx.worktreeState(worktree), gitx.untrackedFiles(worktree)]);
+  const inputs = gateInputsDigest(project, worktree, command, env, [...expected.included, ...untracked]);
+  return [
+    state.head !== expected.head ? 'HEAD changed' : '',
+    state.tracked ? 'tracked files or the index changed' : '',
+    unexpectedUntracked(project, untracked).length ? `unexpected untracked files appeared (${unexpectedUntracked(project, untracked).join(', ')})` : '',
+    inputs !== expected.inputsDigest ? 'a local check input changed' : '',
+  ].filter(Boolean);
+}
+
+/**
+ * The head of the ticket's last gate that passed the full checks, when it is still in the branch: a check may
+ * scope itself to what changed since. A merge check passing says less, so it never moves this base.
+ */
+async function greenBase(project: Project, ticket: Ticket): Promise<string | null> {
+  const gate = (await lastRuns(ticket.id)).find((r) => r.kind === 'gate' && r.verdict === 'GATE: PASS' && r.headSha && r.prompt === project.checksCommand?.trim());
+  return gate?.headSha && (await gitx.isAncestor(ticket.worktreePath!, gate.headSha, 'HEAD')) ? gate.headSha : null;
+}
+
+const testSlots = slotPool(15);
+const recoveredTestSlots = new Map<string, { release(): void }>();
 
 async function runGate(run: Run): Promise<void> {
   const init = await mustInitiative(run.initiativeId);
@@ -1739,17 +2240,133 @@ async function runGate(run: Run): Promise<void> {
   const app = await repo.getAppSettings();
   const dir = ticketRoundDir(init, ticket, Math.max(run.round, 1));
   const out = path.join(dir, 'checks.md');
-  await repo.updateRun(run.id, { cwd: ticket.worktreePath, runDir: dir, outputPath: out, prompt: project.checksCommand, headSha: await gitx.headSha(ticket.worktreePath!) });
-  const command = project.checksCommand?.trim() ? project.checksCommand : null;
+  const wt = ticket.worktreePath!;
+  await repo.updateRun(run.id, { cwd: wt, runDir: dir, outputPath: out, prompt: project.checksCommand, headSha: await gitx.headSha(wt) });
+  const marker = gateMarkerOf(run);
+  const syncOnly = marker?.purpose === 'sync' && !!project.mergeCheckCommand?.trim();
+  const command = (syncOnly ? project.mergeCheckCommand : project.checksCommand)?.trim() || null;
   if (!command) return afterGate(run, null);
-  await log(run, `$ ${command}`);
   const queuedAt = Date.now();
-  const env = await shellEnvFor(project, ticket);
-  const checks = await heavyLocalWork(run, 'run the checks', async () => {
-    if (canceling.has(run.id)) return { outcome: CANCELED_BEFORE_IT_STARTED, started: queuedAt };
-    return startChecks(run, command, ticket.worktreePath!, app.gateTimeoutMinutes * 60_000, env);
-  });
+  const conflict = await mergeBaseBeforeChecks(run, init, project, ticket);
+  if (conflict) return afterGate(run, { outcome: conflict, started: queuedAt });
+  const autofixFailure = await autofixAndCommit(run, project, ticket);
+  if (autofixFailure) return afterGate(run, { outcome: autofixFailure, started: queuedAt });
+  const base = await diffBase(project, ticket);
+  const clean = !(await gitx.worktreeState(wt)).tracked;
+  const [head, tree, baseSha, untracked, included] = await Promise.all([
+    gitx.headSha(wt),
+    clean ? gitx.treeSha(wt) : null,
+    gitx.revParse(wt, base),
+    gitx.untrackedFiles(wt),
+    gitx.worktreeIncludeFiles(project.repoPath),
+  ]);
+  const green = await greenBase(project, ticket);
+  const env = { ...(await shellEnvFor(project, ticket)), ...(green ? { FACTORY_GREEN_BASE: green } : {}) };
+  const inputsDigest = gateInputsDigest(project, wt, command, env, [...included, ...untracked]);
+  const expectedGateState = { head, inputsDigest, included };
+  const digest = checksDigest([command, project.fixCommand, baseSha, green, inputsDigest]);
+  await repo.updateRun(run.id, { prompt: command, headSha: head, treeSha: tree, checksDigest: digest });
+  const same = tree ? await repo.passedGateOnTree(project.id, tree, digest) : null;
+  if (same) {
+    const changed = await gateMutationReasons(project, wt, command, env, expectedGateState);
+    if (!changed.length) {
+      await log(run, `This exact tree passed the same checks in run ${same.id.slice(0, 8)}; reusing that result.`);
+      return afterGate(run, { outcome: { code: 0, stdout: `Reused the passing result of run ${same.id} on the same tree (${tree?.slice(0, 12)}).`, stderr: '', timedOut: false, canceled: false }, started: queuedAt });
+    }
+    await log(run, `A matching cached gate result was not reused because ${changed.join('; ')}.`);
+  }
+  await log(run, `$ ${command}`);
+  let checks = await heavyLocalWork(
+    run,
+    'run the checks',
+    () =>
+      testSlots.with(async (slot) => {
+        if (canceling.has(run.id)) return { outcome: CANCELED_BEFORE_IT_STARTED, started: queuedAt };
+        return startChecks(run, command, wt, app.gateTimeoutMinutes * 60_000, { ...env, FACTORY_SLOT: String(slot) });
+      }),
+    CHECKS_WEIGHT,
+  );
+  const passCapable = checks.outcome.code === 0 || (checks.outcome.code === WAITING_EXIT && !!checks.outcome.stdout.match(WAITING_LINE)?.length);
+  if (passCapable) {
+    const changed = await gateMutationReasons(project, wt, command, env, expectedGateState);
+    if (changed.length) {
+      checks = {
+        ...checks,
+        outcome: {
+          ...checks.outcome,
+          code: 1,
+          stdout: `${checks.outcome.stdout}\nThe checks mutated their inputs (${changed.join('; ')}), so this gate cannot certify the committed branch.`,
+        },
+      };
+    }
+  }
   await afterGate(run, checks);
+}
+
+const INFRA_EXIT = 75;
+const WAITING_EXIT = 3;
+const WAITING_LINE = /^WAITING-ON-[A-Z-]+:.*$/gm;
+const INFRA_RETRIES = 4;
+const INFRA_RETRY_MS = [2 * 60_000, 5 * 60_000, 10 * 60_000];
+
+/** Why the checks could not give a verdict on the code, or null. Timeouts and kills may be caused by the branch. */
+function infraFailure(outcome: CommandOutcome): string | null {
+  if (outcome.canceled) return null;
+  if (outcome.code === INFRA_EXIT) return 'the checks reported trouble outside the code (a service, a lock or the package index)';
+  return null;
+}
+
+async function infraGatesInARow(ticketId: string): Promise<number> {
+  let n = 0;
+  for (const r of await lastRuns(ticketId)) {
+    if (r.kind !== 'gate') continue;
+    if (r.verdict !== 'GATE: INFRA') break;
+    n++;
+  }
+  return n;
+}
+
+const infraRetries = new Map<string, NodeJS.Timeout>();
+
+// A gate that could not run to a verdict is the machine's problem, not the code's: it runs again later, and
+// no fixer or round is spent on it.
+async function retryAfterInfra(run: Run, init: Initiative, ticket: Ticket, marker: GateMarker | null, why: string): Promise<void> {
+  const tries = await infraGatesInARow(ticket.id);
+  const resting = marker?.status ?? (ticket.prNumber ? settledStatus(ticket) : 'built');
+  if (tries >= INFRA_RETRIES) {
+    const reason = `The checks could not finish ${tries} times in a row: ${why}. Fix the environment, then press Run checks.`;
+    await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: reason, gateStatus: 'infra' });
+    await systemMessage(run, `${ticketLabel(ticket)}: ${reason}`);
+    return;
+  }
+  const delay = INFRA_RETRY_MS[Math.min(tries - 1, INFRA_RETRY_MS.length - 1)];
+  await repo.updateTicket(ticket.id, { status: resting, gateStatus: 'infra' });
+  await systemMessage(run, `${ticketLabel(ticket)}: ${why}, which is not the code's fault; the checks run again in ${Math.round(delay / 60_000)} minutes.`);
+  clearTimeout(infraRetries.get(ticket.id));
+  infraRetries.set(
+    ticket.id,
+    setTimeout(() => {
+      infraRetries.delete(ticket.id);
+      void retryGate(init.id, ticket.id, marker).catch((err) => console.warn('[gate-retry]', (err as Error).message));
+    }, delay).unref(),
+  );
+}
+
+async function retryGate(initiativeId: string, ticketId: string, marker: GateMarker | null): Promise<void> {
+  const [init, ticket] = await Promise.all([mustInitiative(initiativeId), mustTicket(ticketId)]);
+  if (ticket.gateStatus !== 'infra' || !(await ticketIdle(ticket.id))) return;
+  await enqueue({ kind: 'gate', initiativeId, ticketId, trigger: 'auto', purpose: marker ?? undefined });
+}
+
+/** Gates an earlier server left waiting for a retry after an infrastructure failure. */
+async function retryInfraGates(): Promise<void> {
+  const waiting = await sql<Ticket[]>`
+    select t.* from tickets t join initiatives i on i.id = t.initiative_id
+    where t.gate_status = 'infra' and t.status in ${sql(SETTLED_TICKET_STATUSES)} and i.status in ('in_progress','done')`;
+  for (const t of waiting) {
+    const [lastGate] = await sql<Run[]>`select * from runs where ticket_id = ${t.id} and kind = 'gate' order by queued_at desc limit 1`;
+    await retryGate(t.initiativeId, t.id, lastGate ? gateMarkerOf(lastGate) : null).catch((err) => console.warn('[gate-retry]', (err as Error).message));
+  }
 }
 
 async function afterGate(run: Run, checks: ChecksRun | null): Promise<void> {
@@ -1761,20 +2378,24 @@ async function afterGate(run: Run, checks: ChecksRun | null): Promise<void> {
   const out = path.join(dir, 'checks.md');
   const logPath = path.resolve(dir, 'checks.log');
 
-  let verdict: 'PASS' | 'FAIL' | 'SKIPPED';
+  let verdict: 'PASS' | 'FAIL' | 'SKIPPED' | 'INFRA' | 'WAITING';
   let body: string;
   let envFailure: string | null = null;
+  let infra: string | null = null;
+  let waitingOn: string[] = [];
   if (!checks) {
     verdict = 'SKIPPED';
     body = 'No checks command is configured for this project, so nothing was run. Set one on the Projects page.';
   } else {
     const r = checks.outcome;
-    verdict = r.code === 0 ? 'PASS' : 'FAIL';
+    infra = infraFailure(r);
+    if (r.code === WAITING_EXIT) waitingOn = (r.stdout.match(WAITING_LINE) ?? []).map((l) => l.trim());
+    verdict = infra ? 'INFRA' : waitingOn.length ? 'WAITING' : r.code === 0 ? 'PASS' : 'FAIL';
     if (gitx.commandCouldNotRun(r.code)) envFailure = `The checks command could not run (exit ${r.code}: command not found or not executable). Fix the environment or the project's checks command, then press Fix or re-run checks.`;
     const output = r.stdout + (r.stderr ? `\n${r.stderr}` : '');
     write(logPath, output);
     body = gateBody({
-      command: project.checksCommand!,
+      command: run.prompt ?? project.checksCommand!,
       code: r.code,
       timedOut: r.timedOut,
       seconds: Math.round((Date.now() - checks.started) / 1000),
@@ -1782,6 +2403,15 @@ async function afterGate(run: Run, checks: ChecksRun | null): Promise<void> {
       output,
       logPath,
     });
+  }
+  if ((verdict === 'PASS' || verdict === 'WAITING') && init.kind === 'feature' && ticket.worktreePath) {
+    const rules = await checkOwnerRules(ticket.worktreePath, await diffBase(project, ticket));
+    write(path.join(dir, 'rules-report.md'), renderOwnerRules(rules));
+    const enforceable = rules.violations.filter((violation) => violation.rule === 'linear');
+    if (enforceable.length) {
+      verdict = 'FAIL';
+      body = `## The owner's code rules\nThe checks command passed, but the diff breaks code rules a script can check:\n\n${renderOwnerRules({ violations: enforceable, notes: [] })}\n\n${body}`;
+    }
   }
   const md = `GATE: ${verdict}\n\n${body}\n`;
   write(out, md);
@@ -1792,39 +2422,105 @@ async function afterGate(run: Run, checks: ChecksRun | null): Promise<void> {
     return;
   }
   await finish(run, 'succeeded', { outputMd: md, verdict: `GATE: ${verdict}` });
+  if (waitingOn.length) await systemMessage(run, `${ticketLabel(ticket)}: its local checks wait on work outside this repo, so this is not a green readiness proof and starts no fixer:\n\n${waitingOn.map((l) => `- ${l}`).join('\n')}`);
 
+  const marker = gateMarkerOf(run);
+  if (verdict === 'INFRA') return retryAfterInfra(run, init, fresh, marker, infra!);
+  if (verdict === 'WAITING' && marker) {
+    await repo.updateTicket(ticket.id, { gateStatus: 'waiting', status: marker.status });
+    if (marker.purpose === 'publish') {
+      const published = await publish(run, init, project, await mustTicket(ticket.id)).catch(async (err: Error) => {
+        await systemMessage(run, `${ticketLabel(ticket)}: publishing failed: ${err.message}`);
+        return false;
+      });
+      if (published) await startHeldPublishes(init.id);
+    }
+    await refreshInitiativeStatus(init.id);
+    return;
+  }
+  if (verdict !== 'FAIL' && marker) return finishPurposeGate(run, init, project, fresh, marker);
   if (verdict !== 'FAIL') {
-    await repo.updateTicket(ticket.id, { gateStatus: verdict === 'PASS' ? 'pass' : 'skipped', status: 'built' });
-    if (await unverifiedFix(ticket.id)) {
+    await repo.updateTicket(ticket.id, {
+      gateStatus: verdict === 'PASS' ? 'pass' : verdict === 'WAITING' ? 'waiting' : 'skipped',
+      status: 'built',
+    });
+    const fixes = fixesAwaitingVerification(await lastRuns(ticket.id));
+    if (fixes.length && (await verificationNeeded(init, fresh, fixes))) {
       await enqueue({ kind: 'verify', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
       return;
     }
-    if (s.createPrs) {
-      try {
-        await publish(run, init, project, fresh);
-      } catch (err) {
-        await systemMessage(run, `${ticketLabel(fresh)}: publishing failed: ${(err as Error).message}`);
-      }
-    }
-    if (s.autoReview) await enqueueAutoReview(run, init, await mustTicket(ticket.id));
-    // Tickets stacked on this one may start now that it is built and pushed.
-    if (s.dependentsStartWhenBuilt) await startReadyTickets(init.id);
+    if (fixes.length) return pushVerified(run, init, project, await mustTicket(ticket.id), fixes, { verified: false });
+    await publishAfterGate(run, init, project, await mustTicket(ticket.id));
     return;
   }
-  await repo.updateTicket(ticket.id, { gateStatus: 'fail', status: 'changes_requested' });
+  await repo.updateTicket(ticket.id, { gateStatus: 'fail', status: marker?.status === 'approved' ? 'approved' : 'changes_requested' });
   if (envFailure) {
     await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: envFailure });
     await systemMessage(run, `${ticketLabel(fresh)}: ${envFailure}`);
     return;
   }
-  if (s.autoFix && fresh.round < s.maxRounds) {
+  const streak = await failedRoundsInARow(ticket.id);
+  if (s.autoFix && streak < s.maxRounds) {
     await systemMessage(run, `${ticketLabel(fresh)}: checks failed; a fresh fixer will handle it.`);
     await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
   } else {
-    const why = `Checks still fail after round ${fresh.round}.`;
+    const why = `Checks still fail after ${streak} fix rounds in a row on this problem.`;
     await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: why });
     await systemMessage(run, `${ticketLabel(fresh)}: ${why}`);
   }
+}
+
+/**
+ * With one line in plan order, a ticket built before the ticket ahead of it in the line has opened its PR
+ * waits to open its own on top of it. Returns the ticket it waits for, or null.
+ */
+async function lineHold(init: Initiative, project: Project, ticket: Ticket): Promise<Ticket | null> {
+  if (!repo.initiativeSettings(init).lineInPlanOrder || ticket.prNumber || !gitx.isGithubUrl(project.remoteUrl ?? '')) return null;
+  const below = stackBase(ticket, await repo.listTickets(init.id));
+  return below && !hasOpenPr(below) ? below : null;
+}
+
+function heldPublishMarker(init: Initiative, ticket: Ticket): string {
+  return path.join(ticketDir(init, ticket), 'publish-waits');
+}
+
+/** Opens, in line order, the PRs held for the line whose turn has come. */
+async function startHeldPublishes(initiativeId: string): Promise<void> {
+  const init = await mustInitiative(initiativeId);
+  const s = repo.initiativeSettings(init);
+  const project = await mustProject(init.projectId);
+  if (!s.lineInPlanOrder || !s.createPrs || !gitx.isGithubUrl(project.remoteUrl ?? '')) return;
+  for (const t of await repo.listTickets(init.id)) {
+    if (!fs.existsSync(heldPublishMarker(init, t))) continue;
+    if (t.prNumber) {
+      fs.rmSync(heldPublishMarker(init, t), { force: true });
+      continue;
+    }
+    if (!SETTLED_TICKET_STATUSES.includes(t.status) || !t.branch || !['pass', 'skipped', 'waiting'].includes(t.gateStatus ?? '')) continue;
+    if (await lineHold(init, project, t)) continue;
+    await startPurposeGate(init, t, 'publish');
+  }
+}
+
+/** After a gate that passed on a build or fix round: publish (or hold the PR for the line), then review. */
+async function publishAfterGate(run: Run, init: Initiative, project: Project, ticket: Ticket): Promise<void> {
+  const s = repo.initiativeSettings(init);
+  const waitsFor = s.createPrs ? await lineHold(init, project, ticket) : null;
+  if (waitsFor) {
+    write(heldPublishMarker(init, ticket), waitsFor.key);
+    await systemMessage(run, `${ticketLabel(ticket)} is built and checked; its PR opens on ${ticketLabel(waitsFor)}, the ticket before it in the line, once that one's PR is open. Its review goes ahead meanwhile.`);
+  } else if (s.createPrs) {
+    try {
+      await publish(run, init, project, ticket);
+    } catch (err) {
+      await systemMessage(run, `${ticketLabel(ticket)}: publishing failed: ${(err as Error).message}`);
+    }
+  }
+  const after = await mustTicket(ticket.id);
+  if (s.autoReview) await enqueueAutoReview(run, init, after);
+  else await repo.updateTicket(after.id, { status: settledStatus(after) });
+  if (s.dependentsStartWhenBuilt || s.lineInPlanOrder) await startReadyTickets(init.id);
+  await startHeldPublishes(init.id);
 }
 
 async function publish(run: Run, init: Initiative, project: Project, ticket: Ticket): Promise<boolean> {
@@ -1865,7 +2561,11 @@ async function publish(run: Run, init: Initiative, project: Project, ticket: Tic
     await stackPr(run, init, linked, ticket.worktreePath!);
     return true;
   }
-  const { pr, error } = await gh.createPr(ticket.worktreePath!, { base: ticket.baseRef ?? init.baseBranch, head: ticket.branch!, title, body });
+  const below = stackBase(ticket, await repo.listTickets(init.id));
+  const rememberedBase = ticket.baseRef?.startsWith('factory/') ? init.baseBranch : ticket.baseRef;
+  const prBase = below && hasOpenPr(below) ? remoteBranchOf(below)! : rememberedBase ?? init.baseBranch;
+  if (prBase !== ticket.baseRef) ticket = await repo.updateTicket(ticket.id, { baseRef: prBase });
+  const { pr, error } = await gh.createPr(ticket.worktreePath!, { base: prBase, head: ticket.branch!, title, body });
   if (pr) {
     const opened = await repo.updateTicket(ticket.id, { prNumber: pr.number, prUrl: pr.url, prState: 'OPEN', prDraft: true });
     await systemMessage(run, `Opened draft PR for ${ticketLabel(ticket)}: ${pr.url}`);
@@ -1875,7 +2575,7 @@ async function publish(run: Run, init: Initiative, project: Project, ticket: Tic
     await log(run, `Could not open a PR: ${error}`);
     await systemMessage(run, `${ticketLabel(ticket)}: could not open a PR.\n\n\`\`\`\n${error}\n\`\`\``);
   }
-  return true;
+  return !!pr;
 }
 
 async function findPrStack(cwd: string, chain: number[]): Promise<{ pr: number; stack: gh.PrStack } | null> {
@@ -1904,13 +2604,17 @@ async function applyStackStep(cwd: string, step: StackStep): Promise<number | nu
   }
 }
 
+// PRs a GitHub stack can't take (a sibling already sits on their parent), by the chain they were tried with.
+const outsideStack = new Remembered<string>('outside-stack');
+
 async function joinParentStack(init: Initiative, ticketId: string, cwd: string): Promise<{ step: StackStep; note: string | null } | null> {
   const all = await repo.listTickets(init.id);
   const ticket = all.find((t) => t.id === ticketId);
   if (!ticket || ticket.prStack) return null;
   const chain = stackChain(ticket, all);
-  if (!chain) return null;
+  if (!chain || (await outsideStack.get(ticket.id)) === chain.join(',')) return null;
   const step = nextStackStep(chain, await findPrStack(cwd, chain));
+  if (step.kind === 'taken') await outsideStack.set(ticket.id, chain.join(','));
   const stack = await applyStackStep(cwd, step);
   if (stack) {
     for (const t of all) if (t.prNumber && chain.includes(t.prNumber) && t.prStack !== stack) await repo.updateTicket(t.id, { prStack: stack });
@@ -2002,6 +2706,8 @@ async function runReview(run: Run): Promise<void> {
   if (init.planJson) inputs.push(write(path.join(dir, 'plan-context.md'), renderPlanContext(init.planJson)));
   if (build) inputs.push(build.outputPath && fs.existsSync(build.outputPath) ? build.outputPath : write(path.join(dir, 'build.md'), build.outputMd!));
   if (gate) inputs.push(write(path.join(dir, 'checks.md'), gate.outputMd!));
+  const rulesReport = gate?.runDir ? readIfExists(path.join(gate.runDir, 'rules-report.md')) : null;
+  if (rulesReport?.trim()) inputs.push(write(path.join(dir, 'rules-report.md'), rulesReport));
   inputs.push(...historyFiles(init, ticket, run.round));
   const fixNow = path.join(dir, 'fix.md');
   if (fs.existsSync(fixNow)) inputs.push(fixNow);
@@ -2054,8 +2760,9 @@ async function afterReview(run: Run, step: StepResult, state: StepStates['review
   }
   await repo.updateTicket(ticket.id, { status: 'changes_requested', lastVerdict: 'CHANGES' });
   await agentMessage(run, `**Review asked for changes on ${ticketLabel(ticket)}.**\n\n${summaryOf(step.output!)}`);
-  if (fresh.round >= s.maxRounds) {
-    const why = `Review still asks for changes after ${fresh.round} rounds.`;
+  const streak = await failedRoundsInARow(ticket.id);
+  if (streak >= s.maxRounds) {
+    const why = `Review still asks for changes after ${streak} fix rounds in a row.`;
     await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: why });
     await systemMessage(run, `${ticketLabel(ticket)}: ${why} Read the review, add feedback and press Fix, or mark it approved.`);
   } else if (s.autoFix) {
@@ -2077,16 +2784,18 @@ function hasHumanItems(items: PrItems | null): boolean {
 
 const quote = (body: string) => `> ${body.replace(/\n/g, '\n> ')}`;
 
-async function failingCheckSection(cwd: string, base: string, c: { name: string; url: string | null }): Promise<string> {
-  const [logTail, onBase] = await Promise.all([gh.failedLog(cwd, c.url), gh.checkConclusionOn(cwd, base, c.name)]);
+async function failingCheckSection(cwd: string, base: string, c: { name: string; url: string | null }, seenLogs: Set<string>): Promise<string> {
+  const [jobLog, onBase] = await Promise.all([failedJobLog(ghRunner(cwd), c.url), gh.checkConclusionOn(cwd, base, c.name)]);
+  const logTail = jobLog && !seenLogs.has(jobLog) ? jobLog : null;
+  if (jobLog) seenLogs.add(jobLog);
   const runId = gh.actionsRunId(c.url);
   const inherited = onBase && !['success', 'skipped', 'neutral'].includes(onBase);
   return [
     `## Failing CI check: ${c.name}`,
     c.url ?? '',
     runId ? `Run id: ${runId}. If the failure has nothing to do with this PR's diff (a timeout, a network error, a test of code the PR doesn't touch), list it under \`## Reruns\` instead of changing code.` : '',
-    inherited ? `The same check also fails on \`${base}\` (${onBase}): it isn't caused by this PR. Leave it and say so.` : '',
-    logTail ? `\n\`\`\`\n${logTail}\n\`\`\`` : '',
+    inherited ? `The same check also fails on \`${base}\` (${onBase}). Compare the failures before deciding whether this PR caused anything new.` : '',
+    logTail ? `\n\`\`\`\n${logTail}\n\`\`\`` : jobLog ? 'The failed job log is the same as the one shown above for another check.' : '',
   ].filter(Boolean).join('\n');
 }
 
@@ -2098,17 +2807,49 @@ async function recordCi(ticket: Ticket, snap: Pick<gh.PrSnapshot, 'headRefOid' |
   const ciState = gh.ciStateOf(snap);
   if (ticket.ciState === ciState && ticket.ciHeadSha === snap.headRefOid) return;
   await repo.updateTicket(ticket.id, { ciState, ciHeadSha: snap.headRefOid });
+  if (ciState === 'green' || ciState === 'red') await repo.recordCiResult(ticket.id, snap.headRefOid, ciState, snap.failingChecks.map((c) => c.name));
   if (ciState === 'green' && ticket.ciState !== 'green') await startReadyTickets(ticket.initiativeId).catch((e) => console.warn('[ci-green]', e.message));
 }
 
-async function pendingPrWork(cwd: string, ticket: Ticket, lastFixAt: number | null): Promise<PrWork | null> {
-  const prNumber = ticket.prNumber!;
-  const snap = await gh.prSnapshot(cwd, prNumber);
-  if (!snap || snap.state !== 'OPEN') return null;
-  await recordCi(ticket, snap);
-  const threads = (await gh.unresolvedThreads(cwd, prNumber)) ?? [];
+/** How the project's check policy treats each failing check; `required` names the checks branch protection requires. */
+function checkClassifier(project: Project, required: ReadonlySet<string> = new Set()): ClassifyCheck {
+  return (check) =>
+    classifyCheck(
+      {
+        name: check.name,
+        aliases: check.workflowName ? [`${check.workflowName} / ${check.name}`] : [],
+        isRequired: required.has(check.name),
+      },
+      project.checkPolicy ?? [],
+    );
+}
+
+interface PrState {
+  snap: gh.PrSnapshot;
+  threads: gh.ReviewThread[];
+  required: ReadonlySet<string>;
+}
+
+async function readPrState(project: Project, cwd: string, ticket: Ticket): Promise<PrState | null> {
+  const repoRef = project.remoteUrl ? repoOf(project.remoteUrl) : null;
+  if (repoRef) {
+    const details = await prDetails(ghRunner(cwd), repoRef, [ticket.prNumber!]);
+    const d = details?.get(ticket.prNumber!);
+    if (d) return { snap: d.snapshot, threads: d.threads, required: new Set(d.checks.filter((c) => c.isRequired).map((c) => c.name)) };
+    if (!githubBudget.canSpend()) return null;
+  }
+  const snap = await gh.prSnapshot(cwd, ticket.prNumber!);
+  if (!snap) return null;
+  const threads = await gh.unresolvedThreads(cwd, ticket.prNumber!);
+  return threads ? { snap, threads, required: new Set() } : null;
+}
+
+async function pendingPrWork(project: Project, cwd: string, ticket: Ticket, lastFixAt: number | null, known?: PrState | null): Promise<PrWork | null> {
+  const state = known ?? (await readPrState(project, cwd, ticket));
+  if (!state || state.snap.state !== 'OPEN') return null;
+  await recordCi(ticket, state.snap);
   const app = await repo.getAppSettings();
-  return prWorkFrom(snap, threads, { lastFixAt, noiseCommentAuthors: app.prNoiseCommentAuthors });
+  return prWorkFrom(state.snap, state.threads, { lastFixAt, noiseCommentAuthors: app.prNoiseCommentAuthors, classify: checkClassifier(project, state.required) });
 }
 
 interface FixWork {
@@ -2124,7 +2865,7 @@ async function pendingFixWork(project: Project, ticket: Ticket, currentRunId: st
   const review = latestWithOutput(runs, 'review');
   const gate = latestWithOutput(runs, 'gate');
   const cwd = ticket.worktreePath && fs.existsSync(ticket.worktreePath) ? ticket.worktreePath : project.repoPath;
-  const pr = ticket.prNumber ? await pendingPrWork(cwd, ticket, fixedAt(lastFix)) : null;
+  const pr = ticket.prNumber ? await pendingPrWork(project, cwd, ticket, fixedAt(lastFix)) : null;
   return {
     review: review && ts(review.queuedAt) > ts(lastFix?.queuedAt) && parseVerdict('review', review.verdict) === 'CHANGES' ? review : null,
     failedGate: gate && /FAIL/i.test(gate.verdict ?? '') && (!review || ts(gate.queuedAt) > ts(review.queuedAt)) ? gate : null,
@@ -2143,6 +2884,107 @@ async function hasFixWork(init: Initiative, project: Project, ticket: Ticket): P
   return !!(w.review || w.failedGate || w.pr || w.feedback.length);
 }
 
+/** The cheaper fixer had the last round on this ticket and it did not hold (blocked, failed checks, verifier block). */
+async function mechanicalRoundFailed(ticketId: string, mechanicalModel: string): Promise<boolean> {
+  const recent = await sql<Run[]>`
+    select * from runs where ticket_id = ${ticketId} and kind in ('fix', 'gate', 'verify') and status in ('succeeded', 'failed')
+    order by queued_at desc limit 8`;
+  const lastFix = recent.find((r) => r.kind === 'fix');
+  if (!lastFix || lastFix.model !== mechanicalModel) return false;
+  if (lastFix.status === 'failed' || /BLOCKED/.test(lastFix.verdict ?? '')) return true;
+  return recent.some((r) => ts(r.queuedAt) > ts(lastFix.queuedAt) && ((r.kind === 'gate' && r.verdict === 'GATE: FAIL') || (r.kind === 'verify' && /BLOCK/i.test(r.verdict ?? ''))));
+}
+
+const FIX_SESSION_MAX_AGE_MS = 60 * 60_000;
+
+/** The immediately previous fix session, while its cached context is fresh and its role has not changed. */
+async function resumableFixSession(ticketId: string, currentRunId: string, model: string, expectedRoleSha: string): Promise<string | null> {
+  const [last] = await sql<Run[]>`
+    select * from runs where ticket_id = ${ticketId} and kind = 'fix' and id <> ${currentRunId}
+    order by queued_at desc limit 1`;
+  const age = Date.now() - ts(last?.finishedAt);
+  return last?.status === 'succeeded' &&
+    last.sessionId &&
+    last.model === model &&
+    last.roleSha === expectedRoleSha &&
+    age >= 0 &&
+    age <= FIX_SESSION_MAX_AGE_MS &&
+    /APPLIED|NO-CHANGES/.test(last.verdict ?? '')
+    ? last.sessionId
+    : null;
+}
+
+function agentChecksCommand(project: Project, worktree: string | null): string {
+  if (project.quickChecksCommand?.trim()) return worktree ? `cd ${worktree} && ${project.quickChecksCommand}` : project.quickChecksCommand;
+  return project.checksCommand ? "none: the factory runs the full checks itself after you finish; don't run them" : 'none configured';
+}
+
+function emptyHooksDir(): string {
+  const dir = path.join(config.home, 'empty-hooks');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** What an agent that commits gets in its shell: the ticket's refs, and git that skips commit hooks and reuses conflict resolutions. */
+function agentEnvFor(project: Project, ticket: Ticket, base: string): Record<string, string> {
+  const skipHooks = project.skipAgentCommitHooks !== false && !!project.checksCommand?.trim();
+  return { ...factoryEnv(ticket, base), ...gitx.agentGitEnv({ skipHooks, emptyHooksDir: emptyHooksDir() }) };
+}
+
+/**
+ * What a fixer must not break in the PRs stacked on this one (names this branch adds that their own changes
+ * use), and what changed in the PR below since this branch last had it.
+ */
+async function writeStackContext(init: Initiative, project: Project, ticket: Ticket, dir: string): Promise<string[]> {
+  const wt = ticket.worktreePath!;
+  const all = await repo.listTickets(init.id);
+  const files: string[] = [];
+  const above = all.filter((t) => t.id !== ticket.id && t.worktreePath && fs.existsSync(t.worktreePath) && stackChainKeys(t, all).includes(ticket.key));
+  if (above.length) {
+    const diff = (await gitx.git(wt, ['diff', '-U0', '--no-color', `${await diffBase(project, ticket)}...HEAD`])).stdout;
+    const names = [...new Set(addedDefinitions(diff).map((d) => d.name))].slice(0, 40);
+    const uses: string[] = [];
+    const named = names.length ? new RegExp(`\\b(${names.map(escapeRegExp).join('|')})\\b`) : null;
+    for (const t of named ? above : []) {
+      const theirs = (await gitx.git(t.worktreePath!, ['diff', '-U0', '--no-color', `${ticket.branch}...HEAD`])).stdout;
+      let file = '';
+      for (const line of theirs.split('\n')) {
+        if (line.startsWith('+++ ')) file = line.replace(/^\+\+\+ (b\/)?/, '');
+        else if (line.startsWith('+') && named!.test(line)) uses.push(`- ${ticketLabel(t)}: ${file}: ${line.slice(1).trim().slice(0, 200)}`);
+        if (uses.length >= 60) break;
+      }
+    }
+    if (uses.length) {
+      files.push(
+        write(
+          path.join(dir, 'used-above.md'),
+          `# Used by the PRs stacked on this one\n\nThese names this branch adds are used by the changes of the PRs above it. Renaming, moving or deleting one breaks them: keep it, or say in fix.md which PR must follow.\n\n${uses.join('\n')}\n`,
+        ),
+      );
+    }
+  }
+  const target = gateTarget(ticket, all, init.baseBranch);
+  if (target && stackBase(ticket, all) && (await gitx.refExists(wt, `origin/${target}`))) {
+    const log = (await gitx.git(wt, ['log', '--oneline', '--no-merges', `HEAD..origin/${target}`])).stdout.trim();
+    if (log) {
+      const stat = (await gitx.git(wt, ['diff', '--stat', `HEAD...origin/${target}`])).stdout.trim();
+      files.push(write(path.join(dir, 'changed-below.md'), `# What changed in the PR below since this branch last had it\n\nThe factory merges \`origin/${target}\` into this branch before you start.\n\n## Commits\n${log}\n\n## Files\n${stat}\n`));
+    }
+  }
+  return files;
+}
+
+function stackChainKeys(ticket: Ticket, all: Ticket[]): string[] {
+  const keys: string[] = [];
+  for (let below = stackBase(ticket, all); below && keys.length < all.length; below = stackBase(below, all)) keys.push(below.key);
+  return keys;
+}
+
+/** A merge conflict the factory posted about the PR below: mechanical work, whoever else's words are absent. */
+function isMechanicalFeedback(m: Message): boolean {
+  return m.author === 'system' && m.body.includes(STACK_CONFLICT_NOTE);
+}
+
 async function collectFixInputs(run: Run, init: Initiative, project: Project, ticket: Ticket, dir: string) {
   const blocked = path.join(dir, 'verify-block.md');
   if (fs.existsSync(blocked)) {
@@ -2155,7 +2997,7 @@ async function collectFixInputs(run: Run, init: Initiative, project: Project, ti
   for (const leftByAnEarlierPass of FIX_INPUTS) fs.rmSync(path.join(dir, leftByAnEarlierPass), { force: true });
   const work = await pendingFixWork(project, ticket, run.id);
   const reports: string[] = [];
-  let mechanicalOnly = !work.review && !work.feedback.length;
+  let mechanicalOnly = !work.review && work.feedback.every(isMechanicalFeedback);
   if (work.review) reports.push(write(path.join(dir, 'review.md'), work.review.outputMd!));
   if (work.failedGate) reports.push(write(path.join(dir, 'checks.md'), work.failedGate.outputMd!));
   if (work.pr) {
@@ -2167,7 +3009,8 @@ async function collectFixInputs(run: Run, init: Initiative, project: Project, ti
     if (pr.conflicting) {
       parts.push(`## Merge conflict\nThe PR conflicts with \`${snap.baseRefName}\`. Run \`git fetch origin && git merge origin/${snap.baseRefName}\`, resolve, commit. Never rebase or force-push.`);
     }
-    for (const c of pr.failingChecks) parts.push(await failingCheckSection(wt, snap.baseRefName, c));
+    const seenLogs = new Set<string>();
+    for (const c of pr.failingChecks) parts.push(await failingCheckSection(wt, snap.baseRefName, c, seenLogs));
     pr.threads.forEach((t, n) => {
       const label = `T${n + 1}`;
       items.threads.push({ label, id: t.id, rootCommentId: t.rootCommentId, rootAuthor: t.rootAuthor, rootIsBot: t.rootIsBot });
@@ -2229,9 +3072,19 @@ async function runFix(run: Run): Promise<void> {
     ...(description ? [write(path.join(dir, 'pr-description.md'), asPullRequestSection(description))] : []),
     ...historyFiles(init, ticket, run.round),
   ];
-  const model = collected.mechanicalOnly ? s.models.mechanicalFix : s.models.fix;
+  const escalated = collected.mechanicalOnly && (await mechanicalRoundFailed(ticket.id, s.models.mechanicalFix));
+  if (escalated) await log(run, 'The cheaper fixer did not settle the last round, so this round goes to the full fixer.');
+  const mechanical = collected.mechanicalOnly && !escalated;
+  const model = mechanical ? s.models.mechanicalFix : s.models.fix;
+  const roleFile = mechanical ? MECHANICAL_FIXER_FILE : undefined;
+  const expectedRoleSha = rolePromptSha(rolePrompt('fix', roleFile, await repo.acceptedProjectRules(project.id)));
   const base = await diffBase(project, ticket);
   const out = path.join(dir, 'fix.md');
+  inputs.push(...(await writeStackContext(init, project, ticket, dir)));
+  // The gate after this fix merges the base in; merging it now keeps that merge out of the fix's diff.
+  if (project.checksCommand?.trim() && (await mergeBaseBeforeChecks(run, init, project, ticket))) {
+    await log(run, 'Merging the branch this PR targets conflicts; the checks after the fix report it unless the fixer merges it.');
+  }
   const start = await gitx.headSha(ticket.worktreePath!);
   write(path.join(dir, 'start-sha'), start ?? '');
   const prompt = header(
@@ -2244,13 +3097,15 @@ async function runFix(run: Run): Promise<void> {
       ['Base', base],
       ['PR', ticket.prUrl],
       ['Round', String(run.round)],
-      ['Checks command', checksCommandIn(project, ticket.worktreePath)],
+      ['Quick checks (yours to run)', agentChecksCommand(project, ticket.worktreePath)],
     ],
     inputs,
     [out],
     'Reply with one line: the first line of fix.md.',
   );
   await repo.updateTicket(ticket.id, { round: run.round });
+  const resumeSession = s.resumeFixSessions ? await resumableFixSession(ticket.id, run.id, model, expectedRoleSha) : null;
+  if (resumeSession) await log(run, `Continuing the session of the last fix round (${resumeSession.slice(0, 8)}) instead of reading the repo again.`);
   await runAgent(
     run,
     {
@@ -2260,8 +3115,9 @@ async function runFix(run: Run): Promise<void> {
       runDir: dir,
       outputPath: out,
       model,
-      roleFile: collected.mechanicalOnly ? MECHANICAL_FIXER_FILE : undefined,
-      env: factoryEnv(ticket, base),
+      roleFile,
+      env: agentEnvFor(project, ticket, base),
+      resumeSession,
     },
     { start, base, feedbackIds: collected.feedback.map((f) => f.id) },
   );
@@ -2278,7 +3134,7 @@ async function afterFix(run: Run, step: StepResult, state: StepStates['fix']): P
   const verdict = parseVerdict('fix', step.output);
   if (!verdict) return failMalformedVerdict(run, step.output);
   await repo.consumeFeedback(state.feedbackIds, run.id);
-  heldConflicts.delete(ticket.id);
+  await heldConflicts.delete(ticket.id);
   await finish(run, 'succeeded');
   await agentMessage(run, `**Fix round ${run.round} on ${ticketLabel(ticket)}: ${firstLine(step.output)!.replace(/^FIX:\s*/i, '')}**\n\n${summaryOf(step.output!)}`);
   await rerunUnrelatedFailures(run, ticket, step.output!);
@@ -2306,6 +3162,12 @@ async function afterFix(run: Run, step: StepResult, state: StepStates['fix']): P
   }
   const fresh = await mustTicket(ticket.id);
   const committed = (await gitx.headSha(ticket.worktreePath!)) !== start;
+  // The merge of the PR below that the server made before the fixer started is the cure the PR's CI needed:
+  // checked and pushed now, not left behind in the worktree.
+  if (!committed && (await hasUnpushedCommits(fresh))) {
+    await repo.updateTicket(ticket.id, { status: settledStatus(fresh) });
+    if (await startPurposeGate(init, await mustTicket(ticket.id), 'readiness', run)) return;
+  }
   if (s.autoReview && reviewAfterFix({ committed, lastVerdict: fresh.lastVerdict })) {
     await enqueueAutoReview(run, init, fresh);
   } else {
@@ -2442,6 +3304,7 @@ async function runVerify(run: Run): Promise<void> {
       ['PR', ticket.prUrl],
       ['Fix commits', `git log --oneline ${start}..HEAD`],
       ['Fix diff', `git diff ${start}..HEAD`],
+      ["Commits the factory made itself (merges of the branch below, autofix; not the fixer's, judge only the others)", (await factoryCommits(wt, `${start}..HEAD`)) || null],
       ['The branch before the fix', `git diff ${base}...${start}`],
     ],
     inputs,
@@ -2460,6 +3323,65 @@ async function runsById(ids: string[]): Promise<Run[]> {
   return runs.filter((r): r is Run => !!r);
 }
 
+function pushHeldFile(init: Initiative, ticket: Ticket): string {
+  return path.join(ticketDir(init, ticket), 'push-held.json');
+}
+
+/**
+ * While a ticket below is still taking its part of the same round of fixes, a verified fix waits to be pushed:
+ * it goes out once, with the code from below merged in, instead of being pushed now and merged into again.
+ */
+async function pushHoldBelow(init: Initiative, ticket: Ticket): Promise<Ticket | null> {
+  const all = await repo.listTickets(init.id);
+  const pending = await getTicketsWithPendingFeedback(init.id);
+  for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
+    if (below.status === 'fixing' || pending.has(below.id) || fs.existsSync(pushHeldFile(init, below))) return below;
+  }
+  return null;
+}
+
+/** Pushes a ticket's verified fix rounds, rewrites the PR text, answers the threads, then reviews or settles it. */
+async function pushVerified(run: Run, init: Initiative, project: Project, ticket: Ticket, fixes: Run[], opts: { verified: boolean; start?: string }): Promise<void> {
+  const s = repo.initiativeSettings(init);
+  const wt = ticket.worktreePath!;
+  const start = opts.start ?? (await verifyRangeStart(init, ticket, fixes));
+  const commits = (await gitx.git(wt, ['log', '--reverse', '--first-parent', '--format=- `%h` %s', `${start}..HEAD`])).stdout.trim();
+  const hold = commits && ticket.prNumber && project.checksCommand?.trim() ? await pushHoldBelow(init, ticket) : null;
+  if (hold) {
+    write(pushHeldFile(init, ticket), JSON.stringify({ fixRunIds: fixes.map((f) => f.id), start }));
+    await repo.updateTicket(ticket.id, { status: settledStatus(ticket), blockedReason: null });
+    await systemMessage(run, `${ticketLabel(ticket)}: the fix is ready; it is pushed once ${ticketLabel(hold)} below it has its fixes in, together with them, so the PR is pushed and tested once.`);
+    return;
+  }
+  const pushed = commits && s.createPrs ? await publish(run, init, project, ticket) : false;
+  await announcePush(run, init, ticket, fixes, pushed ? commits : '', !commits || !!pushed);
+  if (pushed && !opts.verified) await log(run, "Pushed without a verifier: the round's only commits are the factory's own (merges and autofix).");
+  const fixDirs = fixes.map((f) => roundDirOf(init, ticket, f));
+  const fixedFactoryReview = fixDirs.some((d) => fs.existsSync(path.join(d, 'review.md')));
+  if ((fixedFactoryReview || ticket.lastVerdict !== 'APPROVE') && s.autoReview) {
+    await enqueueAutoReview(run, init, await mustTicket(ticket.id));
+  } else {
+    await repo.updateTicket(ticket.id, { status: settledStatus(ticket), blockedReason: null });
+    await refreshInitiativeStatus(init.id);
+  }
+}
+
+async function announcePush(run: Run, init: Initiative, ticket: Ticket, fixes: Run[], commits: string, fixOnPr: boolean): Promise<void> {
+  if (commits) await describeFixedPr(run, await mustTicket(ticket.id), fixes);
+  await postVerifiedReplies(run, await mustTicket(ticket.id), init, fixes, commits, fixOnPr);
+}
+
+/** A held verified fix that just went out with a stack sync: its PR text and replies follow it now. */
+async function announceHeldPush(run: Run, init: Initiative, ticket: Ticket): Promise<void> {
+  const file = pushHeldFile(init, ticket);
+  if (!fs.existsSync(file)) return;
+  const held = JSON.parse(fs.readFileSync(file, 'utf8')) as { fixRunIds: string[]; start: string };
+  fs.rmSync(file, { force: true });
+  const fixes = await runsById(held.fixRunIds);
+  const commits = (await gitx.git(ticket.worktreePath!, ['log', '--reverse', '--first-parent', '--format=- `%h` %s', `${held.start}..HEAD`])).stdout.trim();
+  await announcePush(run, init, ticket, fixes, commits, true);
+}
+
 async function afterVerify(run: Run, step: StepResult, state: StepStates['verify']): Promise<void> {
   const init = await mustInitiative(run.initiativeId);
   const project = await mustProject(init.projectId);
@@ -2476,19 +3398,8 @@ async function afterVerify(run: Run, step: StepResult, state: StepStates['verify
   await finish(run, 'succeeded');
 
   if (verdict === 'APPROVE') {
-    const commits = (await gitx.git(wt, ['log', '--reverse', '--first-parent', '--format=- `%h` %s', `${start}..HEAD`])).stdout.trim();
-    const fresh = await mustTicket(ticket.id);
-    const pushed = commits && s.createPrs ? await publish(run, init, project, fresh) : false;
-    if (pushed) await describeFixedPr(run, await mustTicket(ticket.id), fixes);
-    await postVerifiedReplies(run, await mustTicket(ticket.id), init, fixes, pushed ? commits : '', !commits || !!pushed);
-    await agentMessage(run, `**Verifier approved fix round ${fixes[0].round} on ${ticketLabel(ticket)}.**${pushed ? ' Pushed.' : ''}\n\n${summaryOf(step.output!)}`);
-    const fixedFactoryReview = fixDirs.some((d) => fs.existsSync(path.join(d, 'review.md')));
-    if ((fixedFactoryReview || fresh.lastVerdict !== 'APPROVE') && s.autoReview) {
-      await enqueueAutoReview(run, init, await mustTicket(ticket.id));
-    } else {
-      await repo.updateTicket(ticket.id, { status: settledStatus(fresh), blockedReason: null });
-      await refreshInitiativeStatus(init.id);
-    }
+    await agentMessage(run, `**Verifier approved fix round ${fixes[0].round} on ${ticketLabel(ticket)}.**\n\n${summaryOf(step.output!)}`);
+    await pushVerified(run, init, project, await mustTicket(ticket.id), fixes, { verified: true, start });
     return;
   }
 
@@ -2497,7 +3408,7 @@ async function afterVerify(run: Run, step: StepResult, state: StepStates['verify
   const findings = section(step.output!, 'Findings') ?? '';
   const fresh = await mustTicket(ticket.id);
   const alreadyRetried = fs.existsSync(path.join(dir, 'verify-block.md'));
-  if (!alreadyRetried && fresh.round < s.maxRounds) {
+  if (!alreadyRetried && (await failedRoundsInARow(ticket.id)) < s.maxRounds) {
     const nextDir = ticketRoundDir(init, fresh, fresh.round + 1);
     fs.mkdirSync(nextDir, { recursive: true });
     carryReportsForRetry(
@@ -2879,7 +3790,7 @@ async function afterSteer(run: Run, step: StepResult, state: StepStates['steer']
     for (const t of drops) outcome.push(`- ${await dropTicket(init, project, t, 'Closed: the owner no longer needs this change.')}`);
   }
   const sent: Ticket[] = [];
-  for (const { ticket, instructions } of routed) {
+  for (const { ticket, instructions, independent } of routed) {
     if (drops.some((d) => d.id === ticket.id)) continue;
     const blocker = routeBlocker(ticket);
     if (blocker) {
@@ -2893,7 +3804,7 @@ async function afterSteer(run: Run, step: StepResult, state: StepStates['steer']
       runId: run.id,
       author: 'agent',
       kind: 'feedback',
-      body: [`**Your feedback on the whole initiative, routed to ${ticketLabel(ticket)}.**`, instructions, `What you wrote:\n\n${ownerWords}`].join('\n\n'),
+      body: [`**Your feedback on the whole initiative, routed to ${ticketLabel(ticket)}.**`, instructions, `What you wrote:\n\n${ownerWords}`, ...(independent ? [INDEPENDENT_ROUTE] : [])].join('\n\n'),
     });
   }
   // Every route and restack is stored before any fixer starts, so a ticket stacked on another routed ticket waits for it.
@@ -2931,23 +3842,41 @@ async function getTicketsWithPendingFeedback(initiativeId: string): Promise<Set<
   return new Set(rows.map((r) => r.ticketId));
 }
 
+// Marks routed feedback whose change needs nothing from the fixes below it in the same wave.
+const INDEPENDENT_ROUTE = '<!-- route: independent -->';
+
+async function onlyIndependentFeedback(init: Initiative, ticket: Ticket): Promise<boolean> {
+  const pending = await repo.pendingFeedback(init.id, ticket.id);
+  return pending.length > 0 && pending.every((m) => m.body.includes(INDEPENDENT_ROUTE));
+}
+
 // Why the ticket's feedback can't go to a fixer yet: a ticket below it in its stack still has feedback to fix
-// or is being fixed, or its pushed fix has not been merged into this branch.
+// or is being fixed, or its pushed fix has not been merged into this branch. Feedback the router marked
+// independent starts at once; its verified fix waits to be pushed until the fixes below are in.
 async function findFixBelowHold(init: Initiative, ticket: Ticket, all: Ticket[]): Promise<string | null> {
+  if (await onlyIndependentFeedback(init, ticket)) return null;
   const blocker = findFeedbackBlocker(ticket, all, await getTicketsWithPendingFeedback(init.id));
   return blocker ? `waits for the fix on ${ticketLabel(blocker)} below it, and starts once that fix is merged into its branch` : null;
 }
 
 async function findFeedbackHold(init: Initiative, ticket: Ticket): Promise<string | null> {
   const all = await repo.listTickets(init.id);
+  const project = await mustProject(init.projectId);
   const fixBelow = await findFixBelowHold(init, ticket, all);
   if (fixBelow) return fixBelow;
-  // The stack sync leaves a branch with unpushed commits alone (a fix that never got verified), so it would
-  // never merge the tickets below: the fixer merges them itself.
-  if (await hasUnpushedCommits(ticket)) return null;
+  const unready = await findUnreadyBelow(project, ticket, all);
+  if (unready) {
+    await startPurposeGate(init, unready, 'readiness');
+    return `waits until ${ticketLabel(unready)} below it passes its checks with the branch it targets merged in`;
+  }
+  // With a checks command the fix run merges the PR below into the branch before its agent starts, so nothing
+  // waits for a sync. The stack sync also leaves a branch with unpushed commits alone (a fix that never got
+  // verified), so it would never merge the tickets below: the fixer merges them itself.
+  if (project.checksCommand?.trim() || (await hasUnpushedCommits(ticket))) return null;
+  const conflictHeld = await heldConflicts.has(ticket.id);
   for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
     // A merge that conflicts is the fixer's job: it is in the ticket's feedback, so it does not hold the fixer back.
-    if (below === stackBase(ticket, all) && heldConflicts.has(ticket.id)) continue;
+    if (below === stackBase(ticket, all) && conflictHeld) continue;
     if (await lacksPushedHead(init, ticket, below)) return `waits until the latest ${ticketLabel(below)} is merged into its branch`;
   }
   return null;
@@ -3285,7 +4214,7 @@ export async function resetTicket(ticketId: string): Promise<void> {
   const rebuilt = stateAfterReset(readRebuildState(stateFile), t);
   writeRebuildState(stateFile, rebuilt);
   await removeTicketWorktree(project, init, t);
-  fs.rmSync(ticketDir(init, t), { recursive: true, force: true });
+  discardDir(ticketDir(init, t));
   await repo.updateTicket(t.id, {
     status: t.status !== 'proposed' && LIVE_INITIATIVE_STATUSES.includes(init.status) ? 'todo' : 'proposed',
     round: 0,
@@ -3345,7 +4274,7 @@ export async function resetInitiative(initiativeId: string): Promise<void> {
   for (const t of await repo.listTickets(init.id)) await removeTicketWorktree(project, init, t);
   await sql`delete from tickets where initiative_id = ${init.id}`;
   await removeLinks(linksDir(init), linkMirrorsRoot()).catch(() => undefined);
-  fs.rmSync(initiativeDir(init), { recursive: true, force: true });
+  discardDir(initiativeDir(init));
   await repo.updateInitiative(init.id, { status: 'draft', planMd: null, planJson: null, planVerdict: null, planRound: 0, approvedAt: null });
   await systemMessage({ initiativeId: init.id }, 'Reset to draft: plan, tickets, worktrees and local branches removed. Pushed branches and PRs were left as is.');
 }
@@ -3356,7 +4285,7 @@ export async function deleteInitiative(initiativeId: string): Promise<void> {
   await cancelActive({ initiativeId: init.id });
   if (project) for (const t of await repo.listTickets(init.id)) await removeTicketWorktree(project, init, t);
   await removeLinks(linksDir(init), linkMirrorsRoot()).catch(() => undefined);
-  fs.rmSync(initiativeDir(init), { recursive: true, force: true });
+  discardDir(initiativeDir(init));
   await repo.deleteInitiative(init.id);
 }
 
@@ -3433,18 +4362,34 @@ interface PrRead {
   changed: boolean;
 }
 
+/** Every listed PR's state in as few GitHub calls as the batch allows; PRs the batch could not read are read one by one. */
+async function readSnapshots(project: Project, tickets: Ticket[]): Promise<Map<string, gh.PrSnapshot>> {
+  const repoRef = project.remoteUrl ? repoOf(project.remoteUrl) : null;
+  const batch = repoRef && tickets.length ? await prDetails(ghRunner(project.repoPath), repoRef, tickets.map((t) => t.prNumber!)) : null;
+  const out = new Map<string, gh.PrSnapshot>();
+  if (repoRef && !batch && !githubBudget.canSpend()) return out;
+  for (const t of tickets) {
+    const snap = batch?.get(t.prNumber!)?.snapshot ?? (await gh.prSnapshot(t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath, t.prNumber!));
+    if (snap) out.set(t.id, snap);
+  }
+  return out;
+}
+
 async function refreshPrStates(init: Initiative): Promise<PrRead[]> {
   const tickets = (await repo.listTickets(init.id)).filter((t) => t.prNumber && !['merged', 'canceled'].includes(t.status));
+  const project = await mustProject(init.projectId);
+  const snapshots = await readSnapshots(project, tickets);
   const reads: PrRead[] = [];
   for (const t of tickets) {
-    const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : (await mustProject(init.projectId)).repoPath;
-    const snap = await gh.prSnapshot(cwd, t.prNumber!);
+    const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;
+    const snap = snapshots.get(t.id);
     if (!snap) continue;
     const patch: Partial<Ticket> = {};
     if (snap.state !== t.prState) patch.prState = snap.state;
     if (snap.state === 'OPEN' && snap.isDraft !== t.prDraft) patch.prDraft = snap.isDraft;
     if (snap.state === 'MERGED') Object.assign(patch, { status: 'merged', ciState: null, ciHeadSha: null });
     if (snap.state === 'CLOSED' && t.prHeadRef) patch.status = 'canceled';
+    if (snap.state === 'OPEN' && snap.baseRefName && snap.baseRefName !== t.baseRef) Object.assign(patch, await followRetarget(init, t, snap.baseRefName, tickets));
     const changed = Object.keys(patch).length > 0;
     if (changed) {
       await repo.updateTicket(t.id, patch);
@@ -3453,6 +4398,25 @@ async function refreshPrStates(init: Initiative): Promise<PrRead[]> {
     reads.push({ ticket: t, snap, cwd, changed });
   }
   return reads;
+}
+
+/**
+ * Someone retargeted a ticket's PR on GitHub (the owner restacking by hand, or GitHub after the PR below merged):
+ * the factory follows it, so its stack and GitHub's agree and the next sync does not undo it.
+ */
+async function followRetarget(init: Initiative, t: Ticket, base: string, tickets: Ticket[]): Promise<Partial<Ticket>> {
+  const scope = { initiativeId: init.id, ticketId: t.id };
+  if (t.prHeadRef) {
+    await systemMessage(scope, `${ticketLabel(t)}: adopted PR #${t.prNumber} was retargeted on GitHub onto \`${base}\`, so its checks now use that branch too.`);
+    return { baseRef: base };
+  }
+  const onto = tickets.find((x) => x.id !== t.id && remoteBranchOf(x) === base && !['merged', 'canceled'].includes(x.status));
+  if (onto) {
+    await systemMessage(scope, `${ticketLabel(t)}: #${t.prNumber} was retargeted on GitHub onto ${ticketLabel(onto)}, so it now stacks on it here too.`);
+    return { baseRef: base, dependsOn: [onto.key], needs: [...new Set([...(t.needs ?? []), onto.key])] };
+  }
+  await systemMessage(scope, `${ticketLabel(t)}: #${t.prNumber} was retargeted on GitHub onto \`${base}\`, so the factory now treats that branch as its PR base.`);
+  return { baseRef: base, dependsOn: [] };
 }
 
 export async function syncPrs(initiativeId: string): Promise<number> {
@@ -3472,43 +4436,51 @@ export async function syncPrs(initiativeId: string): Promise<number> {
 }
 
 // Head commit per ticket whose settled red CI the poll already handed to the PR sweep.
-const ciHandedOver = new Map<string, string>();
+const ciHandedOver = new Remembered<string>('ci-handed-over');
 const ciHeadsSeen = new CiHeadsSeen();
-let pollingCi = false;
+// The light fingerprint of each PR the poll last read in full: an unchanged one is not read again.
+const ciLightSeen = new Map<string, string>();
 
 /**
  * Between the 5-minute PR syncs, PRs whose CI is still running are checked every minute: a green
  * result unblocks dependents waiting for it, and a red one that has finished goes to the PR sweep at
- * once instead of at its next 15-minute pass. The sweep does the same work either way, only sooner.
+ * once instead of at its next 15-minute pass. One light GitHub call per repo says which PRs changed;
+ * only those are read in full, in one batched call.
  */
 async function pollRunningCi(): Promise<void> {
-  if (pollingCi) return;
-  pollingCi = true;
-  try {
-    const open = await sql<Ticket[]>`
-      select t.* from tickets t join initiatives i on i.id = t.initiative_id
-      where i.status in ('in_progress','done') and t.pr_number is not null and t.pr_state = 'OPEN'
-        and t.status not in ('merged','canceled')`;
-    const settledRed = new Set<string>();
-    for (const t of open.filter((x) => ciWorthPolling(x, ciHandedOver.get(x.id), ciHeadsSeen.since(x.id, x.ciHeadSha)))) {
-      const project = await repo.getProject((await mustInitiative(t.initiativeId)).projectId);
-      if (!project) continue;
-      const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;
-      const snap = await gh.prCi(cwd, t.prNumber!).catch(() => null);
+  const open = await sql<(Ticket & { projectId: string })[]>`
+    select t.*, i.project_id from tickets t join initiatives i on i.id = t.initiative_id
+    where i.status in ('in_progress','done') and t.pr_number is not null and t.pr_state = 'OPEN'
+      and t.status not in ('merged','canceled')`;
+  const due: (Ticket & { projectId: string })[] = [];
+  for (const t of open) if (ciWorthPolling(t, await ciHandedOver.get(t.id), ciHeadsSeen.since(t.id, t.ciHeadSha))) due.push(t);
+  const settledRed = new Set<string>();
+  for (const projectId of new Set(due.map((t) => t.projectId))) {
+    const project = await repo.getProject(projectId);
+    const repoRef = project?.remoteUrl ? repoOf(project.remoteUrl) : null;
+    if (!project || !repoRef) continue;
+    const run = ghRunner(project.repoPath);
+    const light = await openPrsLight(run, repoRef);
+    if (!light) continue;
+    const mine = due.filter((t) => t.projectId === projectId);
+    const changed = mine.filter((t) => {
+      const lp = light.find((p) => p.number === t.prNumber);
+      return lp && ciLightSeen.get(t.id) !== lp.fingerprint;
+    });
+    const details = changed.length ? await prDetails(run, repoRef, changed.map((t) => t.prNumber!)) : null;
+    for (const t of changed) {
+      const snap = details?.get(t.prNumber!)?.snapshot;
       if (!snap || snap.state !== 'OPEN') continue;
+      ciLightSeen.set(t.id, light.find((p) => p.number === t.prNumber)!.fingerprint);
       await recordCi(t, snap);
-      if (ciSettledRed(snap, ciHandedOver.get(t.id))) {
-        ciHandedOver.set(t.id, snap.headRefOid);
+      if (ciSettledRed(snap, await ciHandedOver.get(t.id))) {
+        await ciHandedOver.set(t.id, snap.headRefOid);
         settledRed.add(t.initiativeId);
       }
     }
-    if (settledRed.size && (await repo.getAppSettings()).sweepOpenPrs) {
-      for (const initiativeId of settledRed) void sweepOpenPrs({ initiativeId }).catch((err) => console.warn('[ci-poll]', (err as Error).message));
-    }
-  } catch (err) {
-    console.warn('[ci-poll]', (err as Error).message);
-  } finally {
-    pollingCi = false;
+  }
+  if (settledRed.size && (await repo.getAppSettings()).sweepOpenPrs) {
+    for (const initiativeId of settledRed) void sweepOpenPrs({ initiativeId }).catch((err) => console.warn('[ci-poll]', (err as Error).message));
   }
 }
 
@@ -3520,9 +4492,9 @@ async function autoSyncPrs(): Promise<void> {
 }
 
 const stackSyncRerun = new Map<string, boolean>();
-const conflictsSentToFixer = new Map<string, string | null>();
+const conflictsSentToFixer = new Remembered<string | null>('conflict-sent');
 // Tickets whose merge conflict is posted as feedback but whose fixer waits for the fixes below them.
-const heldConflicts = new Map<string, string | null>();
+const heldConflicts = new Remembered<string | null>('conflict-held');
 
 async function syncStack(initiativeId: string): Promise<void> {
   if (stackSyncRerun.has(initiativeId)) {
@@ -3544,20 +4516,31 @@ async function syncStack(initiativeId: string): Promise<void> {
   await startHeldFeedback(initiativeId).catch((err) => console.warn('[held-feedback]', (err as Error).message));
 }
 
+// One fetch for the whole stack; a branch deleted on GitHub (a merged PR) must not stop the others.
+async function fetchBranches(repoPath: string, branches: string[]): Promise<void> {
+  const all = await gitx.fetchOrigin(repoPath, { refs: branches.map((b) => gitx.trackingRefspec(b)) });
+  if (all.code === 0) return;
+  const failed: string[] = [];
+  for (const b of branches) {
+    const one = await gitx.fetchOrigin(repoPath, { refs: [gitx.trackingRefspec(b)] });
+    if (one.code !== 0) failed.push(`${b}: ${(one.stderr || one.stdout).trim().slice(0, 200)}`);
+  }
+  if (failed.length) throw new Error(`could not fetch ${failed.join('; ')}`);
+}
+
 async function syncStackOnce(initiativeId: string): Promise<void> {
   const init = await mustInitiative(initiativeId);
   if (!['in_progress', 'done'].includes(init.status)) return;
+  await startHeldPublishes(init.id).catch((err) => console.warn('[held-publish]', (err as Error).message));
   const project = await mustProject(init.projectId);
   const all = await repo.listTickets(init.id);
   const open = all.filter((t) => t.prNumber && t.prState === 'OPEN' && !['merged', 'canceled'].includes(t.status));
   const due = open.filter((t) => !t.prHeadRef && SETTLED_TICKET_STATUSES.includes(t.status) && t.worktreePath && fs.existsSync(path.join(t.worktreePath, '.git')));
   if (!due.length || !gitx.isGithubUrl(await gitx.remoteUrl(project.repoPath))) return;
-  const branches = [...new Set([init.baseBranch, ...open.map((t) => remoteBranchOf(t)!)])];
-  const fetched = await gitx.fetchOrigin(project.repoPath, { refs: branches.map((b) => gitx.trackingRefspec(b)) });
-  if (fetched.code !== 0) throw new Error(`could not fetch the stack's branches: ${(fetched.stderr || fetched.stdout).trim().slice(0, 500)}`);
+  await fetchBranches(project.repoPath, [...new Set([init.baseBranch, ...open.map((t) => remoteBranchOf(t)!)])]);
   for (const t of sortBottomUp(due, all)) {
     if (syncingWorktrees.has(t.id)) continue;
-    const work = syncTicket(init, t, all);
+    const work = syncTicket(init, project, t, all);
     syncingWorktrees.set(t.id, work.catch(() => undefined));
     try {
       await work;
@@ -3571,14 +4554,32 @@ async function syncStackOnce(initiativeId: string): Promise<void> {
   }
 }
 
-async function syncTicket(init: Initiative, ticket: Ticket, all: Ticket[]): Promise<void> {
+/**
+ * Why the PR below is not worth merging up yet: it is still changing (being fixed, built or checked, feedback
+ * waiting, a verified fix held back) or its pushed head has not passed its checks. Merging it now would be
+ * merged again within the hour, and every push re-runs CI on this PR.
+ */
+async function syncHoldBelow(init: Initiative, project: Project, ticket: Ticket, all: Ticket[]): Promise<Ticket | null> {
+  const pending = await getTicketsWithPendingFeedback(init.id);
+  for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
+    if (!SETTLED_TICKET_STATUSES.includes(below.status) || pending.has(below.id) || fs.existsSync(pushHeldFile(init, below))) return below;
+    if (!(await ticketIdle(below.id)) || !(await passedChecksAtPushedHead(project, below))) return below;
+  }
+  return null;
+}
+
+async function syncTicket(init: Initiative, project: Project, ticket: Ticket, all: Ticket[]): Promise<void> {
   const wt = ticket.worktreePath!;
   if (!(await ticketIdle(ticket.id))) return;
   if ((await gitx.worktreeState(wt)).tracked) throw new Error(`${wt} has uncommitted changes, so it is left alone`);
   const scope = { initiativeId: init.id, ticketId: ticket.id };
   const own = remoteBranchOf(ticket)!;
+  const held = fs.existsSync(pushHeldFile(init, ticket));
   const caughtUp = await gitx.catchUpWith(wt, `origin/${own}`);
-  if (caughtUp === 'ahead' || caughtUp === 'diverged') throw new Error(`${ticket.branch} is ${caughtUp === 'ahead' ? 'ahead of' : 'diverged from'} origin/${own}, so it is left alone`);
+  const head = await gitx.headSha(wt);
+  // A gate that passed here but could not push left its commits ahead: they go out with the next sync.
+  const checkedAhead = caughtUp === 'ahead' && !held && !!head && passedGateAt(await lastRuns(ticket.id), head, 'merge');
+  if (caughtUp === 'diverged' || (caughtUp === 'ahead' && !held && !checkedAhead)) throw new Error(`${ticket.branch} is ${caughtUp === 'ahead' ? 'ahead of' : 'diverged from'} origin/${own}, so it is left alone`);
   if (caughtUp === 'followed-rewrite') await systemMessage(scope, `${ticketLabel(ticket)}: \`${own}\` was rewritten on GitHub (a stack rebase or a force-push), so the factory's copy of the branch now matches it.`);
   const sync = syncTarget(ticket, all, init.baseBranch);
   if (sync && ticket.baseRef !== sync.target) {
@@ -3587,9 +4588,30 @@ async function syncTicket(init: Initiative, ticket: Ticket, all: Ticket[]): Prom
     await systemMessage(scope, `${ticketLabel(ticket)}: #${ticket.prNumber} now targets ${sync.parent ? `#${sync.parent.prNumber}, the PR below it` : `\`${sync.target}\``}.`);
     await stackPr(scope, init, ticket, wt, { background: true });
   }
-  if (!stackBase(ticket, all)) return mergeBaseAfterLandedTickets(init, ticket, all);
+  const nothingToMerge = async () => {
+    const waits = held ? await syncHoldBelow(init, project, ticket, all) : null;
+    if (held && (!waits || waits.status === 'blocked')) await startPurposeGate(init, ticket, 'sync');
+    else if (checkedAhead && (await pushIfAhead(scope, ticket, 'its checked commits')) === 'pushed') await systemMessage(scope, `${ticketLabel(ticket)}: pushed the commits its checks had passed on.`);
+  };
+  if (!stackBase(ticket, all)) {
+    if (!(await mergeBaseAfterLandedTickets(init, project, ticket, all))) await nothingToMerge();
+    return;
+  }
   const parent = sync?.parent;
-  if (!sync || !parent || (await gitx.isAncestor(wt, `origin/${sync.target}`, 'HEAD'))) return;
+  if (!sync || !parent) return nothingToMerge();
+  const inBranch = await gitx.isAncestor(wt, `origin/${sync.target}`, 'HEAD');
+  if (inBranch) return nothingToMerge();
+  const waitsFor = await syncHoldBelow(init, project, ticket, all);
+  if (waitsFor?.status === 'blocked' && held) {
+    await systemMessage(scope, `${ticketLabel(ticket)}: ${ticketLabel(waitsFor)} below it needs you, so its held fix goes out now instead of waiting.`);
+    await startPurposeGate(init, ticket, 'sync');
+    return;
+  }
+  if (waitsFor) return;
+  if (project.checksCommand?.trim()) {
+    await startPurposeGate(init, ticket, 'sync');
+    return;
+  }
   if (!(await mergeAndPush(init, ticket, sync.target, `#${parent.prNumber}, the PR below this one,`))) return;
   await systemMessage(scope, `${ticketLabel(ticket)}: merged the latest #${parent.prNumber} into its branch and pushed, so it stays in sync with the PR below it.`);
 }
@@ -3619,20 +4641,26 @@ async function findLandedTicketsMissingFrom(ticket: Ticket, all: Ticket[]): Prom
 // When a ticket of the initiative merges, every open ticket that now builds on the base branch merges the
 // base in: its PR shows only its own change, and conflicts surface now instead of at merge time. The
 // ticket keeps its approval; only a conflict sends it to a fixer, which hands it back approved.
-async function mergeBaseAfterLandedTickets(init: Initiative, ticket: Ticket, all: Ticket[]): Promise<void> {
+async function mergeBaseAfterLandedTickets(init: Initiative, project: Project, ticket: Ticket, all: Ticket[]): Promise<boolean> {
   const landed = await findLandedTicketsMissingFrom(ticket, all);
-  if (!landed.length) return;
+  if (!landed.length) return false;
+  if (project.checksCommand?.trim()) {
+    await startPurposeGate(init, ticket, 'sync');
+    return true;
+  }
   const prs = landed.map((t) => `#${t.prNumber}`).join(', ');
   const base = init.baseBranch;
-  if (!(await mergeAndPush(init, ticket, base, `\`${base}\`, which now holds the merged ${prs},`))) return;
+  if (!(await mergeAndPush(init, ticket, base, `\`${base}\`, which now holds the merged ${prs},`))) return true;
   const kept = ticket.status === 'approved' ? ' It stays approved.' : '';
   await systemMessage({ initiativeId: init.id, ticketId: ticket.id }, `${ticketLabel(ticket)}: ${prs} merged, so the latest \`${base}\` was merged into its branch and pushed.${kept}`);
+  return true;
 }
 
+/** For a project without a checks command: nothing can check the merge, so it is pushed as it is. */
 async function mergeAndPush(init: Initiative, ticket: Ticket, target: string, what: string): Promise<boolean> {
   const wt = ticket.worktreePath!;
   const before = (await gitx.headSha(wt))!;
-  const merged = await gitx.mergeInto(wt, `origin/${target}`);
+  const merged = await gitx.mergeInto(wt, `origin/${target}`, undefined, { rerere: false });
   if (!merged.ok) {
     await sendStackConflictToFixer(init, ticket, what, target, merged.output);
     return false;
@@ -3646,6 +4674,9 @@ async function mergeAndPush(init: Initiative, ticket: Ticket, target: string, wh
   return true;
 }
 
+// A merge conflict is mechanical work: it goes to the cheaper fixer, as a system note, not as feedback.
+export const STACK_CONFLICT_NOTE = 'changed, and merging';
+
 // `what` names the changed side as the start of a sentence, e.g. "#12, the PR below this one,".
 async function sendStackConflictToFixer(init: Initiative, ticket: Ticket, what: string, target: string, output: string): Promise<void> {
   const scope = { initiativeId: init.id, ticketId: ticket.id };
@@ -3654,7 +4685,7 @@ async function sendStackConflictToFixer(init: Initiative, ticket: Ticket, what: 
   // feedback too, written for the code the fixes below will bring, and the conflict itself will change.
   // The next sync merges again and starts it.
   const hold = repo.initiativeSettings(init).autoFix ? await findFixBelowHold(init, ticket, await repo.listTickets(init.id)) : null;
-  const fixerAlreadyTried = !hold && conflictsSentToFixer.get(ticket.id) === targetSha;
+  const fixerAlreadyTried = !hold && (await conflictsSentToFixer.get(ticket.id)) === targetSha;
   if (fixerAlreadyTried || !repo.initiativeSettings(init).autoFix) {
     const why = `Merging \`${target}\` (${what.replace(/,$/, '')}) into this branch conflicts${fixerAlreadyTried ? ' even after a fixer tried' : ''}. Merge it by hand, or press Fix.`;
     const blocked = await repo.updateTicket(ticket.id, { status: 'blocked', blockedReason: why });
@@ -3662,14 +4693,14 @@ async function sendStackConflictToFixer(init: Initiative, ticket: Ticket, what: 
     await askArbiterInsteadOfOwner(init, blocked);
     return;
   }
-  const posted = heldConflicts.has(ticket.id);
+  const posted = await heldConflicts.has(ticket.id);
   if (!posted) {
     await repo.addMessage({
       ...scope,
       author: 'system',
       kind: 'feedback',
       body: [
-        `${what} changed, and merging \`${target}\` into this branch conflicts.`,
+        `${what} ${STACK_CONFLICT_NOTE} \`${target}\` into this branch conflicts.`,
         `Run \`git fetch origin && git merge origin/${target}\`, resolve every conflict so both PRs' behaviour and tests survive, and commit the merge. Never rebase or force-push.`,
         '',
         '```',
@@ -3679,17 +4710,54 @@ async function sendStackConflictToFixer(init: Initiative, ticket: Ticket, what: 
     });
   }
   if (hold) {
-    heldConflicts.set(ticket.id, targetSha);
+    await heldConflicts.set(ticket.id, targetSha);
     if (!posted) await systemMessage(scope, `${ticketLabel(ticket)}: the merge conflict ${hold}.`);
     return;
   }
-  heldConflicts.delete(ticket.id);
-  conflictsSentToFixer.set(ticket.id, targetSha);
+  await heldConflicts.delete(ticket.id);
+  await conflictsSentToFixer.set(ticket.id, targetSha);
   await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
 }
 
 const autoMerging = new Set<string>();
-const mergeQueueAttempts = new Map<string, { head: string; times: number }>();
+const mergeQueueAttempts = new Remembered<{ head: string; times: number }>('merge-queue');
+
+async function withLiveStackIds(project: Project, tickets: Ticket[]): Promise<Ticket[]> {
+  const candidates = tickets.filter((ticket) => ticket.prNumber && ticket.prState === 'OPEN' && ticket.prStack != null);
+  const live = new Map<string, { stack: gh.PrStack | null; draft: boolean | null }>();
+  await Promise.all(
+    candidates.map(async (ticket) => {
+      const cwd = ticket.worktreePath && fs.existsSync(ticket.worktreePath!) ? ticket.worktreePath! : project.repoPath;
+      const [stack, status] = await Promise.all([gh.stackOf(cwd, ticket.prNumber!), gh.mergeStatus(cwd, ticket.prNumber!)]);
+      live.set(ticket.id, { stack, draft: status?.isDraft ?? null });
+    }),
+  );
+  const validStacks = new Set<number>();
+  for (const found of live.values()) {
+    const stack = found.stack;
+    if (!stack || validStacks.has(stack.number)) continue;
+    const inactive = new Set([...(stack.closed ?? []), ...(stack.merged ?? [])]);
+    const open = stack.pullRequests.filter((number) => !inactive.has(number));
+    const tracked = candidates
+      .filter((ticket) => live.get(ticket.id)?.stack?.number === stack.number)
+      .map((ticket) => ticket.prNumber!);
+    const intended = candidates
+      .map((ticket) => stackChain(ticket, tickets))
+      .some((chain) => chain?.length === open.length && chain.every((number, index) => number === open[index]));
+    if (open.length === tracked.length && open.every((number) => tracked.includes(number)) && intended) validStacks.add(stack.number);
+  }
+  return Promise.all(
+    tickets.map(async (ticket) => {
+      const found = live.get(ticket.id);
+      if (!found) return ticket;
+      const prStack = found.stack && validStacks.has(found.stack.number) ? found.stack.number : null;
+      const prDraft = found.draft;
+      if (prStack === ticket.prStack && prDraft === ticket.prDraft) return ticket;
+      await repo.updateTicket(ticket.id, { prStack, prDraft });
+      return { ...ticket, prStack, prDraft };
+    }),
+  );
+}
 
 export async function advanceAutoMerge(initiativeId: string): Promise<void> {
   if (autoMerging.has(initiativeId)) return;
@@ -3699,9 +4767,12 @@ export async function advanceAutoMerge(initiativeId: string): Promise<void> {
     if (!repo.initiativeSettings(init).autoMerge || !['in_progress', 'done'].includes(init.status)) return;
     const project = await mustProject(init.projectId);
     if (!gitx.isGithubUrl(await gitx.remoteUrl(project.repoPath))) return;
-    const all = await repo.listTickets(init.id);
-    for (const t of all.filter((x) => x.prNumber && x.prState === 'OPEN' && x.status === 'approved')) {
-      await advanceTicketMerge(init, project, t, all).catch((err) => console.warn('[auto-merge]', `${ticketLabel(t)}: ${(err as Error).message}`));
+    const settings = repo.initiativeSettings(init);
+    let all = await repo.listTickets(init.id);
+    if (settings.landStackAtOnce) all = await withLiveStackIds(project, all);
+    const landing = settings.landStackAtOnce ? landingTops(all, init.baseBranch) : { tops: new Map<string, number>(), carried: new Set<string>() };
+    for (const t of all.filter((x) => x.prNumber && x.prState === 'OPEN' && x.status === 'approved' && x.gateStatus !== 'waiting' && !landing.carried.has(x.id))) {
+      await advanceTicketMerge(init, project, t, all, landing.tops.get(t.id)).catch((err) => console.warn('[auto-merge]', `${ticketLabel(t)}: ${(err as Error).message}`));
     }
   } catch (err) {
     console.warn('[auto-merge]', (err as Error).message);
@@ -3710,15 +4781,16 @@ export async function advanceAutoMerge(initiativeId: string): Promise<void> {
   }
 }
 
-async function advanceTicketMerge(init: Initiative, project: Project, ticket: Ticket, all: Ticket[]): Promise<void> {
+// With landStackAtOnce, `landsWith` is how many approved, green PRs below this one merge with it in one go.
+async function advanceTicketMerge(init: Initiative, project: Project, ticket: Ticket, all: Ticket[], landsWith?: number): Promise<void> {
   const cwd = ticket.worktreePath && fs.existsSync(ticket.worktreePath) ? ticket.worktreePath : project.repoPath;
   const pr = await gh.mergeStatus(cwd, ticket.prNumber!);
   if (!pr || pr.state !== 'OPEN') return;
   const scope = { initiativeId: init.id, ticketId: ticket.id };
   const label = `${ticketLabel(ticket)}: #${ticket.prNumber}`;
-  const attempts = mergeQueueAttempts.get(ticket.id);
+  const attempts = await mergeQueueAttempts.get(ticket.id);
   const queuedAtHead = attempts?.head === pr.headRefOid ? attempts.times : 0;
-  const isBottom = !stackBase(ticket, all) && pr.baseRefName === init.baseBranch;
+  const isBottom = landsWith !== undefined || (!stackBase(ticket, all) && pr.baseRefName === (ticket.baseRef ?? init.baseBranch));
   switch (autoMergeStep({ ...pr, isBottom, queuedAtHead })) {
     case 'mark-ready':
       await gh.markReady(cwd, ticket.prNumber!);
@@ -3731,9 +4803,9 @@ async function advanceTicketMerge(init: Initiative, project: Project, ticket: Ti
       const { outcome, message } = await gh.addToMergeQueue(cwd, ticket.prNumber!, pr.headRefOid);
       if (outcome === 'in-queue' || outcome === 'queued') void startDueRetros(init.id, { inQueue: ticket.id });
       if (outcome === 'in-queue' || outcome === 'merged') return;
-      mergeQueueAttempts.set(ticket.id, { head: pr.headRefOid, times: queuedAtHead + 1 });
+      await mergeQueueAttempts.set(ticket.id, { head: pr.headRefOid, times: queuedAtHead + 1 });
       const said = {
-        queued: `${label} is in the merge queue${queuedAtHead ? ' again' : ''}.`,
+        queued: `${label} is in the merge queue${queuedAtHead ? ' again' : ''}${landsWith ? `, and lands the ${landsWith} approved PR${landsWith === 1 ? '' : 's'} below it with it` : ''}.`,
         pending: `${label}: asked GitHub to add it to the merge queue.`,
         failed: `${label}: GitHub would not add it to the merge queue: ${message ?? 'no reason given'}`,
       };
@@ -3741,7 +4813,7 @@ async function advanceTicketMerge(init: Initiative, project: Project, ticket: Ti
     }
     case 'stop':
       if (queuedAtHead > MERGE_QUEUE_ATTEMPTS_PER_HEAD) return;
-      mergeQueueAttempts.set(ticket.id, { head: pr.headRefOid, times: queuedAtHead + 1 });
+      await mergeQueueAttempts.set(ticket.id, { head: pr.headRefOid, times: queuedAtHead + 1 });
       return systemMessage(
         scope,
         `${label} left the merge queue ${MERGE_QUEUE_ATTEMPTS_PER_HEAD} times at the same commit, so auto-merge stops adding it back until the PR changes. The merge queue's checks show why.`,
@@ -3751,13 +4823,14 @@ async function advanceTicketMerge(init: Initiative, project: Project, ticket: Ti
   }
 }
 
-function ticketInFlight(ticketId: string): boolean {
-  return [...inFlight.values()].some((r) => r.ticketId === ticketId && !isSideRun(r.kind));
+function ticketInFlight(ticketId: string, except?: string): boolean {
+  return [...inFlight.values()].some((r) => r.ticketId === ticketId && !isSideRun(r.kind) && r.id !== except);
 }
 
-async function ticketIdle(ticketId: string): Promise<boolean> {
-  if (ticketInFlight(ticketId)) return false;
-  const [busy] = await sql`select 1 from runs where ticket_id = ${ticketId} and status in ('queued','running') and kind not in ${sql([...SIDE_RUN_KINDS])} limit 1`;
+/** No step runs or waits for the ticket; `except` is the run asking, which is finishing. */
+async function ticketIdle(ticketId: string, except?: string): Promise<boolean> {
+  if (ticketInFlight(ticketId, except)) return false;
+  const [busy] = await sql`select 1 from runs where ticket_id = ${ticketId} and status in ('queued','running') and kind not in ${sql([...SIDE_RUN_KINDS])} and id <> ${except ?? '00000000-0000-0000-0000-000000000000'} limit 1`;
   return !busy;
 }
 
@@ -3788,11 +4861,20 @@ interface SweepScope {
 const baseHeads = new BaseHeads();
 const mergeabilityRechecks = new MergeabilityRechecks();
 const sweeps = new SweepSchedule();
+const sweepSeen = new Remembered<{ fingerprint: string; at: number }>('sweep-seen');
+// A check can finish without moving the PR's overall state, so an unchanged fingerprint is trusted this long.
+const SWEEP_SEEN_FOR_MS = 15 * 60_000;
+
+async function sweepSawUnchanged(ticketId: string, fingerprint: string): Promise<boolean> {
+  const seen = await sweepSeen.get(ticketId);
+  return !!seen && seen.fingerprint === fingerprint && Date.now() - seen.at < SWEEP_SEEN_FOR_MS;
+}
 let watchingBases = false;
 
-// Every minute: has the base branch of any open PR moved on GitHub? A merged PR moves it, and
-// that is when other PRs start to conflict. Sweep that repo's open PRs a minute later (GitHub
-// needs a moment to work out mergeability) instead of at the next 15-minute sweep.
+// Every minute: has the base branch of any open PR moved on GitHub? A merged PR moves it, and that is when
+// other PRs start to conflict. Only PRs on that base can, and a local merge says which do, so only those are
+// swept, without asking GitHub about the rest. The factory's own stacked branches are not bases here: their
+// pushes are the stack sync's business.
 async function watchBases(): Promise<void> {
   if (watchingBases || serverExit) return;
   watchingBases = true;
@@ -3801,7 +4883,8 @@ async function watchBases(): Promise<void> {
     const rows = await sql<{ projectId: string; repoPath: string; base: string }[]>`
       select distinct i.project_id, p.repo_path, coalesce(t.base_ref, i.base_branch) as base
       from tickets t join initiatives i on i.id = t.initiative_id join projects p on p.id = i.project_id
-      where i.status in ('in_progress','done') and t.pr_number is not null and t.pr_state = 'OPEN'`;
+      where i.status in ('in_progress','done') and t.pr_number is not null and t.pr_state = 'OPEN'
+        and coalesce(t.base_ref, i.base_branch) not like 'factory/%'`;
     const byProject = new Map<string, { repoPath: string; bases: string[] }>();
     for (const r of rows) {
       const p = byProject.get(r.projectId) ?? { repoPath: r.repoPath, bases: [] };
@@ -3813,8 +4896,7 @@ async function watchBases(): Promise<void> {
       if (listed.code !== 0) continue;
       const moved = baseHeads.moved(repoPath, parseLsRemote(listed.stdout));
       if (!moved.length) continue;
-      console.log(`[pr-sweep] ${moved.join(', ')} moved in ${repoPath}; sweeping its open PRs in ${SWEEP_AFTER_BASE_MOVE_MS / 1000} s`);
-      sweeps.schedule(`project:${projectId}`, SWEEP_AFTER_BASE_MOVE_MS, () => sweepOpenPrs({ projectId }));
+      sweeps.schedule(`project:${projectId}`, SWEEP_AFTER_BASE_MOVE_MS, () => sweepConflictsAfterBaseMove(projectId, moved));
     }
   } catch (err) {
     console.warn('[pr-sweep] base watch:', (err as Error).message);
@@ -3823,13 +4905,33 @@ async function watchBases(): Promise<void> {
   }
 }
 
+async function sweepConflictsAfterBaseMove(projectId: string, moved: string[]): Promise<number> {
+  const project = await mustProject(projectId);
+  const tickets = await sql<Ticket[]>`
+    select t.* from tickets t join initiatives i on i.id = t.initiative_id
+    where i.project_id = ${projectId} and i.status in ('in_progress','done') and t.pr_number is not null and t.pr_state = 'OPEN'
+      and t.branch is not null and t.status in ${sql(SETTLED_TICKET_STATUSES)} and t.pr_sweep_claimed_at is null
+      and coalesce(t.base_ref, i.base_branch) in ${sql(moved)}`;
+  if (!tickets.length) return 0;
+  await fetchBranches(project.repoPath, [...new Set([...moved, ...tickets.map((t) => remoteBranchOf(t)!)])]);
+  const conflicting: Ticket[] = [];
+  for (const t of tickets) {
+    const base = t.baseRef ?? (await mustInitiative(t.initiativeId)).baseBranch;
+    if ((await gitx.mergesCleanly(project.repoPath, `origin/${base}`, `origin/${remoteBranchOf(t)}`)) === false) conflicting.push(t);
+  }
+  console.log(`[pr-sweep] ${moved.join(', ')} moved in ${project.repoPath}: ${tickets.length} PR(s) on it, ${conflicting.length} now conflict${conflicting.length ? ` (${conflicting.map((t) => `#${t.prNumber}`).join(', ')})` : ''}`);
+  let started = 0;
+  for (const t of conflicting) if (await sweepTicket(t, false).catch((err) => (console.warn('[pr-sweep]', `${ticketLabel(t)}: ${(err as Error).message}`), false))) started++;
+  return started;
+}
+
 const MANUALLY_SWEPT_STATUSES: Ticket['status'][] = [...SETTLED_TICKET_STATUSES, 'blocked'];
 
 /** Records on the ticket why the sweep left its PR alone, rewriting it only when the reason changes. */
-async function noteSweepSkip(cwd: string, t: Ticket, work: PrWork, alreadyHandled: boolean): Promise<void> {
+async function noteSweepSkip(cwd: string, t: Ticket, work: PrWork, alreadyHandled: boolean, decided?: Pick<PrSweepSkip, 'reason' | 'why'>): Promise<void> {
   try {
     const humanChecks = (await gh.humanChecks(cwd, t.prNumber!)) ?? [];
-    const skip = sweepSkip(work, { alreadyHandled, humanChecks });
+    const skip = sweepSkip(work, { alreadyHandled, humanChecks, decided });
     if (t.prSweepSkip && sameSweepSkip(t.prSweepSkip, skip)) return;
     await repo.setPrSweepSkip(t.id, { ...skip, since: new Date().toISOString() });
   } catch (err) {
@@ -3837,56 +4939,189 @@ async function noteSweepSkip(cwd: string, t: Ticket, work: PrWork, alreadyHandle
   }
 }
 
-async function sweepTicket(t: Ticket, manual: boolean): Promise<boolean> {
+const MAX_LOGS_PER_PR = 6;
+const FAILED_TEST_PATH = /^(?:FAILED|ERROR)\s+([\w./-]+\.py)/gm;
+
+/**
+ * Failing checks a re-run should settle: their first attempt, and every test that failed lives in a file the
+ * PR does not change. Also re-reads checks whose policy rule depends on the log.
+ */
+async function failingCheckFacts(project: Project, cwd: string, t: Ticket, work: PrWork, required: ReadonlySet<string>): Promise<{ flakyRuns: { name: string; runId: string }[]; work: PrWork }> {
+  const run = ghRunner(cwd);
+  const changed = t.worktreePath && fs.existsSync(t.worktreePath) ? (await gitx.git(t.worktreePath, ['diff', '--name-only', `${await diffBase(project, t)}...HEAD`])).stdout.split('\n').filter(Boolean) : null;
+  const flakyRuns: { name: string; runId: string }[] = [];
+  const checkId = (check: gh.PrCheck) => `${check.workflowName ?? ''}\0${check.name}\0${check.url ?? ''}`;
+  const reclassified = new Map<string, ReturnType<typeof classifyCheck>>();
+  const classify = checkClassifier(project, required);
+  for (const [index, c] of work.failingChecks.entries()) {
+    const verdict = classify(c);
+    const runId = gh.actionsRunId(c.url);
+    const needsLog = verdict.needsLog || (index < MAX_LOGS_PER_PR && !!changed && !!runId);
+    const logs = needsLog ? await failedJobLogs(run, c.url) : null;
+    const log = logs?.excerpt ?? null;
+    if (verdict.needsLog) {
+      reclassified.set(
+        checkId(c),
+        classifyCheck(
+          {
+            name: c.name,
+            aliases: c.workflowName ? [`${c.workflowName} / ${c.name}`] : [],
+            isRequired: required.has(c.name),
+          },
+          project.checkPolicy ?? [],
+          logs?.full ?? null,
+        ),
+      );
+    }
+    if (index >= MAX_LOGS_PER_PR || !changed || !runId || !log) continue;
+    const failedFiles = [...log.matchAll(FAILED_TEST_PATH)].map((m) => m[1]);
+    if (failedFiles.length && failedFiles.every((f) => !changed.includes(f)) && (await runAttempt(cwd, runId)) === 1) {
+      flakyRuns.push({ name: c.name, runId });
+    }
+  }
+  if (!reclassified.size) return { flakyRuns, work };
+  const away = work.failingChecks.filter((c) => reclassified.has(checkId(c)) && !['must-fix', 'fix'].includes(reclassified.get(checkId(c))!.class));
+  const waiting = away.filter((c) => ['people-only', 'waiting-on'].includes(reclassified.get(checkId(c))!.class));
+  const ignored = away.filter((c) => reclassified.get(checkId(c))!.class === 'ignore');
+  return {
+    flakyRuns,
+    work: {
+      ...work,
+      failingChecks: work.failingChecks.filter((c) => !away.includes(c)),
+      waitingOn: [...work.waitingOn, ...waiting.map((c) => `${c.name}: ${reclassified.get(checkId(c))!.note ?? 'waits for work outside this repo'}`)],
+      ignored: [...work.ignored, ...ignored.map((c) => `Failing CI check ${c.name}: the check policy ignores it`)],
+    },
+  };
+}
+
+async function inheritedFailures(cwd: string, work: PrWork): Promise<string[]> {
+  const inherited: string[] = [];
+  for (const c of work.failingChecks.slice(0, MAX_LOGS_PER_PR)) {
+    const onBase = await gh.checkRunOn(cwd, work.snap.baseRefName, c.name);
+    if (!onBase || ['success', 'skipped', 'neutral'].includes(onBase.conclusion)) continue;
+    const [prFailure, baseFailure] = await Promise.all([failedJobLog(ghRunner(cwd), c.url), failedJobLog(ghRunner(cwd), onBase.url)]);
+    if (prFailure && baseFailure && prFailure === baseFailure) inherited.push(c.name);
+  }
+  return inherited;
+}
+
+async function conflictStillThere(project: Project, t: Ticket, work: PrWork): Promise<boolean | null> {
+  if (!work.conflicting) return null;
+  await fetchBranches(project.repoPath, [work.snap.baseRefName, remoteBranchOf(t)!]);
+  const clean = await gitx.mergesCleanly(project.repoPath, `origin/${work.snap.baseRefName}`, `origin/${remoteBranchOf(t)}`);
+  return clean === null ? null : !clean;
+}
+
+/** Whether another fix round may start; when the ticket used its rounds on this problem, it stops for the arbiter. */
+async function fixRoundAllowed(init: Initiative, t: Ticket, what: string): Promise<boolean> {
+  const streak = await failedRoundsInARow(t.id);
+  if (streak < repo.initiativeSettings(init).maxRounds) return true;
+  const why = `${what}, and ${streak} fix rounds in a row did not settle it.`;
+  const blocked = await repo.updateTicket(t.id, { status: 'blocked', blockedReason: why });
+  await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${why}`);
+  await askArbiterInsteadOfOwner(init, blocked);
+  return false;
+}
+
+const SEEN_SKIPS: PrSweepSkip['reason'][] = ['idle', 'waiting-on', 'inherited', 'already-tried', 'ci-running'];
+
+// One sweep decides about a ticket at a time: the periodic pass and a base move can reach the same PR at once.
+const sweepingTickets = new Set<string>();
+
+async function sweepTicket(t: Ticket, manual: boolean, light?: LightPr): Promise<boolean> {
+  if (sweepingTickets.has(t.id)) return false;
+  sweepingTickets.add(t.id);
+  try {
+    return await sweepTicketAlone(t, manual, light);
+  } finally {
+    sweepingTickets.delete(t.id);
+  }
+}
+
+async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Promise<boolean> {
+  if (!manual && t.gateStatus === 'infra') return false;
   if (!(await ticketIdle(t.id))) return false;
   const init = await mustInitiative(t.initiativeId);
   // A fixer started now would also take the ticket's feedback, which is written for the code the fixes below
   // it will bring. The sweep looks again once they are in; a conflict until then is expected.
-  if (!manual && (await findFixBelowHold(init, t, await repo.listTickets(init.id)))) return false;
+  const all = await repo.listTickets(init.id);
+  if (!manual && (await findFixBelowHold(init, t, all))) return false;
+  if (!manual && light && t.prSweepSkip && (await sweepSawUnchanged(t.id, light.fingerprint))) return false;
   const project = await mustProject(init.projectId);
   const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;
   const lastFix = (await lastRuns(t.id)).find((r) => r.kind === 'fix');
-  const work = await pendingPrWork(cwd, t, fixedAt(lastFix));
-  if (work && !hasPrWork(work) && work.snap.mergeable === 'UNKNOWN') {
+  const state = await readPrState(project, cwd, t);
+  const read = await pendingPrWork(project, cwd, t, fixedAt(lastFix), state);
+  if (!read || !state) return false;
+  if (!hasPrWork(read) && read.snap.mergeable === 'UNKNOWN') {
     // GitHub has not worked out whether the PR still merges (its base just moved): ask again soon.
-    if (mergeabilityRechecks.another(t.id, work.snap.headRefOid)) {
+    if (mergeabilityRechecks.another(t.id, read.snap.headRefOid)) {
       sweeps.schedule(t.initiativeId, MERGEABILITY_RECHECK_MS, () => sweepOpenPrs({ initiativeId: t.initiativeId }));
     }
-    await noteSweepSkip(cwd, t, work, false);
+    await noteSweepSkip(cwd, t, read, false);
     return false;
   }
-  if (work) mergeabilityRechecks.known(t.id);
-  if (!work) return false;
-  forgetHungRunsReported(t.id, work.snap.hungJobs);
-  for (const job of work.snap.hungJobs) void restartHungJob(init, t, cwd, job);
-  if (!hasPrWork(work)) {
-    await noteSweepSkip(cwd, t, work, false);
+  mergeabilityRechecks.known(t.id);
+  await forgetHungRunsReported(t.id, read.snap.hungJobs);
+  for (const job of read.snap.hungJobs) void restartHungJob(init, t, cwd, job);
+  const unready = manual ? null : await findUnreadyBelow(project, t, all);
+  const { flakyRuns, work } = read.failingChecks.length ? await failingCheckFacts(project, cwd, t, read, state.required) : { flakyRuns: [], work: read };
+  const decision = decideSweep({
+    work,
+    previousFingerprint: manual ? undefined : t.prSweepFingerprint,
+    inheritedChecks: work.failingChecks.length ? await inheritedFailures(cwd, work) : [],
+    flakyRuns,
+    conflictConfirmed: await conflictStillThere(project, t, work),
+    canRepair: !!project.checksCommand?.trim() && !!t.branch && SETTLED_TICKET_STATUSES.includes(t.status),
+    unreadyBelow: unready ? `${ticketLabel(unready)} (#${unready.prNumber})` : null,
+  });
+  if (decision.kind === 'skip') {
+    await noteSweepSkip(cwd, t, decision.work, decision.reason === 'already-tried', { reason: decision.reason, why: decision.why });
+    if (light && SEEN_SKIPS.includes(decision.reason)) await sweepSeen.set(t.id, { fingerprint: light.fingerprint, at: Date.now() });
+    if (decision.reason === 'already-tried') await stopUnmergeablePr(init, t, decision.work);
+    if (decision.reason === 'stack-below' && unready) await startPurposeGate(init, unready, 'readiness');
     return false;
   }
-  const fingerprint = prWorkFingerprint(work);
-  if (!manual && fingerprint === t.prSweepFingerprint) {
-    await noteSweepSkip(cwd, t, work, true);
-    await stopUnmergeablePr(init, t, work);
+  if (decision.kind === 'rerun') {
+    const runs = [...new Map(decision.runs.map((r) => [r.runId, r])).values()];
+    for (const r of runs) {
+      const outcome = await gh.rerunFailedOnce(cwd, r.runId);
+      if (outcome === 'rerun') await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${r.name} failed in tests this PR doesn't touch, so the factory re-ran it once instead of starting a fixer.`);
+    }
+    await noteSweepSkip(cwd, t, decision.work, false, { reason: 'rerun', why: `Re-ran ${runs.map((r) => r.name).join(', ')} once: the failing tests are outside this PR's changes.` });
     return false;
   }
+  const fingerprint = sweepDecisionFingerprint(decision);
+  if (!(await fixRoundAllowed(init, t, `${describePrWork(decision.work)} on ${decision.work.snap.url}`))) return false;
   if (!(await repo.claimPrSweep(t.id, fingerprint))) return false;
   try {
-    await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: t.id, trigger: manual ? 'manual' : 'auto' });
+    if (decision.kind === 'repair') {
+      if (!(await startPurposeGate(init, await mustTicket(t.id), 'repair'))) throw new Error('the repair gate could not start');
+    } else {
+      await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: t.id, trigger: manual ? 'manual' : 'auto' });
+    }
   } catch (err) {
     await repo.releasePrSweepClaim(t.id, { forgetState: true });
     throw err;
   }
-  await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: the PR sweep found ${describePrWork(work)} on ${work.snap.url}; a fresh fixer is on it.`);
+  await sweepSeen.delete(t.id);
+  const next = decision.kind === 'repair' ? 'the factory runs its autofix and checks first' : 'a fresh fixer is on it';
+  await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: the PR sweep found ${describePrWork(decision.work)} on ${decision.work.snap.url}; ${next}.`);
   return true;
 }
 
-const restartingRuns = new Set<string>();
-const hungRunsReported = new Map<string, { ticketId: string; outcome: gh.HungJobOutcome }>();
+async function runAttempt(cwd: string, runId: string): Promise<number | null> {
+  const r = await gitx.exec('gh', ['api', `repos/{owner}/{repo}/actions/runs/${runId}`, '-q', '.run_attempt'], { cwd, timeoutMs: 30_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  return r.code === 0 ? Number(r.stdout.trim()) : null;
+}
 
-function forgetHungRunsReported(ticketId: string, hung: gh.HungJob[]): void {
+const restartingRuns = new Set<string>();
+const hungRunsReported = new Remembered<{ ticketId: string; outcome: gh.HungJobOutcome }>('hung-run');
+
+async function forgetHungRunsReported(ticketId: string, hung: gh.HungJob[]): Promise<void> {
   const stillHung = new Set(hung.map((j) => j.runId));
-  for (const [runId, reported] of hungRunsReported) {
-    if (reported.ticketId === ticketId && !stillHung.has(runId)) hungRunsReported.delete(runId);
+  for (const [runId, reported] of await hungRunsReported.entries()) {
+    if (reported.ticketId === ticketId && !stillHung.has(runId)) await hungRunsReported.delete(runId);
   }
 }
 
@@ -3903,8 +5138,8 @@ async function restartHungJob(init: Initiative, t: Ticket, cwd: string, job: gh.
       'already-restarted': `${shown} after it was already started again once; GitHub's own job timeout ends it.`,
       failed: `${shown}, and starting it again failed.`,
     }[outcome];
-    if (hungRunsReported.get(runId)?.outcome === outcome) return;
-    hungRunsReported.set(runId, { ticketId: t.id, outcome });
+    if ((await hungRunsReported.get(runId))?.outcome === outcome) return;
+    await hungRunsReported.set(runId, { ticketId: t.id, outcome });
     await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${what}`);
   } catch (err) {
     console.warn('[pr-sweep]', `${ticketLabel(t)}: restarting CI run ${runId}: ${(err as Error).message}`);
@@ -3916,20 +5151,20 @@ async function restartHungJob(init: Initiative, t: Ticket, cwd: string, job: gh.
 // Every PR has to end green and mergeable. One a fixer already had in this exact state stops, and the
 // arbiter decides what the next fixer must do, instead of the PR waiting for the owner to notice.
 async function stopUnmergeablePr(init: Initiative, t: Ticket, work: PrWork): Promise<void> {
-  const stop = unmergeableStop(work, { round: t.round, maxRounds: repo.initiativeSettings(init).maxRounds });
+  const stop = unmergeableStop(work, { round: await failedRoundsInARow(t.id), maxRounds: repo.initiativeSettings(init).maxRounds });
   if (!stop) return;
   const blocked = await repo.updateTicket(t.id, { status: 'blocked', blockedReason: stop.why });
   await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${stop.why}`);
   if (stop.askArbiter) await askArbiterInsteadOfOwner(init, blocked);
 }
 
-async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: boolean): Promise<number> {
+async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: boolean, light: Map<number, LightPr> | null): Promise<number> {
   if (!sweeps.begin(initiativeId, manual)) return 0;
   let started = 0;
   try {
     for (const t of tickets) {
       try {
-        if (await sweepTicket(t, manual)) started++;
+        if (await sweepTicket(t, manual, light?.get(t.prNumber!))) started++;
       } catch (err) {
         console.warn('[pr-sweep]', `${ticketLabel(t)}: ${(err as Error).message}`);
       }
@@ -3939,6 +5174,18 @@ async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: 
     if (again) void sweepOpenPrs({ initiativeId, manual: again.manual }).catch((err) => console.error('[pr-sweep]', err));
   }
   return started;
+}
+
+/** One GitHub call per repo: every open PR the owner authored, with a fingerprint of its state, so a PR that did not change since the last sweep costs nothing. */
+async function lightPrsByProject(projectIds: string[]): Promise<Map<string, Map<number, LightPr> | null>> {
+  const out = new Map<string, Map<number, LightPr> | null>();
+  for (const id of projectIds) {
+    const project = await mustProject(id);
+    const repoRef = project.remoteUrl ? repoOf(project.remoteUrl) : null;
+    const prs = repoRef ? await openPrsLight(ghRunner(project.repoPath), repoRef) : null;
+    out.set(id, prs ? new Map(prs.map((p) => [p.number, p])) : null);
+  }
+  return out;
 }
 
 async function createOpenPrsInitiative(project: Project): Promise<Initiative> {
@@ -3994,20 +5241,25 @@ async function adoptPrsFor(scope: SweepScope): Promise<void> {
 }
 
 export async function sweepOpenPrs(scope: SweepScope = {}): Promise<number> {
+  const startedAt = Date.now();
   await adoptPrsFor(scope);
   await settleSweepClaims();
   const statuses = scope.manual ? MANUALLY_SWEPT_STATUSES : SETTLED_TICKET_STATUSES;
-  const candidates = await sql<Ticket[]>`
-    select t.* from tickets t join initiatives i on i.id = t.initiative_id
+  const candidates = await sql<(Ticket & { projectId: string })[]>`
+    select t.*, i.project_id from tickets t join initiatives i on i.id = t.initiative_id
     where i.status in ('in_progress','done') and t.pr_number is not null and t.branch is not null
       and t.status in ${sql(statuses)} and t.pr_sweep_claimed_at is null
       ${scope.initiativeId ? sql`and t.initiative_id = ${scope.initiativeId}` : sql``}
       ${scope.projectId ? sql`and i.project_id = ${scope.projectId}` : sql``}
     order by t.initiative_id, t.seq`;
-  const perInitiative = new Map<string, Ticket[]>();
+  const light = await lightPrsByProject([...new Set(candidates.map((t) => t.projectId))]);
+  const perInitiative = new Map<string, (Ticket & { projectId: string })[]>();
   for (const t of candidates) perInitiative.set(t.initiativeId, [...(perInitiative.get(t.initiativeId) ?? []), t]);
-  const started = await Promise.all([...perInitiative].map(([id, tickets]) => sweepInitiative(id, tickets, !!scope.manual)));
-  return started.reduce((a, n) => a + n, 0);
+  const started = await Promise.all([...perInitiative].map(([id, tickets]) => sweepInitiative(id, tickets, !!scope.manual, light.get(tickets[0].projectId) ?? null)));
+  const total = started.reduce((a, n) => a + n, 0);
+  const budget = githubBudget.reason();
+  console.log(`[pr-sweep] looked at ${candidates.length} PR(s) in ${Math.round((Date.now() - startedAt) / 100) / 10} s; started work on ${total}${budget ? `; GitHub budget: ${budget}` : ''}`);
+  return total;
 }
 
 async function resumeInterrupted(run: Run, enabled: boolean, sweepOwned: boolean): Promise<boolean> {
@@ -4018,7 +5270,13 @@ async function resumeInterrupted(run: Run, enabled: boolean, sweepOwned: boolean
   const rewind = run.kind === 'fix' && !!ticket && ticket.round >= run.round;
   if (rewind) await repo.updateTicket(ticket.id, { round: run.round - 1 });
   try {
-    await enqueue({ kind: run.kind, initiativeId: run.initiativeId, ticketId: run.ticketId, trigger: run.trigger });
+    await enqueue({
+      kind: run.kind,
+      initiativeId: run.initiativeId,
+      ticketId: run.ticketId,
+      trigger: run.trigger,
+      purpose: run.kind === 'gate' ? gateMarkerOf(run) ?? undefined : undefined,
+    });
   } catch (err) {
     if (rewind) await repo.updateTicket(ticket.id, { round: ticket.round });
     console.warn('[recover]', (err as Error).message);
@@ -4126,6 +5384,23 @@ export async function recoverOnStartup(): Promise<void> {
   const stoppedOnPurpose = serverWasStoppedOnPurpose();
   const stale = await runsLeftRunning(stoppedOnPurpose);
   const having = (...fates: StartupFate[]) => stale.filter((s) => fates.includes(s.fate));
+  const runsBySlot = new Map<number, string[]>();
+  for (const { run, spool } of having('follow')) {
+    const slot = run.kind === 'gate' && spool ? Number((spool.state as { slot?: number | null }).slot) : 0;
+    if (slot) runsBySlot.set(slot, [...(runsBySlot.get(slot) ?? []), run.id]);
+  }
+  for (const [slot, runIds] of runsBySlot) {
+    const reservation = testSlots.reserve(slot);
+    let remaining = runIds.length;
+    for (const runId of runIds) {
+      recoveredTestSlots.set(runId, {
+        release() {
+          remaining--;
+          if (remaining === 0) reservation.release();
+        },
+      });
+    }
+  }
   const stillWorkedOn = new Set(having('follow', 'requeue').filter((s) => s.run.kind !== 'ask').map((s) => s.run.ticketId));
   const claimed = (await repo.listPrSweepClaims()).filter((t) => !stillWorkedOn.has(t.id));
   for (const t of claimed) await repo.releasePrSweepClaim(t.id, { forgetState: true });

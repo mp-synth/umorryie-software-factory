@@ -174,6 +174,16 @@ test('cancel stops the process tree and the exit says it was canceled', async ()
   assert.equal(runs(agentPid), false);
 });
 
+test('a redirected background child cannot outlive a normally finished spool', async () => {
+  const dir = newSpool();
+  const childPidFile = path.join(dir, 'background.pid');
+  launch(dir, 'background-child', {}, { FAKE_CHILD_PID_FILE: childPidFile });
+  await until(() => fs.existsSync(childPidFile));
+  const childPid = Number(fs.readFileSync(childPidFile, 'utf8'));
+  await followAll(dir);
+  await until(() => !runs(childPid));
+});
+
 test('a handle that leaves rejects with LeftRunning and the process stays up', async () => {
   const dir = newSpool();
   const pid = launch(dir, 'hang');
@@ -242,7 +252,7 @@ test('followCommand returns the exit code and both streams, and reports output o
   const pid = shell(dir, 'echo one; echo two; echo oops >&2; exit 3');
   const reported: string[] = [];
   const outcome = await followCommand(dir, { pid, from: { stdout: 0, stderr: 0 }, maxOutput: 1000, ...POLL, onOutput: async (text) => void reported.push(text) }).done;
-  assert.deepEqual(outcome, { code: 3, stdout: 'one\ntwo\n', stderr: 'oops\n', timedOut: false, canceled: false });
+  assert.deepEqual(outcome, { code: 3, stdout: 'one\ntwo\n', stderr: 'oops\n', timedOut: false, canceled: false, signal: null });
   assert.deepEqual(reported.join('').split('\n').filter(Boolean).sort(), ['one', 'oops', 'two']);
 });
 

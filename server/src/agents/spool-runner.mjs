@@ -6,6 +6,9 @@ import path from 'node:path';
 const KILL_AFTER_TERM_MS = 5000;
 const STOP_WAITING_FOR_OUTPUT_MS = 10_000;
 const STOP_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+const TICK_MS = 200;
+// A gap between ticks this much longer than the tick is the machine sleeping, not the run working.
+const ASLEEP_AFTER_MS = 30_000;
 
 const dir = process.argv[2];
 const inSpool = (name) => path.join(dir, name);
@@ -40,9 +43,9 @@ function recordExit(code, signal) {
   if (recorded) return;
   recorded = true;
   try {
+    if (launch.scratchDir) fs.rmSync(launch.scratchDir, { recursive: true, force: true });
     writeAtomically('exit.json', { code, signal, timedOut, stalled, canceled, finishedAt: Date.now() });
   } finally {
-    if (launch.scratchDir) fs.rmSync(launch.scratchDir, { recursive: true, force: true });
     process.exit(0);
   }
 }
@@ -78,6 +81,34 @@ function resultWatcher(onResult) {
   };
 }
 
+// Time limits count only the time the machine is awake: a laptop that sleeps under a run must not find it
+// "timed out" or "stalled" the moment it wakes.
+function awakeClock() {
+  let awake = 0;
+  let last = Date.now();
+  const timers = [];
+  const tick = () => {
+    const now = Date.now();
+    const gap = now - last;
+    last = now;
+    if (gap < ASLEEP_AFTER_MS) awake += gap;
+    for (const t of timers) if (!t.fired && awake - t.from >= t.ms) {
+      t.fired = true;
+      t.fire();
+    }
+  };
+  const interval = setInterval(tick, TICK_MS);
+  interval.unref?.();
+  return {
+    after(ms, fire) {
+      const t = { ms, fire, from: awake, fired: false };
+      timers.push(t);
+      return { restart: () => ((t.from = awake), (t.fired = false)), cancel: () => (t.fired = true) };
+    },
+    stop: () => clearInterval(interval),
+  };
+}
+
 function fail(error) {
   try {
     fs.appendFileSync(inSpool('stderr.log'), `${error?.stack ?? error}\n`);
@@ -96,12 +127,14 @@ function run() {
   }
   const out = fs.openSync(inSpool('stdout.log'), 'a');
   const err = fs.openSync(inSpool('stderr.log'), 'a');
-  child = spawn(launch.bin, launch.args, { cwd: launch.cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const [bin, args] = launch.nice ? ['nice', ['-n', String(launch.nice), launch.bin, ...launch.args]] : [launch.bin, launch.args];
+  child = spawn(bin, args, { cwd: launch.cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   writeAtomically('meta.json', { pid: process.pid, agentPid: child.pid, startedAt });
-  setTimeout(() => {
+  const clock = awakeClock();
+  clock.after(launch.timeoutMs, () => {
     timedOut = true;
     stopProcessTree();
-  }, launch.timeoutMs);
+  });
   for (const signal of STOP_SIGNALS) {
     process.on(signal, () => {
       canceled = true;
@@ -110,16 +143,13 @@ function run() {
   }
   // An agent prints a line for every message and tool result. Silence this long means a hung tool or
   // request, so stop it instead of waiting for the run's time limit.
-  let stallTimer = null;
-  const noteProgress = () => {
-    if (!launch.stallMs) return;
-    clearTimeout(stallTimer);
-    stallTimer = setTimeout(() => {
-      stalled = true;
-      stopProcessTree();
-    }, launch.stallMs);
-  };
-  noteProgress();
+  const stall = launch.stallMs
+    ? clock.after(launch.stallMs, () => {
+        stalled = true;
+        stopProcessTree();
+      })
+    : null;
+  const noteProgress = () => stall?.restart();
   const watch = launch.lingerAfterResultMs ? resultWatcher(() => setTimeout(stopProcessTree, launch.lingerAfterResultMs)) : () => {};
   child.stdout.on('data', (chunk) => {
     fs.writeSync(out, chunk);
@@ -131,7 +161,12 @@ function run() {
     noteProgress();
   });
   child.on('error', fail);
-  child.on('close', recordExit);
+  child.on('close', (code, signal) => {
+    // The group leader can exit while a redirected background child survives. Kill the group before the
+    // supervisor exits, otherwise process.exit cancels stopProcessTree's delayed SIGKILL.
+    if (child?.pid) signalGroup(child.pid, 'SIGKILL');
+    recordExit(code, signal);
+  });
 }
 
 process.on('uncaughtException', fail);

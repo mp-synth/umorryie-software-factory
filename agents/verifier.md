@@ -30,8 +30,10 @@ files). You run no tests: CI runs them on the PR.
 
 ## Check
 
-1. The commits in the range match the ones fix.md lists. Anything else in the
-   range is a block.
+1. The commits in the range match the ones fix.md lists. Commits your prompt
+   names as the factory's own (a merge of the branch below or of the base,
+   the project's autofix) are not the fixer's: skip them. Anything else in
+   the range is a block.
 2. Each commit does what its items or failing checks asked, and nothing more.
    Unrelated edits, refactors or new behaviour are a block. Formatting-only
    changes from the formatter and regenerated files need only a quick look;

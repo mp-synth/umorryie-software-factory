@@ -59,6 +59,23 @@ test('baseCheckout reads origin, not a main checkout that is behind or edited', 
   assert.equal(await run(main, 'branch', '--show-current'), 'master');
 });
 
+test('baseCheckout refreshes caller-specific local files when reusing a checkout', async () => {
+  const { main, root } = await staleMainCheckout();
+  fs.writeFileSync(path.join(main, '.worktreeinclude'), '.local-tool\n');
+  fs.writeFileSync(path.join(main, '.local-tool'), 'first\n');
+
+  const first = await baseCheckout(main, root, 'master');
+  assert.equal(fs.readFileSync(path.join(first.dir, '.local-tool'), 'utf8'), 'first\n');
+  assert.equal(fs.existsSync(path.join(first.dir, '.env')), false);
+
+  fs.writeFileSync(path.join(main, '.local-tool'), 'second\n');
+  const reused = await baseCheckout(main, root, 'master', { copyFiles: ['.env'] });
+
+  assert.equal(reused.dir, first.dir);
+  assert.equal(fs.readFileSync(path.join(reused.dir, '.local-tool'), 'utf8'), 'second\n');
+  assert.equal(fs.readFileSync(path.join(reused.dir, '.env'), 'utf8'), 'KEY=dev\n');
+});
+
 async function pushCommit(upstream: string, content: string, message: string): Promise<string> {
   const sha = await commitFile(upstream, 'api.py', content, message);
   await run(upstream, 'push', '--quiet', 'origin', 'master');

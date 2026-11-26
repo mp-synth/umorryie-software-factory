@@ -1,0 +1,199 @@
+﻿2026-11-26T17:12:46.1122388Z Current runner version: '2.338.2'
+2026-11-26T17:12:46.1130006Z Runner name: 'arc-build-runner-qwqxn'
+2026-11-26T17:12:46.1130842Z Runner group name: 'arc-infra-euw1'
+2026-11-26T17:12:46.1131897Z Machine name: 'arc-build-runner-qwqxn'
+2026-11-26T17:12:46.1134873Z ##[group]GITHUB_TOKEN Permissions
+2026-11-26T17:12:46.1137622Z Contents: read
+2026-11-26T17:13:51.6190316Z Running shard 1 of 4.
+2026-11-26T17:13:51.6216939Z Selecting tests affected by ddd8de97561af31c0d6f19de8829b95e6a482161..HEAD
+2026-11-26T17:14:06.0268922Z /home/runner/_work/widgets/widgets/service/videos/api_models/videos.py:798: ChangedInMarshmallow4Warning: `Number` field should not be instantiated. Use `Integer`, `Float`, or `Decimal` instead.
+2026-11-26T17:14:06.0270523Z   scale = fields.Number()
+2026-11-26T17:14:06.0272128Z /home/runner/_work/widgets/widgets/service/videos/api_models/videos.py:845: ChangedInMarshmallow4Warning: `Number` field should not be instantiated. Use `Integer`, `Float`, or `Decimal` instead.
+2026-11-26T17:14:06.0273755Z   scale = fields.Number(load_default=1.0)
+2026-11-26T17:14:40.5034503Z ============================= test session starts ==============================
+2026-11-26T17:14:40.5035122Z platform linux -- Python 3.13.12, pytest-7.4.3, pluggy-1.6.0
+2026-11-26T17:14:40.5036380Z rootdir: /home/runner/_work/widgets/widgets
+2026-11-26T17:14:40.5037114Z configfile: pyproject.toml
+2026-11-26T17:14:40.5037700Z testpaths: service, test/unit, packages, scripts/billing/tests, scripts/pre_commit/tests
+2026-11-26T17:14:40.5038683Z plugins: cov-6.2.1, asyncio-0.22.0, flaky-3.7.0, env-1.0.1, typeguard-4.4.4, requests-mock-1.11.0, mock-1.11.0, xdist-3.3.1, anyio-4.10.0, acme-pytest-affected-0.3.1, langsmith-0.8.5, ddtrace-3.11.3
+2026-11-26T17:14:40.5039783Z asyncio: mode=Mode.STRICT
+2026-11-26T17:14:40.5040096Z created: 16/16 workers
+2026-11-26T17:14:40.5040358Z 16 workers [0 items]
+2026-11-26T17:14:40.5040528Z
+2026-11-26T17:14:40.5040533Z
+2026-11-26T17:14:40.5040707Z ==================================== ERRORS ====================================
+2026-11-26T17:14:40.5041180Z ________________________ ERROR collecting test session _________________________
+2026-11-26T17:14:40.5041754Z .venv/lib/python3.13/site-packages/_pytest/config/__init__.py:641: in _importconftest
+2026-11-26T17:14:40.5042314Z     mod = import_path(conftestpath, mode=importmode, root=rootpath)
+2026-11-26T17:14:40.5042880Z .venv/lib/python3.13/site-packages/_pytest/pathlib.py:567: in import_path
+2026-11-26T17:14:40.5043387Z     importlib.import_module(module_name)
+2026-11-26T17:14:40.5044147Z ../../../.local/share/uv/python/cpython-3.13.12-linux-x86_64-gnu/lib/python3.13/importlib/__init__.py:88: in import_module
+2026-11-26T17:14:40.5044982Z     return _bootstrap._gcd_import(name[level:], package, level)
+2026-11-26T17:14:40.5045446Z <frozen importlib._bootstrap>:1387: in _gcd_import
+2026-11-26T17:14:40.5045926Z     ???
+2026-11-26T17:14:40.5046293Z <frozen importlib._bootstrap>:1360: in _find_and_load
+2026-11-26T17:14:40.5046763Z     ???
+2026-11-26T17:14:40.5047178Z <frozen importlib._bootstrap>:1331: in _find_and_load_unlocked
+2026-11-26T17:14:40.5047561Z     ???
+2026-11-26T17:14:40.5047924Z <frozen importlib._bootstrap>:935: in _load_unlocked
+2026-11-26T17:14:40.5048289Z     ???
+2026-11-26T17:14:40.5048798Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5049343Z     return original_exec_module(module)
+2026-11-26T17:14:40.5049888Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5050430Z     return original_exec_module(module)
+2026-11-26T17:14:40.5050950Z .venv/lib/python3.13/site-packages/_pytest/assertion/rewrite.py:186: in exec_module
+2026-11-26T17:14:40.5051504Z     exec(co, module.__dict__)
+2026-11-26T17:14:40.5051898Z service/billing/tests/conftest.py:3: in <module>
+2026-11-26T17:14:40.5052423Z     from test.utils.workspaces_creator import workspaces_only_factory_impl
+2026-11-26T17:14:40.5053133Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5053617Z     return original_exec_module(module)
+2026-11-26T17:14:40.5054195Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5054724Z     return original_exec_module(module)
+2026-11-26T17:14:40.5055404Z test/utils/workspaces_creator.py:12: in <module>
+2026-11-26T17:14:40.5055993Z     from service.workspaces.controllers.workspaces.create_workspaces import setup_new_workspace
+2026-11-26T17:14:40.5056693Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5057294Z     return original_exec_module(module)
+2026-11-26T17:14:40.5077232Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5078353Z     return original_exec_module(module)
+2026-11-26T17:14:40.5079087Z service/workspaces/controllers/workspaces/create_workspaces.py:14: in <module>
+2026-11-26T17:14:40.5080064Z     from service.billing.controllers.billing import create_billing_account_for_workspace
+2026-11-26T17:14:40.5081099Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5081849Z     return original_exec_module(module)
+2026-11-26T17:14:40.5082544Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5083248Z     return original_exec_module(module)
+2026-11-26T17:14:40.5083766Z service/billing/controllers/billing.py:19: in <module>
+2026-11-26T17:14:40.5084549Z     from service.billing.controllers.lago.subscriptions import get_lago_subscription_status
+2026-11-26T17:14:40.5085423Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5086108Z     return original_exec_module(module)
+2026-11-26T17:14:40.5086661Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5087134Z     return original_exec_module(module)
+2026-11-26T17:14:40.5087517Z service/billing/controllers/lago/subscriptions.py:29: in <module>
+2026-11-26T17:14:40.5088481Z     from service.billing.controllers.lago.alerts import (
+2026-11-26T17:14:40.5088986Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5089459Z     return original_exec_module(module)
+2026-11-26T17:14:40.5089889Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5090334Z     return original_exec_module(module)
+2026-11-26T17:14:40.5090705Z service/billing/controllers/lago/alerts.py:30: in <module>
+2026-11-26T17:14:40.5091329Z     from service.billing.controllers.lago.utils.plans import extract_charge_codes_from_lago_plan, parse_lago_datetime
+2026-11-26T17:14:40.5092020Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5092471Z     return original_exec_module(module)
+2026-11-26T17:14:40.5092893Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5093328Z     return original_exec_module(module)
+2026-11-26T17:14:40.5093711Z service/billing/controllers/lago/utils/plans.py:8: in <module>
+2026-11-26T17:14:40.5094218Z     from service.billing.api_models.plan_management import LagoPlanMetadataUpdate
+2026-11-26T17:14:40.5094788Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5095242Z     return original_exec_module(module)
+2026-11-26T17:14:40.5095684Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5096131Z     return original_exec_module(module)
+2026-11-26T17:14:40.5096485Z service/billing/api_models/__init__.py:13: in <module>
+2026-11-26T17:14:40.5096896Z     from service.billing.api_models.salesforce_creation import *
+2026-11-26T17:14:40.5097416Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5097865Z     return original_exec_module(module)
+2026-11-26T17:14:40.5098290Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.5098732Z     return original_exec_module(module)
+2026-11-26T17:14:40.5099107Z service/billing/api_models/salesforce_creation.py:8: in <module>
+2026-11-26T17:14:40.5099748Z     from service.billing.api_models.salesforce import (
+2026-11-26T17:14:40.5100645Z E   ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.5101853Z ________________________ ERROR collecting test session _________________________
+2026-11-26T17:14:40.5102548Z .venv/lib/python3.13/site-packages/_pytest/config/__init__.py:641: in _importconftest
+2026-11-26T17:14:40.5103217Z     mod = import_path(conftestpath, mode=importmode, root=rootpath)
+2026-11-26T17:14:40.5103699Z .venv/lib/python3.13/site-packages/_pytest/pathlib.py:567: in import_path
+2026-11-26T17:14:40.5104128Z     importlib.import_module(module_name)
+2026-11-26T17:14:40.5104689Z ../../../.local/share/uv/python/cpython-3.13.12-linux-x86_64-gnu/lib/python3.13/importlib/__init__.py:88: in import_module
+2026-11-26T17:14:40.6048944Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.6049075Z     return original_exec_module(module)
+2026-11-26T17:14:40.6049325Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.6049455Z     return original_exec_module(module)
+2026-11-26T17:14:40.6049631Z service/billing/api_models/__init__.py:13: in <module>
+2026-11-26T17:14:40.6049826Z     from service.billing.api_models.salesforce_creation import *
+2026-11-26T17:14:40.6050083Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.6050264Z     return original_exec_module(module)
+2026-11-26T17:14:40.6050507Z .venv/lib/python3.13/site-packages/datadog_lambda/cold_start.py:117: in wrapped_method
+2026-11-26T17:14:40.6050804Z     return original_exec_module(module)
+2026-11-26T17:14:40.6051001Z service/billing/api_models/salesforce_creation.py:8: in <module>
+2026-11-26T17:14:40.6051172Z     from service.billing.api_models.salesforce import (
+2026-11-26T17:14:40.6051899Z E   ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6052075Z =============================== warnings summary ===============================
+2026-11-26T17:14:40.6052307Z .venv/lib/python3.13/site-packages/ddtrace/internal/module.py:300: 17 warnings
+2026-11-26T17:14:40.6053538Z   /home/runner/_work/widgets/widgets/.venv/lib/python3.13/site-packages/ddtrace/internal/module.py:300: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+2026-11-26T17:14:40.6053672Z     self.loader.exec_module(module)
+2026-11-26T17:14:40.6053684Z
+2026-11-26T17:14:40.6053897Z .venv/lib/python3.13/site-packages/ddtrace/_monkey.py:333: 17 warnings
+2026-11-26T17:14:40.6054952Z   /home/runner/_work/widgets/widgets/.venv/lib/python3.13/site-packages/ddtrace/_monkey.py:333: DDTraceDeprecationWarning: patch_all is deprecated and will be removed in a future version of the tracer.: patch_all is deprecated in favor of ``import ddtrace.auto`` and ``DD_PATCH_MODULES``
+2026-11-26T17:14:40.6055087Z           environment variable if needed.
+2026-11-26T17:14:40.6055194Z     deprecate(
+2026-11-26T17:14:40.6055201Z
+2026-11-26T17:14:40.6055417Z .venv/lib/python3.13/site-packages/common/logs/logger.py:180: 17 warnings
+2026-11-26T17:14:40.6056507Z   /home/runner/_work/widgets/widgets/.venv/lib/python3.13/site-packages/common/logs/logger.py:180: PydanticDeprecatedSince20: The `dict` method is deprecated; use `model_dump` instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+2026-11-26T17:14:40.6056703Z     logging.config.dictConfig(config.dict())  # type: ignore
+2026-11-26T17:14:40.6056709Z
+2026-11-26T17:14:40.6056871Z service/videos/api_models/videos.py:798: 16 warnings
+2026-11-26T17:14:40.6057519Z   /home/runner/_work/widgets/widgets/service/videos/api_models/videos.py:798: ChangedInMarshmallow4Warning: `Number` field should not be instantiated. Use `Integer`, `Float`, or `Decimal` instead.
+2026-11-26T17:14:40.6057641Z     scale = fields.Number()
+2026-11-26T17:14:40.6057646Z
+2026-11-26T17:14:40.6057812Z service/videos/api_models/videos.py:845: 16 warnings
+2026-11-26T17:14:40.6058585Z   /home/runner/_work/widgets/widgets/service/videos/api_models/videos.py:845: ChangedInMarshmallow4Warning: `Number` field should not be instantiated. Use `Integer`, `Float`, or `Decimal` instead.
+2026-11-26T17:14:40.6058722Z     scale = fields.Number(load_default=1.0)
+2026-11-26T17:14:40.6058727Z
+2026-11-26T17:14:40.6058909Z service/billing/api_models/provisionings.py:119: 16 warnings
+2026-11-26T17:14:40.6059610Z   /home/runner/_work/widgets/widgets/service/billing/api_models/provisionings.py:119: ChangedInMarshmallow4Warning: `Number` field should not be instantiated. Use `Integer`, `Float`, or `Decimal` instead.
+2026-11-26T17:14:40.6059744Z     value = fields.Number(required=True)
+2026-11-26T17:14:40.6059750Z
+2026-11-26T17:14:40.6059982Z -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2026-11-26T17:14:40.6060155Z =========================== short test summary info ============================
+2026-11-26T17:14:40.6060806Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6061586Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6062299Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6063110Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6063818Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6064437Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6065164Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6065861Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6066485Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6067255Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6068001Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6068625Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6069324Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6069999Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6070624Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6071252Z ERROR  - ImportError: cannot import name 'AddSalesforceAdminsRequest' from 'service.billing.api_models.salesforce' (/home/runner/_work/widgets/widgets/service/billing/api_models/salesforce.py)
+2026-11-26T17:14:40.6071424Z ============================= Datadog Test Reports =============================
+2026-11-26T17:14:40.6071674Z View detailed reports in Datadog (they may take a few minutes to become available):
+2026-11-26T17:14:40.6071680Z
+2026-11-26T17:14:40.6071790Z * Commit report:
+2026-11-26T17:14:40.6073626Z   → https://app.datadoghq.eu/ci/redirect/tests/https%3A%2F%2Fgithub.com%2Facme%2Fwidgets.git/-/widgets-unit-tests/-/factory%2Ffeature-1234abcd%2F08-sf-renewal-workflow/-/a77eaa12c521308243861d1f2f5b5b4bb6c2f745?env=ci
+2026-11-26T17:14:40.6073636Z
+2026-11-26T17:14:40.6073886Z * Test runs report:
+2026-11-26T17:14:40.6074570Z   → https://app.datadoghq.eu/ci/test-runs?query=%40ci.job.name%3Atest-unit-shard%20%40ci.pipeline.id%3A45865756979&index=citest
+2026-11-26T17:14:40.6074828Z ======================= 99 warnings, 16 errors in 23.17s =======================
+2026-11-26T17:14:44.2433487Z ##[error]Process completed with exit code 1.
+2026-11-26T17:14:44.2442916Z ##[end-action id=__self.__run_4;outcome=failure;conclusion=failure;duration_ms=52639]
+2026-11-26T17:14:44.2535028Z ##[group]Run [ -f .coverage ] && mv .coverage .coverage.shard-1 || true
+2026-11-26T17:14:44.2535594Z [36;1m[ -f .coverage ] && mv .coverage .coverage.shard-1 || true[0m
+2026-11-26T17:14:44.2542383Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-11-26T17:14:44.2542906Z env:
+2026-11-26T17:14:44.2543167Z   AWS_DEFAULT_REGION: eu-west-1
+2026-11-26T17:14:44.2543486Z   AWS_REGION: eu-west-1
+2026-11-26T17:14:44.2543956Z   AWS_ACCESS_KEY_ID: ***
+2026-11-26T17:14:44.2544469Z   AWS_SECRET_ACCESS_KEY: ***
+2026-11-26T17:14:44.2550359Z   AWS_SESSION_TOKEN: ***
+2026-11-26T17:14:44.2550632Z   HOME_DIR: /home/runner
+2026-11-26T17:14:44.2550890Z   EXTRA_FLAGS: -u
+2026-11-26T17:14:44.2551154Z   TEMPORAL_CLI_VERSION: v1.5.1
+2026-11-26T17:14:44.2551476Z   TEMPORAL_CLI_BINARY: /usr/local/bin/temporal
+2026-11-26T17:14:44.2551837Z   TEMPORAL_TEST_SERVER_PYTHON_VERSION: v1.32.0
+2026-11-26T17:14:44.2552252Z   TEMPORAL_TEST_SERVER_PYTHON_BINARY: /usr/local/bin/temporal-test-server
+2026-11-26T17:14:44.2552771Z   UV_PYTHON_INSTALL_DIR: /home/runner/.local/share/uv/python
+2026-11-26T17:14:44.2553125Z ##[endgroup]
+2026-11-26T17:14:44.2731872Z ##[group]Run actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+2026-11-26T17:14:44.2732717Z with:
+2026-11-26T17:14:44.2733149Z   name: coverage-data-shard-1
+2026-11-26T17:14:44.2734546Z   path: .coverage.shard-1
+2026-11-26T17:14:44.2735096Z   retention-days: 1
+2026-11-26T17:14:44.2735805Z   include-hidden-files: true
+2026-11-26T17:14:55.4697349Z ##[group]Run '/job-hooks/post-job-hook.sh'
+2026-11-26T17:14:55.4703390Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-11-26T17:14:55.4703833Z ##[endgroup]
+2026-11-26T17:14:55.4752772Z [stepsecurity] post job-hook
+2026-11-26T17:14:55.8970438Z [stepsecurity] Failed to fetch summary (HTTP 200) or no content available
+2026-11-26T17:14:55.9109091Z Cleaning up orphan processes

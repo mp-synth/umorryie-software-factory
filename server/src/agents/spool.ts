@@ -24,6 +24,8 @@ export interface SpoolLaunch {
   stallMs?: number;
   scratchDir?: string | null;
   marker?: string;
+  /** Lower CPU priority (nice value) for the command and everything it starts, so the server stays responsive. */
+  nice?: number;
 }
 
 export interface SpoolExit {
@@ -242,7 +244,7 @@ export function superviseSpool<T>(
   };
 }
 
-export type CommandOutcome = ExecResult & { canceled: boolean };
+export type CommandOutcome = ExecResult & { canceled: boolean; signal?: string | null };
 
 const SUPERVISOR_LOST = 'The supervisor of this process disappeared before it recorded an exit.';
 
@@ -271,6 +273,7 @@ export function followCommand(
     stderr: exit ? output.stderr : `${output.stderr}${SUPERVISOR_LOST}\n`,
     timedOut: !!exit?.timedOut,
     canceled: cancelRequested || !!exit?.canceled,
+    signal: exit?.signal ?? null,
   });
   return superviseSpool(dir, opts.pid, onLines, conclude, { pollMs: opts.pollMs });
 }

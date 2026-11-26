@@ -19,7 +19,8 @@
     "start": "pnpm db:up && pnpm build && pnpm --filter @factory/server start",
     "service": "bash scripts/service.sh",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test:scripts": "/usr/bin/python3 -m unittest scripts/checks/test_enactservices_select_tests.py && bash -n scripts/checks/*.sh scripts/fix/*.sh scripts/service.sh",
+    "test": "pnpm test:scripts && pnpm -r test"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

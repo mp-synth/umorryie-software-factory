@@ -1,0 +1,84 @@
+{
+ "data": {
+  "rateLimit": {
+   "cost": 1,
+   "remaining": 4965,
+   "limit": 5000,
+   "resetAt": "2026-11-26T20:09:39Z"
+  },
+  "repository": {
+   "pullRequest": {
+    "commits": {
+     "nodes": [
+      {
+       "commit": {
+        "statusCheckRollup": {
+         "contexts": {
+          "pageInfo": {
+           "hasNextPage": false,
+           "endCursor": "MTQ4"
+          },
+          "nodes": [
+           {
+            "__typename": "CheckRun",
+            "name": "Enable auto-merge (video-platform) / enable",
+            "conclusion": "SKIPPED",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:45:18Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870354752/job/140083940324",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Auto-merge new PRs"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "Enable auto-merge (video-platform) / enable",
+            "conclusion": "SKIPPED",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:45:29Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870408435/job/140084034500",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Auto-merge new PRs"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "StatusContext",
+            "context": "Code review",
+            "state": "PENDING",
+            "targetUrl": "https://github.com/acme/widgets/actions/runs/45871151068",
+            "description": "needs review from @enterprise-billing",
+            "createdAt": "2026-11-26T17:51:24Z",
+            "isRequired": true
+           },
+           {
+            "__typename": "StatusContext",
+            "context": "mergefreeze",
+            "state": "SUCCESS",
+            "targetUrl": null,
+            "description": "not frozen",
+            "createdAt": "2026-11-26T17:45:00Z",
+            "isRequired": true
+           }
+          ]
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

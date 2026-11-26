@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Cpu, Gauge, GitPullRequest, SlidersHorizontal } from 'lucide-react';
 import { toast } from 'sonner';
-import { DEFAULT_INITIATIVE_SETTINGS, MODEL_VERSIONS, MODELS, type InitiativeDetail, type InitiativeSettings, type Model } from '@factory/shared';
+import { DEFAULT_INITIATIVE_SETTINGS, EFFORTS, MODEL_VERSIONS, MODELS, type AgentRunKind, type Effort, type InitiativeDetail, type InitiativeSettings, type Model } from '@factory/shared';
 import { Card, CardHeader, NumberStepper, Select, SwitchRow } from '@/components/ui';
 import { api } from '@/lib/api';
 import { toastError } from '@/lib/toasts';
@@ -27,7 +27,36 @@ const PULL_REQUESTS: Toggle[] = [
     description: 'A stacked ticket starts once the one below it is built and its PR is open, instead of once it is approved. Its review still waits for that approval.',
   },
   { key: 'dependentsWaitForCi', label: 'Dependents wait for green CI', description: 'A ticket stacked on another starts only once CI on the one below is green.' },
+  {
+    key: 'foundationCheckpoint',
+    label: 'Foundations hold their dependents',
+    description: 'A ticket the plan marks as a foundation (the contract others build on) holds the tickets on it until it is approved and its CI is green.',
+  },
+  {
+    key: 'lineInPlanOrder',
+    label: 'One GitHub stack in plan order',
+    description: 'Every PR opens on the one before it in plan order, so all of them sit in one stack. Tickets still build side by side when what they need is ready.',
+  },
+  {
+    key: 'landStackAtOnce',
+    label: 'Land approved stacks in one merge',
+    description: 'With auto-merge, the approved and green bottom of a stack joins the merge queue through its highest PR and lands in one go.',
+  },
+  {
+    key: 'resumeFixSessions',
+    label: "Fixers continue the last fixer's session",
+    description: "A fix round right after a finished one picks up that agent's context instead of reading the repo again. For comparing speed and quality.",
+  },
 ];
+
+const EFFORT_OPTIONS: readonly (Effort | '')[] = ['', ...EFFORTS];
+
+function withEffort(efforts: InitiativeSettings['efforts'], role: AgentRunKind, effort: Effort | ''): InitiativeSettings['efforts'] {
+  const next = { ...efforts };
+  if (effort) next[role] = effort;
+  else delete next[role];
+  return next;
+}
 
 const ROLES: { key: keyof InitiativeSettings['models']; label: string }[] = [
   { key: 'plan', label: 'Planner' },
@@ -64,7 +93,12 @@ export function AutopilotPanel({ detail }: { detail: InitiativeDetail }) {
     },
     onSettled: () => qc.invalidateQueries({ queryKey: key }),
   });
-  const s: InitiativeSettings = { ...DEFAULT_INITIATIVE_SETTINGS, ...i.settings, models: { ...DEFAULT_INITIATIVE_SETTINGS.models, ...i.settings.models } };
+  const s: InitiativeSettings = {
+    ...DEFAULT_INITIATIVE_SETTINGS,
+    ...i.settings,
+    models: { ...DEFAULT_INITIATIVE_SETTINGS.models, ...i.settings.models },
+    efforts: { ...DEFAULT_INITIATIVE_SETTINGS.efforts, ...i.settings.efforts },
+  };
   const toggles = (list: Toggle[]) => (
     <div className="divide-y divide-line-subtle">
       {list.map((t) => (
@@ -89,7 +123,7 @@ export function AutopilotPanel({ detail }: { detail: InitiativeDetail }) {
         <Card>
           <CardHeader icon={<SlidersHorizontal />} title="Limits" description="When a ticket or the plan runs out of rounds, it waits for you." />
           <div className="grid grid-cols-2 gap-4 p-4">
-            <NumberStepper label="Review and fix rounds" hint="Rounds per ticket before it waits for you" value={s.maxRounds} min={1} max={10} onChange={(v) => save.mutate({ maxRounds: v })} />
+            <NumberStepper label="Fix rounds in a row" hint="Fix rounds on one problem before the arbiter or you decide" value={s.maxRounds} min={1} max={10} onChange={(v) => save.mutate({ maxRounds: v })} />
             <NumberStepper label="Tickets at once" hint="Tickets of this initiative built in parallel" value={s.concurrency} min={1} max={10} onChange={(v) => save.mutate({ concurrency: v })} />
             <NumberStepper label="Plan rounds" hint="Plan and review rounds before the plan waits for you" value={s.maxPlanRounds} min={1} max={5} onChange={(v) => save.mutate({ maxPlanRounds: v })} />
             <NumberStepper label="Arbiter decisions in a row" hint="Before a step waits for you anyway" value={s.maxArbiterDecisions} min={1} max={10} onChange={(v) => save.mutate({ maxArbiterDecisions: v })} />
@@ -101,14 +135,32 @@ export function AutopilotPanel({ detail }: { detail: InitiativeDetail }) {
             {ROLES.map((m) => (
               <label key={m.key} className="flex items-center justify-between gap-3">
                 <span className="text-sm text-ink-secondary">{m.label}</span>
-                <span className="w-36">
-                  <Select size="sm" value={s.models[m.key]} onChange={(e) => save.mutate({ models: { ...s.models, [m.key]: e.target.value as Model } })}>
-                    {MODELS.map((model) => (
-                      <option key={model} value={model}>
-                        {MODEL_VERSIONS[model].label}
-                      </option>
-                    ))}
-                  </Select>
+                <span className="flex gap-2">
+                  <span className="w-36">
+                    <Select size="sm" value={s.models[m.key]} onChange={(e) => save.mutate({ models: { ...s.models, [m.key]: e.target.value as Model } })}>
+                      {MODELS.map((model) => (
+                        <option key={model} value={model}>
+                          {MODEL_VERSIONS[model].label}
+                        </option>
+                      ))}
+                    </Select>
+                  </span>
+                  {m.key !== 'mechanicalFix' && (
+                    <span className="w-28">
+                      <Select
+                        size="sm"
+                        aria-label={`${m.label} effort`}
+                        value={s.efforts?.[m.key as AgentRunKind] ?? ''}
+                        onChange={(e) => save.mutate({ efforts: withEffort(s.efforts ?? {}, m.key as AgentRunKind, e.target.value as Effort | '') })}
+                      >
+                        {EFFORT_OPTIONS.map((effort) => (
+                          <option key={effort} value={effort}>
+                            {effort || 'default effort'}
+                          </option>
+                        ))}
+                      </Select>
+                    </span>
+                  )}
                 </span>
               </label>
             ))}

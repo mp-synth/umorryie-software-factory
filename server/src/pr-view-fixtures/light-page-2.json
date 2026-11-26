@@ -1,0 +1,43 @@
+{
+ "data": {
+  "rateLimit": {
+   "cost": 1,
+   "remaining": 4970,
+   "limit": 5000,
+   "resetAt": "2026-11-26T20:09:39Z"
+  },
+  "search": {
+   "pageInfo": {
+    "hasNextPage": false,
+    "endCursor": "Y3Vyc29yOjM="
+   },
+   "nodes": [
+    {
+     "number": 21143,
+     "url": "https://github.com/acme/widgets/pull/21143",
+     "title": "PR 21143",
+     "state": "OPEN",
+     "isDraft": true,
+     "isCrossRepository": false,
+     "headRefName": "factory/feature-1234abcd/03-kcl-group-handler",
+     "headRefOid": "d92ec661d84e0d38b265cb1ba45023a348b28d49",
+     "baseRefName": "factory/feature-1234abcd/02-batch-balance-writes",
+     "mergeable": "MERGEABLE",
+     "updatedAt": "2026-11-26T13:53:11Z",
+     "reviewDecision": "REVIEW_REQUIRED",
+     "commits": {
+      "nodes": [
+       {
+        "commit": {
+         "statusCheckRollup": {
+          "state": "PENDING"
+         }
+        }
+       }
+      ]
+     }
+    }
+   ]
+  }
+ }
+}

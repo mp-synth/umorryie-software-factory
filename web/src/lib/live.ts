@@ -265,6 +265,7 @@ export function poolSize(c: CapacityStatus): string {
 }
 
 export function poolNote(c: CapacityStatus): string | null {
+  if (c.paused) return `new agents wait: ${c.paused}`;
   if (!c.autoScale || c.pressure === 'ok' || c.limit >= c.ceiling) return null;
   return `held at ${c.limit} of ${c.ceiling} while this machine is short on ${c.pressure === 'memory' ? 'memory' : 'CPU'}`;
 }

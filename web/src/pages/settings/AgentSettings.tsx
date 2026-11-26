@@ -75,6 +75,9 @@ export function AgentSettings() {
             <Field label="Checks timeout" hint="Minutes.">
               <Input type="number" min={1} max={180} value={form.gateTimeoutMinutes} onChange={(e) => set({ gateTimeoutMinutes: Number(e.target.value) })} />
             </Field>
+            <Field label="Battery floor" hint="Percent. On battery below it no new agent starts; running steps finish. 0 turns it off.">
+              <Input type="number" min={0} max={100} value={form.minBatteryPercent ?? 15} onChange={(e) => set({ minBatteryPercent: Number(e.target.value) })} />
+            </Field>
             <Field label="Spend cap per run" optional hint="USD. Passed to claude --max-budget-usd.">
               <Input
                 type="number"
@@ -91,6 +94,12 @@ export function AgentSettings() {
             description="Off, which is recommended: agents start clean, with no user hooks, plugins or MCP servers, so nothing pollutes their context. The repo's own .claude settings and CLAUDE.md still apply."
             checked={form.loadUserSettings}
             onChange={(v) => set({ loadUserSettings: v })}
+          />
+          <SwitchRow
+            label="Keep the Mac awake while steps run"
+            description="Holds off idle sleep while agents or checks run, so a sleeping laptop never stops a healthy run halfway. Time limits count only the time the Mac is awake either way."
+            checked={form.keepAwake ?? true}
+            onChange={(v) => set({ keepAwake: v })}
           />
           <SwitchRow
             label="Resume steps a restart interrupted"
@@ -114,7 +123,7 @@ export function AgentSettings() {
         <div className="divide-y divide-line-subtle">
           <SwitchRow
             label={`Fix open PRs every ${PR_SWEEP_INTERVAL_MINUTES} minutes`}
-            description={`Merge conflicts, failing CI (tests, lint) and unanswered review comments get a fresh fixer, on every open factory PR and on every open PR you opened in a project's repo (adopted into that project's Open PRs initiative; archive it to stop). Tickets that need you are skipped. A PR being fixed is marked so the next sweep leaves it alone; the mark expires after ${PR_SWEEP_CLAIM_MINUTES} minutes.`}
+            description={`Merge conflicts and failing CI the project's check policy says to fix go to the factory's scripts first (merge, autofix, checks); what is left, and unanswered review comments, get a fresh fixer. This covers every open factory PR and on every open PR you opened in a project's repo (adopted into that project's Open PRs initiative; archive it to stop). Tickets that need you are skipped. A PR being fixed is marked so the next sweep leaves it alone; the mark expires after ${PR_SWEEP_CLAIM_MINUTES} minutes.`}
             checked={form.sweepOpenPrs}
             onChange={(v) => set({ sweepOpenPrs: v })}
           />

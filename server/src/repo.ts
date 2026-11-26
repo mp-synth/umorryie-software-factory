@@ -18,7 +18,7 @@ import {
 import { json, sql } from './db.ts';
 import { emitChange, emitRunEvent } from './events.ts';
 
-const JSON_COLUMNS = new Set(['planJson', 'settings', 'guidance', 'acceptance', 'dependsOn', 'needs', 'data', 'copyFiles', 'referenceDirs', 'prSweepSkip']);
+const JSON_COLUMNS = new Set(['planJson', 'settings', 'guidance', 'acceptance', 'dependsOn', 'needs', 'touches', 'data', 'copyFiles', 'referenceDirs', 'checkPolicy', 'generatedPaths', 'prSweepSkip']);
 
 function prepare(patch: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -47,7 +47,61 @@ export function initiativeSettings(i: Pick<Initiative, 'settings'>): InitiativeS
     ...DEFAULT_INITIATIVE_SETTINGS,
     ...s,
     models: { ...DEFAULT_INITIATIVE_SETTINGS.models, ...(s.models ?? {}) },
+    efforts: { ...DEFAULT_INITIATIVE_SETTINGS.efforts, ...(s.efforts ?? {}) },
   };
+}
+
+export async function remember(key: string, value: string | null): Promise<void> {
+  if (value === null) await sql`delete from factory_memory where key = ${key}`;
+  else await sql`insert into factory_memory (key, value) values (${key}, ${value}) on conflict (key) do update set value = excluded.value, updated_at = now()`;
+}
+
+export async function recall(key: string): Promise<string | null> {
+  const [row] = await sql<{ value: string | null }[]>`select value from factory_memory where key = ${key}`;
+  return row?.value ?? null;
+}
+
+export async function recallPrefix(prefix: string): Promise<Map<string, string>> {
+  const rows = await sql<{ key: string; value: string }[]>`select key, value from factory_memory where left(key, ${prefix.length}) = ${prefix}`;
+  return new Map(rows.map((r) => [r.key.slice(prefix.length), r.value]));
+}
+
+/** Drops what the factory remembered about tickets that are merged, canceled or gone (keyed by a ticket or run id). */
+export async function forgetFinishedTickets(): Promise<number> {
+  const rows = await sql`
+    with keyed as (
+      select key, substring(key from '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}') as id from factory_memory
+    )
+    delete from factory_memory m using keyed k
+    where m.key = k.key and k.id is not null and not exists (
+      select 1 from tickets t
+      where t.status not in ('merged', 'canceled')
+        and (t.id::text = k.id or t.id = (select r.ticket_id from runs r where r.id::text = k.id)))
+    returning m.key`;
+  const hung = await sql`
+    delete from factory_memory m
+    where left(m.key, 9) = 'hung-run:' and not exists (
+      select 1 from tickets t
+      where t.status not in ('merged', 'canceled')
+        and t.id::text = m.value::jsonb->>'ticketId')
+    returning m.key`;
+  return rows.length + hung.length;
+}
+
+export async function recordCiResult(ticketId: string, headSha: string, state: string, failing: string[]): Promise<void> {
+  await sql`
+    insert into ci_results (ticket_id, head_sha, state, failing) values (${ticketId}, ${headSha}, ${state}, ${json(failing)})
+    on conflict (ticket_id, head_sha) do update set state = excluded.state, failing = excluded.failing, recorded_at = now()`;
+}
+
+/** A gate that passed on exactly this tree with exactly these commands, in any ticket of the project. */
+export async function passedGateOnTree(projectId: string, treeSha: string, checksDigest: string): Promise<Run | null> {
+  const [r] = await sql<Run[]>`
+    select r.* from runs r join initiatives i on i.id = r.initiative_id
+    where i.project_id = ${projectId} and r.kind = 'gate' and r.status = 'succeeded' and r.verdict = 'GATE: PASS'
+      and r.tree_sha = ${treeSha} and r.checks_digest = ${checksDigest}
+    order by r.finished_at desc limit 1`;
+  return r ?? null;
 }
 
 export async function listProjects(): Promise<Project[]> {
@@ -295,11 +349,12 @@ export async function listRunsById(id: string): Promise<Run[]> {
   return sql<Run[]>`${runsWithTitles()} where r.id = ${id}`;
 }
 
-const isVerdict = (verdicts: string[]) => sql`upper(regexp_replace(verdict, '[[:space:]]+', '', 'g')) in ${sql(verdicts)}`;
+export const isVerdict = (verdicts: string[]) => sql`upper(regexp_replace(verdict, '[[:space:]]+', '', 'g')) in ${sql(verdicts)}`;
 
 // The arbiter's decisions in a row on the same problem. The owner speaking (on the ticket or to the whole
-// initiative) starts a new row, and so does a ticket a reviewer or verifier approved, or a plan the plan
-// reviewer passed, since: what stops it next is a new problem, not the loop the limit guards against.
+// initiative) starts a new row, and so does a ticket a reviewer approved, or a plan the plan reviewer passed,
+// since: what stops it next is a new problem. A verifier's approval does not: a verified fix that leaves the
+// PR as red as before is the loop the limit guards against.
 export async function arbiterDecisionsInARow(initiativeId: string, ticketId: string | null): Promise<number> {
   const [{ n }] = await sql<{ n: number }[]>`
     select count(*)::int as n from runs
@@ -309,7 +364,7 @@ export async function arbiterDecisionsInARow(initiativeId: string, ticketId: str
         (select max(created_at) from messages
           where initiative_id = ${initiativeId} and author = 'human' and ${ticketId ? sql`(ticket_id is null or ticket_id = ${ticketId})` : sql`ticket_id is null`}),
         (select max(finished_at) from runs
-          where ${ticketScope(initiativeId, ticketId)} and kind in ('review', 'verify', 'plan_review') and status = 'succeeded' and ${isVerdict(['VERDICT:APPROVE', 'VERDICT:PASS'])}),
+          where ${ticketScope(initiativeId, ticketId)} and kind in ('review', 'plan_review') and status = 'succeeded' and ${isVerdict(['VERDICT:APPROVE', 'VERDICT:PASS'])}),
         'epoch'::timestamptz)`;
   return n;
 }

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { discardDir } from './discard.ts';
 import { repoShellEnv } from './shell-env.ts';
 
 export interface ExecResult {
@@ -17,7 +18,12 @@ export interface ExecOptions {
   input?: string;
   onOutput?: (chunk: string) => void;
   maxOutput?: number;
+  pipeCloseTimeoutMs?: number;
 }
+
+// A descendant can inherit stdout or stderr after the command itself exits. Do not wait forever for `close`.
+const WAIT_FOR_PIPES_AFTER_EXIT_MS = 10_000;
+const GIVE_UP_AFTER_KILL_MS = 10_000;
 
 export function exec(cmd: string, args: string[], opts: ExecOptions = {}): Promise<ExecResult> {
   const max = opts.maxOutput ?? 2_000_000;
@@ -31,10 +37,51 @@ export function exec(cmd: string, args: string[], opts: ExecOptions = {}): Promi
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let settled = false;
+    let exited = false;
+    let exitCode = 1;
+    let pipeWait: NodeJS.Timeout | null = null;
+    let killWait: NodeJS.Timeout | null = null;
+    const stopTimers = () => {
+      if (timer) clearTimeout(timer);
+      if (pipeWait) clearTimeout(pipeWait);
+      if (killWait) clearTimeout(killWait);
+    };
+    const finish = (code: number, message = '') => {
+      if (settled) return;
+      settled = true;
+      stopTimers();
+      resolve({ code, stdout, stderr: message ? `${stderr}${stderr ? '\n' : ''}${message}` : stderr, timedOut });
+    };
+    const closePipes = () => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
+    const noteExit = (code: number | null) => {
+      if (exited) return;
+      exited = true;
+      exitCode = code ?? 1;
+      if (timer) clearTimeout(timer);
+      if (killWait) clearTimeout(killWait);
+      pipeWait = setTimeout(() => {
+        closePipes();
+        finish(exitCode, '(output pipes remained open after the command exited)');
+      }, opts.pipeCloseTimeoutMs ?? WAIT_FOR_PIPES_AFTER_EXIT_MS);
+      pipeWait.unref();
+    };
     const timer = opts.timeoutMs
       ? setTimeout(() => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            noteExit(child.exitCode);
+            return;
+          }
           timedOut = true;
           killTree(child.pid);
+          killWait = setTimeout(() => {
+            closePipes();
+            finish(124, '(timed out; the process did not exit after it was killed)');
+          }, GIVE_UP_AFTER_KILL_MS);
+          killWait.unref();
         }, opts.timeoutMs)
       : null;
     child.stdout.on('data', (d: Buffer) => {
@@ -48,12 +95,13 @@ export function exec(cmd: string, args: string[], opts: ExecOptions = {}): Promi
       opts.onOutput?.(s);
     });
     child.on('error', (err) => {
-      if (timer) clearTimeout(timer);
-      resolve({ code: 127, stdout, stderr: stderr + String(err), timedOut });
+      stderr += String(err);
+      finish(127);
     });
+    child.on('exit', noteExit);
     child.on('close', (code) => {
-      if (timer) clearTimeout(timer);
-      resolve({ code: code ?? 1, stdout, stderr, timedOut });
+      noteExit(code);
+      finish(exitCode);
     });
     if (opts.input) child.stdin.write(opts.input);
     child.stdin.end();
@@ -91,11 +139,31 @@ export async function git(cwd: string, args: string[], timeoutMs = 120_000): Pro
 }
 
 const repoLocks = new Map<string, Promise<unknown>>();
+export const REPO_LOCK_WAIT_MS = 5 * 60_000;
 
-export function withRepoLock<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+export class RepoBusy extends Error {}
+
+/**
+ * Runs `fn` alone among this repo's git bookkeeping. A caller that waits longer than `waitMs` gets RepoBusy
+ * instead of queueing behind a hung command forever; its work never runs.
+ */
+export function withRepoLock<T>(repo: string, fn: () => Promise<T>, waitMs = REPO_LOCK_WAIT_MS): Promise<T> {
   const key = path.resolve(repo);
-  const result = (repoLocks.get(key) ?? Promise.resolve()).then(fn);
-  const settled = result.catch(() => undefined);
+  const before = repoLocks.get(key) ?? Promise.resolve();
+  let gaveUp = false;
+  const turn = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      gaveUp = true;
+      reject(new RepoBusy(`waited ${Math.round(waitMs / 1000)} s for other git work in ${repo}`));
+    }, waitMs);
+    timer.unref();
+    void before.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  const result = turn.then(() => (gaveUp ? Promise.reject(new RepoBusy('gave up waiting')) : fn()));
+  const settled = before.then(() => result).catch(() => undefined);
   repoLocks.set(key, settled);
   void settled.then(() => {
     if (repoLocks.get(key) === settled) repoLocks.delete(key);
@@ -116,6 +184,10 @@ export function fetchOrigin(repo: string, opts: { cwd?: string; refs?: string[] 
     return git(cwd, ['fetch', '--quiet', 'origin', ...refs], 120_000);
   });
   fetchesNotStartedYet.set(sameFetch, fetch);
+  const forget = () => {
+    if (fetchesNotStartedYet.get(sameFetch) === fetch) fetchesNotStartedYet.delete(sameFetch);
+  };
+  fetch.then(forget, forget);
   return fetch;
 }
 
@@ -259,7 +331,7 @@ export async function ensureWorktree(repo: string, worktree: string, branch: str
 
 const MAX_WORKTREE_INCLUDES = 500;
 
-export async function copyWorktreeIncludes(repo: string, worktree: string): Promise<string[]> {
+export async function worktreeIncludeFiles(repo: string): Promise<string[]> {
   const includeFile = path.join(repo, '.worktreeinclude');
   if (!fs.existsSync(includeFile)) return [];
   const r = await git(repo, ['ls-files', '--others', '--ignored', `--exclude-from=${includeFile}`]);
@@ -268,6 +340,11 @@ export async function copyWorktreeIncludes(repo: string, worktree: string): Prom
   if (files.length > MAX_WORKTREE_INCLUDES) {
     throw new Error(`.worktreeinclude matches ${files.length} files; name the files you need, not whole dependency folders`);
   }
+  return files;
+}
+
+export async function copyWorktreeIncludes(repo: string, worktree: string): Promise<string[]> {
+  const files = await worktreeIncludeFiles(repo);
   for (const f of files) {
     const target = path.join(worktree, f);
     fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -306,8 +383,7 @@ export async function resetHard(worktree: string, ref: string): Promise<void> {
 export function removeWorktree(repo: string, worktree: string | null, branch: string | null): Promise<void> {
   return withRepoLock(repo, async () => {
     if (worktree && fs.existsSync(worktree)) {
-      await git(repo, ['worktree', 'remove', '--force', worktree]);
-      if (fs.existsSync(worktree)) fs.rmSync(worktree, { recursive: true, force: true });
+      if (fs.existsSync(worktree)) discardDir(worktree);
     }
     await git(repo, ['worktree', 'prune']);
     if (branch && branch.startsWith('factory/') && (await branchExists(repo, branch))) {
@@ -459,7 +535,7 @@ export function linesInNumstat(numstat: string, generated: Set<string>): number 
   return total;
 }
 
-async function generatedFiles(cwd: string, files: string[]): Promise<Set<string>> {
+export async function generatedFiles(cwd: string, files: string[]): Promise<Set<string>> {
   if (!files.length) return new Set();
   const r = await git(cwd, ['check-attr', '-z', 'linguist-generated', '--', ...files]);
   const fields = r.stdout.split('\0');
@@ -479,13 +555,108 @@ export async function diffStat(worktree: string, base: string): Promise<string> 
   return (await git(worktree, ['diff', '--stat', `${base}...HEAD`])).stdout.trim();
 }
 
-export async function mergeInto(worktree: string, ref: string): Promise<{ ok: boolean; output: string }> {
-  const r = await git(worktree, ['merge', '--no-edit', ref]);
-  if (r.code !== 0) {
-    await git(worktree, ['merge', '--abort']);
-    return { ok: false, output: (r.stdout + r.stderr).trim() };
+/** rerere replays a conflict resolution recorded in any worktree of the repo (they share it), so a conflict is resolved once. */
+export const RERERE = ['-c', 'rerere.enabled=true', '-c', 'rerere.autoUpdate=true'];
+
+export const FACTORY_EMAIL = 'software-factory@localhost';
+/** Merges and commits the factory makes itself carry this identity, so a verifier can tell them from a fixer's. */
+const FACTORY_IDENTITY = ['-c', 'user.name=software-factory', '-c', `user.email=${FACTORY_EMAIL}`, '-c', 'commit.gpgsign=false'];
+
+export async function unmergedPaths(worktree: string): Promise<string[]> {
+  return (await git(worktree, ['diff', '--name-only', '--diff-filter=U'])).stdout.split('\n').filter(Boolean);
+}
+
+export interface MergeOutcome {
+  ok: boolean;
+  output: string;
+  /** Files still conflicting when the merge stopped; empty when it went through. */
+  conflicts: string[];
+}
+
+/**
+ * Merges `ref` into the worktree's branch. A conflict rerere has seen before is resolved and committed; one
+ * `resolve` settles (generated files, regenerated) is committed too. Anything else is aborted.
+ */
+export async function mergeInto(
+  worktree: string,
+  ref: string,
+  resolve?: (conflicts: string[]) => Promise<boolean>,
+  opts: { rerere?: boolean } = {},
+): Promise<MergeOutcome> {
+  const r = await git(worktree, [...(opts.rerere === false ? [] : RERERE), ...FACTORY_IDENTITY, 'merge', '--no-edit', '--no-verify', ref]);
+  if (r.code === 0) return { ok: true, output: r.stdout.trim(), conflicts: [] };
+  const conflicts = await unmergedPaths(worktree);
+  const mergeHead = await git(worktree, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
+  const mergeInProgress = mergeHead.code === 0;
+  const settled = mergeInProgress && (conflicts.length === 0 || (resolve ? await resolve(conflicts) : false));
+  if (settled && (await unmergedPaths(worktree)).length === 0) {
+    const committed = await git(worktree, [...FACTORY_IDENTITY, 'commit', '--no-edit', '--no-verify', '--quiet']);
+    if (committed.code === 0) return { ok: true, output: `${r.stdout.trim()}\nResolved without an agent: ${conflicts.join(', ') || 'recorded resolution'}`, conflicts: [] };
   }
-  return { ok: true, output: r.stdout.trim() };
+  if (mergeInProgress) await git(worktree, ['merge', '--abort']);
+  return { ok: false, output: (r.stdout + r.stderr).trim(), conflicts };
+}
+
+/** Whether `ours` and `theirs` merge without conflict, worked out in the object store only (no worktree, no refs). */
+export async function mergesCleanly(cwd: string, ours: string, theirs: string): Promise<boolean | null> {
+  const r = await git(cwd, ['merge-tree', '--write-tree', '--name-only', '--no-messages', ours, theirs], 60_000);
+  if (r.code === 0) return true;
+  return r.code === 1 ? false : null;
+}
+
+export async function untrackedFiles(worktree: string): Promise<string[]> {
+  const r = await git(worktree, ['ls-files', '--others', '--exclude-standard', '-z']);
+  return r.code === 0 ? r.stdout.split('\0').filter(Boolean) : [];
+}
+
+export async function treeSha(worktree: string): Promise<string | null> {
+  const r = await git(worktree, ['rev-parse', 'HEAD^{tree}']);
+  return r.code === 0 ? r.stdout.trim() : null;
+}
+
+/** Commits whatever the worktree changed, as the factory, without hooks; null when nothing changed. */
+export async function commitAll(worktree: string, message: string): Promise<string | null> {
+  if (!(await statusPorcelain(worktree))) return null;
+  await gitOut(worktree, ['add', '-A']);
+  if ((await git(worktree, ['diff', '--cached', '--quiet'])).code === 0) return null;
+  await gitOut(worktree, [...FACTORY_IDENTITY, 'commit', '--quiet', '--no-verify', '-m', message]);
+  return headSha(worktree);
+}
+
+function explicitPathspecs(worktree: string, files: string[]): string[] {
+  return [...new Set(files)].map((file) => {
+    if (!isSafeRelativePath(file) || file.includes('\0')) throw new Error(`unsafe commit path: ${JSON.stringify(file)}`);
+    const absolute = path.join(worktree, file);
+    if (fs.existsSync(absolute) && fs.lstatSync(absolute).isDirectory()) throw new Error(`commit path is a directory: ${file}`);
+    return `:(literal)${file}`;
+  });
+}
+
+/** Commits only the named files, leaving every other staged, unstaged, or untracked path alone. */
+export async function commitPaths(worktree: string, message: string, files: string[]): Promise<string | null> {
+  const paths = explicitPathspecs(worktree, files);
+  if (!paths.length) return null;
+  await gitOut(worktree, ['add', '-A', '--', ...paths]);
+  const changed = await git(worktree, ['diff', '--cached', '--quiet', 'HEAD', '--', ...paths]);
+  if (changed.code === 0) return null;
+  if (changed.code !== 1) throw new Error(`could not inspect commit paths: ${(changed.stderr || changed.stdout).trim()}`);
+  await gitOut(worktree, [...FACTORY_IDENTITY, 'commit', '--quiet', '--no-verify', '--only', '-m', message, '--', ...paths]);
+  return headSha(worktree);
+}
+
+/** The environment that makes an agent's git commands skip the repo's commit hooks and reuse recorded conflict resolutions. */
+export function agentGitEnv(opts: { skipHooks: boolean; emptyHooksDir: string }): Record<string, string> {
+  const pairs: [string, string][] = [
+    ['rerere.enabled', 'true'],
+    ['rerere.autoUpdate', 'true'],
+    ...(opts.skipHooks ? ([['core.hooksPath', opts.emptyHooksDir]] as [string, string][]) : []),
+  ];
+  const env: Record<string, string> = { GIT_CONFIG_COUNT: String(pairs.length) };
+  pairs.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
 }
 
 export async function push(worktree: string, branch: string, remoteBranch = branch): Promise<ExecResult> {

@@ -79,8 +79,8 @@ everything from **http://localhost:4317**, without hot reload.
    and $0.10) reads the repo's `CLAUDE.md`, `AGENTS.md`, CI config and scripts,
    and proposes:
    - the **setup command**, run once in every new worktree (for example `pnpm install`);
-   - the **checks command**: formatting, lint and type checks scoped to what the
-     branch changed (`$FACTORY_BASE`), never tests, because tests run in the PR's CI;
+   - the **checks command**: formatting, lint, type checks and the relevant tests
+     scoped to what the branch changed (`$FACTORY_BASE`), before the PR's wider CI;
    - the gitignored **files to copy into each worktree**, such as `.env`;
    - **reference folders**: other local checkouts agents may read (an SDK and the service it calls);
    - what must be **running for the checks** (a database, a registry login).
@@ -124,15 +124,15 @@ pnpm service install   # API on :4317, UI on :5173 and the watch, now and at eve
 ```
 
 They come back after a crash or a reboot and belong to no terminal or session.
-The watch keeps the server on the checkout's code: 20 seconds after the last
-change to the server's files it typechecks the server and restarts it, and
-running agents keep going. It does not restart while the checkout is off
-`main`, in the middle of a merge or rebase, or waiting for `pnpm install`
-after a lockfile change. A change that does not typecheck is logged once and
-retried when the files change again. The UI hot-reloads and `agents/*.md` are
-read at every spawn, so neither needs a restart.
+Server changes never go live on their own: `pnpm service promote` typechecks the
+checkout, runs the server tests and only then restarts the server, and running
+agents keep going. It refuses while the checkout is off `main`, in the middle
+of a merge or rebase, or waiting for `pnpm install` after a lockfile change.
+The watch only logs, once per set of changes, that the server runs older code.
+The UI hot-reloads and `agents/*.md` are read at every spawn, so neither needs
+a restart.
 
-`pnpm service restart` restarts by hand (`restart all` restarts the UI too),
+`pnpm service restart` restarts without the checks (`restart all` restarts the UI too),
 `pnpm service status` says whether the server is running older code than the
 checkout, `pnpm service logs [web|watch]` follows the logs in
 `~/.software-factory/logs` (rotated at 10 MB), and `pnpm service stop`,

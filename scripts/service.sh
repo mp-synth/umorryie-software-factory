@@ -4,10 +4,12 @@
 # a crash, and do not belong to any terminal or Claude session, so closing one
 # never takes the factory down.
 #
-#   pnpm service install          start both, and the watch that restarts the server
-#                                 onto new code, now and at every login
-#   pnpm service restart          load server changes (agents keep running);
-#                                 `restart web` or `restart all` for the UI too
+#   pnpm service install          start both, and the watch that says when the server
+#                                 runs older code than the checkout, now and at every login
+#   pnpm service promote          typecheck and test the checkout, then restart the server
+#                                 onto it (agents keep running)
+#   pnpm service restart          restart without the checks; `restart web` or
+#                                 `restart all` for the UI too
 #   pnpm service status           what runs, since when, and whether the server
 #                                 is running older code than the checkout
 #   pnpm service logs [web|watch] follow the server (or UI, or watch) log
@@ -21,6 +23,7 @@ AGENTS_DIR="$HOME/Library/LaunchAgents"
 # The jobs never get FACTORY_HOME, so the service always lives in the default home,
 # whatever a throwaway server in the calling shell uses.
 LOG_DIR="$HOME/.software-factory/logs"
+SERVER_PROMOTION="$LOG_DIR/server.promoted"
 DOMAIN="gui/$(id -u)"
 JOBS=(server web watch)
 LOG_LIMIT=10485760
@@ -82,6 +85,14 @@ rotate() {
   cp -f "$log" "$log.1" && : >"$log"
 }
 
+verify_server_promotion() {
+  [[ -f "$SERVER_PROMOTION" ]] || return 0
+  local promoted_head promoted_worktree
+  read -r promoted_head promoted_worktree <"$SERVER_PROMOTION"
+  [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$promoted_head" && "$(worktree_fingerprint)" == "$promoted_worktree" ]] \
+    || die "the checkout changed after its last successful promote; run pnpm service promote"
+}
+
 # Entry point of each launchd job.
 run() {
   local job="$1" log="$LOG_DIR/$1.log"
@@ -92,12 +103,14 @@ run() {
   case "$job" in
     server)
       local out
+      verify_server_promotion
       if ! out="$(cd "$ROOT" && docker compose up -d --wait db 2>&1)"; then
         echo "$out"
         die "Postgres did not come up (is Docker running?); launchd tries again in 10 s"
       fi
       deleted_files >"$LOG_DIR/server.started"
       cd "$ROOT/server"
+      verify_server_promotion
       exec node --import tsx src/index.ts
       ;;
     web)
@@ -211,7 +224,7 @@ restart_lock() {
 }
 
 restart() {
-  restart_lock
+  [ -n "${restart_lock_held:-}" ] || restart_lock
   local jobs
   case "${1:-server}" in
     server | web | watch) jobs=("${1:-server}") ;;
@@ -220,6 +233,10 @@ restart() {
   esac
   for job in "${jobs[@]}"; do
     loaded "$job" || die "the $job job is not running; run pnpm service install (or start)"
+    if [[ "$job" == server && -z "${restart_lock_held:-}" ]]; then
+      printf '%s %s\n' "$(git -C "$ROOT" rev-parse HEAD)" "$(worktree_fingerprint)" >"$SERVER_PROMOTION.tmp"
+      mv -f "$SERVER_PROMOTION.tmp" "$SERVER_PROMOTION"
+    fi
     local old; old="$(job_pid "$job")"
     if [[ -n "$old" ]]; then
       # The server waits up to 15 s for steps that are just finishing; a second
@@ -286,9 +303,42 @@ newest_change() {
 
 fingerprint() { while read -r f; do stat -f '%m %z %N' "$ROOT/$f" 2>/dev/null || echo "$f"; done <<<"$1" | shasum | cut -c1-40; }
 
-# Restarts the server onto the checkout's code once the changes have been quiet for
-# WATCH_QUIET seconds and typecheck; running agents keep going. A set of changes that
-# cannot be loaded is reported once and retried when it changes again.
+worktree_fingerprint() {
+  (
+    cd "$ROOT"
+    git status --porcelain=v2 -z || echo status-failed
+    git diff --binary HEAD -- || echo diff-failed
+    for file in .env; do
+      [[ -f "$file" ]] && { printf '%s\0' "$file"; shasum <"$file"; }
+    done
+    while IFS= read -r -d '' file; do
+      printf '%s\0' "$file"
+      if [[ -L "$file" ]]; then
+        readlink "$file" || echo missing
+      elif [[ -f "$file" ]]; then
+        shasum <"$file" || echo unreadable
+      else
+        echo missing
+      fi
+    done < <(git ls-files --others --exclude-standard -z)
+  ) | shasum | cut -c1-40
+}
+
+preflight_changed() {
+  local expected_head="$1" expected_worktree="$2" current_head
+  current_head="$(git -C "$ROOT" rev-parse HEAD)"
+  if [[ "$current_head" != "$expected_head" ]]; then
+    echo "HEAD moved from ${expected_head:0:7} to ${current_head:0:7} during preflight"
+  elif [[ "$(worktree_fingerprint)" != "$expected_worktree" ]]; then
+    echo "the worktree changed during preflight"
+  else
+    return 1
+  fi
+}
+
+# Reports, once per set of changes, that the server runs older code than the checkout.
+# Edits never go live on their own: every restart re-runs startup recovery and a full PR
+# sweep, so new code goes live only through `pnpm service promote`.
 WATCH_SKIPPED=""
 watch_once() {
   [[ -n "$(job_pid server)" ]] || return 0
@@ -297,24 +347,47 @@ watch_once() {
   (($(date +%s) - $(newest_change "$stale") >= WATCH_QUIET)) || return 0
   local print; print="$(fingerprint "$stale")"
   [[ "$print" != "$WATCH_SKIPPED" ]] || return 0
-  local busy out
-  if busy="$(checkout_busy)"; then
-    log "not restarting: $busy"
-    WATCH_SKIPPED="$print"
-    return 0
-  fi
-  if ! out="$(cd "$ROOT/server" && node node_modules/typescript/bin/tsc --noEmit -p . 2>&1)"; then
-    log "not restarting: the server does not typecheck; it restarts once these are fixed"
-    head -30 <<<"$out"
-    WATCH_SKIPPED="$print"
-    return 0
-  fi
-  log "restarting the server onto $(wc -l <<<"$stale" | tr -d ' ') changed file(s): $(head -5 <<<"$stale" | paste -sd, -)"
-  if (restart server); then WATCH_SKIPPED=""; else WATCH_SKIPPED="$print"; fi
+  WATCH_SKIPPED="$print"
+  log "the server runs older code: $(wc -l <<<"$stale" | tr -d ' ') changed file(s) ($(head -5 <<<"$stale" | paste -sd, -)); run pnpm service promote to load them"
 }
 
+# Restarts the server onto the checkout once it typechecks and its tests pass.
+promote() {
+  local busy expected_head expected_worktree changed test_log test_code
+  if busy="$(checkout_busy)"; then die "not promoting: $busy"; fi
+  expected_head="$(git -C "$ROOT" rev-parse HEAD)"
+  expected_worktree="$(worktree_fingerprint)"
+  echo "Typechecking…"
+  if ! (cd "$ROOT" && pnpm -r typecheck); then
+    if changed="$(preflight_changed "$expected_head" "$expected_worktree")"; then die "not promoting: $changed"; fi
+    die "not promoting: the checkout does not typecheck"
+  fi
+  if changed="$(preflight_changed "$expected_head" "$expected_worktree")"; then die "not promoting: $changed"; fi
+  echo "Testing scripts and server…"
+  test_log="$(mktemp "${TMPDIR:-/tmp}/software-factory-promote.XXXXXX")"
+  if (cd "$ROOT" && pnpm test:scripts && cd server && pnpm test) >"$test_log" 2>&1; then test_code=0; else test_code=$?; fi
+  if changed="$(preflight_changed "$expected_head" "$expected_worktree")"; then
+    rm -f "$test_log"
+    die "not promoting: $changed"
+  fi
+  if [[ "$test_code" -ne 0 ]]; then
+    echo "The preflight tests failed (exit $test_code); last 80 lines:" >&2
+    tail -n 80 "$test_log" >&2
+    rm -f "$test_log"
+    die "not promoting: preflight tests fail (pnpm test:scripts; cd server && pnpm test)"
+  fi
+  rm -f "$test_log"
+  restart_lock
+  if changed="$(preflight_changed "$expected_head" "$expected_worktree")"; then die "not promoting: $changed"; fi
+  printf '%s %s\n' "$expected_head" "$expected_worktree" >"$SERVER_PROMOTION.tmp"
+  mv -f "$SERVER_PROMOTION.tmp" "$SERVER_PROMOTION"
+  restart_lock_held=1
+  restart server
+}
+
+
 watch() {
-  log "watching $ROOT: the server restarts onto new code $WATCH_QUIET s after the last change"
+  log "watching $ROOT: says when the server runs older code; pnpm service promote loads it"
   while sleep "$WATCH_EVERY"; do
     for f in "$LOG_DIR"/{server,web,watch}.log; do rotate "$f"; done
     watch_once || true
@@ -338,7 +411,7 @@ status() {
     else
       local since state
       since="$(ps -o lstart= -p "$pid" | sed 's/  */ /g; s/^ //; s/ *$//')"
-      if [[ "$job" == watch ]]; then state="restarts the server onto new code"
+      if [[ "$job" == watch ]]; then state="reports when the server runs older code"
       elif [[ "$holder" == "$pid" ]]; then state="on :$(port "$job")"
       else state="starting, :$(port "$job") not open yet"; fi
       echo "$(printf '%-9s' "$job") pid $pid, $state, since $since"
@@ -350,11 +423,7 @@ status() {
       echo
       echo "The server is running older code: $(wc -l <<<"$stale" | tr -d ' ') file(s) changed since it started:"
       head -8 <<<"$stale" | sed 's/^/  /'
-      if [[ -n "$(job_pid watch)" ]]; then
-        echo "The watch restarts it once they have been quiet for $WATCH_QUIET s and typecheck; if it does not, see pnpm service logs watch."
-      else
-        echo "Run pnpm service restart to load them (agents keep running)."
-      fi
+      echo "Run pnpm service promote to load them once they typecheck and the tests pass (agents keep running)."
     else
       echo "The server runs the current server code (UI and agents/*.md load live)."
     fi
@@ -374,7 +443,8 @@ case "${1:-status}" in
   stop) stop ;;
   start) start ;;
   restart) restart "${2:-}" ;;
+  promote) promote ;;
   status) status ;;
   logs) logs "${2:-}" ;;
-  *) die "usage: pnpm service install|restart [server|web|watch|all]|status|logs [server|web|watch]|stop|start|uninstall" ;;
+  *) die "usage: pnpm service install|promote|restart [server|web|watch|all]|status|logs [server|web|watch]|stop|start|uninstall" ;;
 esac

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DEFAULT_INITIATIVE_SETTINGS, MAX_MANUAL_AGENTS, MODELS, RULE_ROLES, RULE_SCOPES, type InitiativeDetail, type RunEvent } from '@factory/shared';
+import { CHECK_CLASSES, DEFAULT_INITIATIVE_SETTINGS, MAX_MANUAL_AGENTS, MODELS, RULE_ROLES, RULE_SCOPES, type InitiativeDetail, type RunEvent } from '@factory/shared';
 import { claudeVersion, resolveClaudeBin } from './agents/claude.ts';
 import { config } from './config.ts';
 import { sql } from './db.ts';
@@ -13,6 +13,7 @@ import * as gitx from './git.ts';
 import { ghUser } from './github.ts';
 import { liveHub } from './live-hub.ts';
 import * as engine from './pipeline/engine.ts';
+import { validCheckRules } from './pipeline/check-policy.ts';
 import { slugify } from './pipeline/plan.ts';
 import { renderReport } from './pipeline/report.ts';
 import * as repo from './repo.ts';
@@ -20,6 +21,7 @@ import * as usage from './usage.ts';
 
 const id = z.object({ id: z.string().uuid() });
 const model = z.enum(MODELS);
+const effort = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
 const live = liveHub(bus, (runId, after) => repo.listRunEvents(runId, after));
 const usageRange = z
   .object({ from: z.coerce.date(), to: z.coerce.date() })
@@ -42,6 +44,10 @@ const settingsPatch = z
     autoArbiter: z.boolean(),
     autoMerge: z.boolean(),
     autoRetro: z.boolean(),
+    foundationCheckpoint: z.boolean(),
+    lineInPlanOrder: z.boolean(),
+    landStackAtOnce: z.boolean(),
+    resumeFixSessions: z.boolean(),
     maxRounds: z.number().int().min(1).max(10),
     maxPlanRounds: z.number().int().min(1).max(5),
     maxArbiterDecisions: z.number().int().min(1).max(10),
@@ -50,8 +56,18 @@ const settingsPatch = z
     models: z
       .object({ plan: model, plan_review: model, execute: model, review: model, fix: model, mechanicalFix: model, verify: model, arbitrate: model, ask: model, steer: model, retro: model })
       .partial(),
+    efforts: z
+      .object({ plan: effort, plan_review: effort, execute: effort, review: effort, fix: effort, verify: effort, arbitrate: effort, ask: effort, steer: effort, retro: effort })
+      .partial(),
   })
   .partial();
+
+const checkRule = z.object({
+  pattern: z.string().trim().min(1).max(300),
+  class: z.enum(CHECK_CLASSES),
+  logPattern: z.string().trim().min(1).max(300).optional(),
+  note: z.string().trim().max(200).optional(),
+});
 
 function expandPath(p: string): string {
   const trimmed = p.trim();
@@ -111,7 +127,10 @@ export async function routes(app: FastifyInstance): Promise<void> {
         gateTimeoutMinutes: z.number().int().min(1).max(180),
         sweepOpenPrs: z.boolean(),
         resumeInterruptedRuns: z.boolean(),
-        prNoiseCommentAuthors: z.array(z.string().trim().min(1).max(100)).max(200),      })
+        prNoiseCommentAuthors: z.array(z.string().trim().min(1).max(100)).max(200),
+        keepAwake: z.boolean(),
+        minBatteryPercent: z.number().int().min(0).max(100),
+      })
       .partial()
       .parse(req.body);
     const next = await repo.updateAppSettings(body);
@@ -204,6 +223,16 @@ export async function routes(app: FastifyInstance): Promise<void> {
     defaultBranch: z.string().trim().min(1).optional(),
     checksCommand: z.string().trim().max(2000).nullable().optional(),
     setupCommand: z.string().trim().max(2000).nullable().optional(),
+    fixCommand: z.string().trim().max(2000).nullable().optional(),
+    mergeCheckCommand: z.string().trim().max(2000).nullable().optional(),
+    quickChecksCommand: z.string().trim().max(2000).nullable().optional(),
+    checkPolicy: z
+      .array(checkRule)
+      .max(100)
+      .refine((rules) => validCheckRules(rules).length === 0, (rules) => ({ message: validCheckRules(rules).join('; ') }))
+      .optional(),
+    generatedPaths: z.array(z.string().trim().min(1).max(300)).max(50).optional(),
+    skipAgentCommitHooks: z.boolean().optional(),
     notes: z.string().max(20_000).nullable().optional(),
     copyFiles: z
       .array(z.string().trim().min(1).refine(gitx.isSafeRelativePath, 'must be a path inside the repository'))
@@ -225,6 +254,12 @@ export async function routes(app: FastifyInstance): Promise<void> {
       defaultBranch: body.defaultBranch || (await gitx.detectDefaultBranch(dir)),
       checksCommand: body.checksCommand || null,
       setupCommand: body.setupCommand || null,
+      fixCommand: body.fixCommand || null,
+      mergeCheckCommand: body.mergeCheckCommand || null,
+      quickChecksCommand: body.quickChecksCommand || null,
+      checkPolicy: body.checkPolicy ?? [],
+      generatedPaths: body.generatedPaths ?? [],
+      skipAgentCommitHooks: body.skipAgentCommitHooks ?? false,
       notes: body.notes || null,
       remoteUrl: await gitx.remoteUrl(dir),
       copyFiles: body.copyFiles ?? [],
@@ -344,9 +379,19 @@ export async function routes(app: FastifyInstance): Promise<void> {
     const init = await repo.getInitiative(iid);
     if (!init) throw new engine.PipelineError('initiative not found', 404);
     if (body.status === 'draft' && init.status !== 'archived') throw new engine.PipelineError('only archived initiatives can be restored');
+    if (body.settings?.lineInPlanOrder !== undefined && body.settings.lineInPlanOrder !== init.settings.lineInPlanOrder) {
+      if ((await repo.listTickets(iid)).length) {
+        throw new engine.PipelineError('One GitHub stack in plan order can change only before the plan creates tickets; reset or replan first');
+      }
+    }
     const status = body.status === 'draft' ? (init.planJson ? (init.approvedAt ? 'in_progress' : 'awaiting_approval') : 'draft') : body.status;
     const settings = body.settings
-      ? { ...init.settings, ...body.settings, models: { ...init.settings.models, ...body.settings.models } }
+      ? {
+          ...init.settings,
+          ...body.settings,
+          models: { ...init.settings.models, ...body.settings.models },
+          efforts: { ...init.settings.efforts, ...body.settings.efforts },
+        }
       : undefined;
     const next = await repo.updateInitiative(iid, { title: body.title, brief: body.brief, status, settings });
     if (body.settings) engine.kick();
@@ -461,7 +506,7 @@ export async function routes(app: FastifyInstance): Promise<void> {
       case 'run':
         return engine.enqueue({ kind: 'execute', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
       case 'check':
-        return engine.enqueue({ kind: 'gate', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
+        return engine.checkTicket(t.id);
       case 'review':
         return engine.enqueue({ kind: 'review', initiativeId: t.initiativeId, ticketId: t.id, trigger: 'manual' });
       case 'fix':

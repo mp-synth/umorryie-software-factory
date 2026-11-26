@@ -29,9 +29,23 @@
   `$FACTORY_BRANCH`, so the gate can check only what the branch touched, for
   example `uv run prek run --from-ref "$FACTORY_BASE" --to-ref HEAD` in
   EnactServices.
-- **A project's tests run in its CI, not in the factory.** No agent runs test
-  files or suites in the repos it works on while building, reviewing or
-  verifying, and discovered gates hold no tests. When tests fail in the PR's
-  CI, the fixer runs exactly those, to reproduce the failure and to confirm
-  its fix. The factory's own tests are separate: `pnpm test` must pass.
+- **The gate runs the tests of the changed files; agents run none.** The
+  checks command may run a tight selection (EnactServices'
+  `scripts/checks/enactservices.sh` runs the tests of the changed files and
+  their direct importers, a median of about 240 of 44,000), so CI is
+  predicted before anything is pushed; CI keeps the wide selection. Agents
+  never run tests or the checks command, only the project's quick checks;
+  when tests fail, the fixer runs exactly those to reproduce and confirm. The
+  factory's own tests are separate: `pnpm test` must pass.
+- **Test databases per gate.** Gates get `$FACTORY_SLOT` (1 to 15), unique
+  among the gates running at once, so a checks script can give each its own
+  Redis database and its worktree its own Mongo database instead of queueing
+  every test run on one machine-wide lock.
+- **Exit codes the gate understands.** 0 passes, 1 fails and goes to a fixer,
+  75 means trouble outside the code (a service down, a lock wait ran out, the
+  package index refused auth): the gate runs again in a few minutes and no
+  fixer starts. 126 or 127 means the command cannot run, and the ticket waits
+  for you. 3 records a distinct waiting result and says what work outside the repo must finish (a line
+  starting with `WAITING-ON-`, such as TTVPlatform types ahead of the
+  published backend spec): the PR opens and waits, and no fixer starts.
 

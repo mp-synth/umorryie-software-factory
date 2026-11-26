@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+
 const emit = (msg) => console.log(JSON.stringify(msg));
 
 const init = () => emit({ type: 'system', subtype: 'init', session_id: 'sess-1', model: 'fake-model', cwd: process.cwd(), tools: ['Read', 'Bash'] });
@@ -78,6 +81,14 @@ switch (process.env.FAKE_SCENARIO) {
     result();
     setInterval(() => {}, 1000);
     break;
+  case 'background-child': {
+    const background = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    background.unref();
+    fs.writeFileSync(process.env.FAKE_CHILD_PID_FILE, String(background.pid));
+    init();
+    result();
+    break;
+  }
   default:
     process.exit(2);
 }

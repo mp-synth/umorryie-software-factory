@@ -58,8 +58,12 @@ or you write `FIX: BLOCKED`.
 - Generated files (API specs, generated clients and types): regenerate them
   with the repo's own generator, never hand-edit them.
 - Run exactly the failing tests or command from the log, before your fix to
-  reproduce it and after to confirm, then the checks command from your
-  prompt; it must pass. Run no other tests: the rest run in CI on the PR.
+  reproduce it and after to confirm, then the quick checks your prompt names,
+  when it names any. Run no other tests and not the full checks command: the
+  factory runs it after you finish.
+- `changed-below.md`, when present, says what changed in the PR below; a
+  name it removed or renamed that this branch still uses is the usual cause
+  of an `ImportError` here: follow the rename, don't restore the old name.
 - One commit per kind of fix (the merge, lint, a failing test), short
   imperative messages, explicit paths staged. Finish with a clean tree.
 
@@ -82,7 +86,7 @@ Each commit (short sha and subject): what the log reported and why this change
 fixes it.
 
 ## Validation
-Commands you ran and their results, including the checks command.
+Commands you ran and their results, including the quick checks.
 
 ## Reruns
 Run ids of CI failures unrelated to this branch, one per line. Omit the

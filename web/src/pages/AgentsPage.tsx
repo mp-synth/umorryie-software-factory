@@ -55,6 +55,7 @@ export function AgentsPage() {
               </span>
               {capacity.queued > 0 && <span className="text-xs text-ink-warn">{capacity.queued} waiting for a slot</span>}
             </div>
+            {capacity.paused && <p className="mt-1 text-xs text-ink-warn">New agents wait: {capacity.paused}</p>}
             <ProgressBar className="mt-2" label="Agent slots in use" value={capacity.limit ? capacity.running / capacity.limit : 0} tone={capacity.queued ? 'warn' : 'active'} />
           </div>
           <dl className="flex flex-wrap gap-x-6 gap-y-1 text-xs">
@@ -71,7 +72,7 @@ export function AgentsPage() {
               <dd className="numeric text-ink">{capacity.loadPerCore} per core</dd>
             </div>
           </dl>
-          {poolNote(capacity) && <p className="basis-full text-xs text-ink-warn">The pool is {poolNote(capacity)}.</p>}
+          {!capacity.paused && poolNote(capacity) && <p className="basis-full text-xs text-ink-warn">The pool is {poolNote(capacity)}.</p>}
         </Card>
       )}
 

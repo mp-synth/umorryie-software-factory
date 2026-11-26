@@ -2,11 +2,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, FolderOpen, Github, RefreshCw, Sparkles, XCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import type { EnvironmentSuggestion, Project } from '@factory/shared';
+import { formatCheckPolicy, parseCheckPolicy, type EnvironmentSuggestion, type Project } from '@factory/shared';
 import { api } from '@/lib/api';
 import { toastError } from '@/lib/toasts';
 import { FolderBrowser } from './FolderBrowser';
-import { Button, Callout, Combobox, Dialog, Field, Input, Spinner, TagInput, Textarea } from './ui';
+import { Button, Callout, Combobox, Dialog, Field, Input, Spinner, SwitchRow, TagInput, Textarea } from './ui';
 
 function useDebounced<T>(value: T, ms: number): T {
   const [v, setV] = useState(value);
@@ -97,6 +97,12 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
   const [defaultBranch, setDefaultBranch] = useState('');
   const [checksCommand, setChecks] = useState('');
   const [setupCommand, setSetup] = useState('');
+  const [fixCommand, setFixCommand] = useState('');
+  const [mergeCheckCommand, setMergeCheck] = useState('');
+  const [quickChecksCommand, setQuickChecks] = useState('');
+  const [checkPolicy, setCheckPolicy] = useState('');
+  const [generatedPaths, setGeneratedPaths] = useState<string[]>([]);
+  const [skipAgentCommitHooks, setSkipHooks] = useState(false);
   const [copyFiles, setCopyFiles] = useState<string[]>([]);
   const [referenceDirs, setReferenceDirs] = useState<string[]>([]);
   const [notes, setNotes] = useState('');
@@ -111,6 +117,12 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
     setDefaultBranch(project?.defaultBranch ?? '');
     setChecks(project?.checksCommand ?? '');
     setSetup(project?.setupCommand ?? '');
+    setFixCommand(project?.fixCommand ?? '');
+    setMergeCheck(project?.mergeCheckCommand ?? '');
+    setQuickChecks(project?.quickChecksCommand ?? '');
+    setCheckPolicy(formatCheckPolicy(project?.checkPolicy ?? []));
+    setGeneratedPaths(project?.generatedPaths ?? []);
+    setSkipHooks(project?.skipAgentCommitHooks ?? false);
     setCopyFiles(project?.copyFiles ?? []);
     setReferenceDirs(project?.referenceDirs ?? []);
     setNotes(project?.notes ?? '');
@@ -150,7 +162,21 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
 
   const save = useMutation({
     mutationFn: () => {
-      const body = { name, defaultBranch, checksCommand: checksCommand || null, setupCommand: setupCommand || null, copyFiles, referenceDirs, notes: notes || null };
+      const body = {
+        name,
+        defaultBranch,
+        checksCommand: checksCommand || null,
+        setupCommand: setupCommand || null,
+        fixCommand: fixCommand || null,
+        mergeCheckCommand: mergeCheckCommand || null,
+        quickChecksCommand: quickChecksCommand || null,
+        checkPolicy: policy.rules,
+        generatedPaths,
+        skipAgentCommitHooks,
+        copyFiles,
+        referenceDirs,
+        notes: notes || null,
+      };
       return editing ? api.updateProject(project!.id, body) : api.createProject({ ...body, repoPath });
     },
     onSuccess: () => {
@@ -161,11 +187,12 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
     onError: toastError,
   });
 
+  const policy = parseCheckPolicy(checkPolicy);
   const branches = editing ? (projectBranches?.branches ?? [project!.defaultBranch]) : (info?.branches ?? []);
   const discovering = (!editing && discovery.isFetching) || rediscover.isPending;
   const discoveryError = (rediscover.error ?? (editing ? null : discovery.error)) as Error | null;
   const repoSelected = editing || !!info?.ok;
-  const missing = !editing && !info?.ok ? 'Pick a git repository' : !name ? 'Give the project a name' : !defaultBranch ? 'Pick the default base branch' : null;
+  const missing = !editing && !info?.ok ? 'Pick a git repository' : !name ? 'Give the project a name' : !defaultBranch ? 'Pick the default base branch' : policy.errors[0] ?? null;
 
   return (
     <Dialog
@@ -261,7 +288,7 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
               <Field
                 label="Checks command"
                 optional
-                hint="The gate: formatting, lint and type checks, no tests (CI runs those on the PR, and the fixer re-runs only the ones that fail there). Runs in each worktree after every build and fix; a failure goes straight to a fixer. $FACTORY_BASE is the ref the branch is diffed against, so a large repo can check only what changed."
+                hint="The gate: what CI must not fail on (lint, generated files, the tests of the changed files), run by the factory after every build and fix and before anything is pushed. $FACTORY_BASE is the ref the branch is diffed against, $FACTORY_SLOT (1 to 15) is unique among the gates running at once, for a test database. Exit 75 means trouble outside the code: the gate runs again later, no fixer starts. Exit 3 records WAITING-ON- lines: no fixer starts and the result is not a green readiness proof. An absolute script path uses that live file immediately when it changes."
               >
                 <Textarea
                   value={checksCommand}
@@ -271,6 +298,21 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
                   className="min-h-0 font-mono text-sm"
                 />
               </Field>
+              <Field label="Fix command" optional hint="Autofixers the factory runs on a branch before its checks (formatters, lint autofix, regenerated specs). It never commits; the factory commits what changed. Also regenerates generated files when only they conflict in a merge. An absolute script path uses that live file immediately when it changes.">
+                <Textarea value={fixCommand} onChange={(e) => setFixCommand(e.target.value)} placeholder="pnpm exec prettier --write . && pnpm lint --fix" rows={commandRows(fixCommand)} className="min-h-0 font-mono text-sm" />
+              </Field>
+              <Field label="Merge check command" optional hint="A fast check (imports, generated files) after the factory merges the PR below into a branch, before it pushes that merge. Without it the full checks command runs.">
+                <Textarea value={mergeCheckCommand} onChange={(e) => setMergeCheck(e.target.value)} placeholder="pnpm typecheck" rows={commandRows(mergeCheckCommand)} className="min-h-0 font-mono text-sm" />
+              </Field>
+              <Field label="Quick checks for agents" optional hint="What agents may run themselves on the files they changed (lint, types). They never run the checks command; the gate does.">
+                <Textarea value={quickChecksCommand} onChange={(e) => setQuickChecks(e.target.value)} placeholder="pnpm exec eslint $(git diff --name-only $FACTORY_BASE...HEAD)" rows={commandRows(quickChecksCommand)} className="min-h-0 font-mono text-sm" />
+              </Field>
+              <SwitchRow
+                label="Agents skip the commit hooks"
+                description="Opt in only when the gate reproduces every hook, including secret scanning. A later fix commit cannot remove a secret from earlier commit history."
+                checked={skipAgentCommitHooks}
+                onChange={setSkipHooks}
+              />
               <Field label="Setup command" optional hint="Runs once in each fresh worktree before the executor starts, such as installing dependencies. If it fails, the ticket waits for you.">
                 <Textarea
                   value={setupCommand}
@@ -279,6 +321,27 @@ export function ProjectDialog({ open, onOpenChange, project }: { open: boolean; 
                   rows={commandRows(setupCommand)}
                   className="min-h-0 font-mono text-sm"
                 />
+              </Field>
+            </fieldset>
+
+            <fieldset className="space-y-3">
+              <legend className="eyebrow mb-2">Pull requests</legend>
+              <Field
+                label="Check policy"
+                optional
+                error={policy.errors.join('; ') || undefined}
+                hint="How the PR sweep treats a failing check, one rule per line: must-fix, fix, people-only, ignore or waiting-on, then a pattern for the check name, optionally 'when' and a pattern for its log, and '::' and a note. Checks no rule names follow the factory's defaults (Meticulous and code-owner reviews wait on people; lint, tests and specs are always fixed)."
+              >
+                <Textarea
+                  value={checkPolicy}
+                  onChange={(e) => setCheckPolicy(e.target.value)}
+                  placeholder={'people-only ^Meticulous :: a visual diff\nwaiting-on ^Lint$ when Generated types are out of sync :: types ahead of the backend spec'}
+                  rows={Math.max(3, checkPolicy.split('\n').length)}
+                  className="min-h-0 font-mono text-sm"
+                />
+              </Field>
+              <Field group optional label="Generated files" hint="Globs of generated files (idl/**, *.gen.ts): a merge conflict only in these is resolved by the fix command instead of an agent.">
+                <TagInput values={generatedPaths} onChange={setGeneratedPaths} placeholder="idl/**" />
               </Field>
             </fieldset>
 

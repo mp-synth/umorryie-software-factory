@@ -14,6 +14,8 @@ const ticketSchema = z.object({
   acceptance: bullets(1, 8),
   depends_on: z.array(z.string()).max(8).default([]),
   size: z.enum(['XS', 'S', 'M']),
+  touches: z.array(z.string().trim().min(1).max(200)).max(40).default([]),
+  foundation: z.boolean().default(false),
 });
 
 export const planSchema = z.object({
@@ -37,10 +39,18 @@ export interface OrderedTicket {
 }
 
 /**
- * `plan` keeps each ticket's `depends_on` as the planner wrote it (what the ticket needs);
- * `stacked` has the same tickets with `depends_on` set to the one ticket each stacks on.
+ * `plan` keeps each ticket's `depends_on` as the planner wrote it; `needs` adds, for tickets whose write
+ * sets overlap, the earlier one to what the later one waits for; `stacked` has the same tickets with
+ * `depends_on` set to the one ticket each stacks on. Tickets that would
+ * build side by side but touch the same files are chained, so their PRs never conflict with each other. With
+ * `line`, every ticket stacks on the one before it in plan order: one GitHub stack, built as wide as the needs
+ * allow.
  */
-export function validatePlan(raw: unknown, maxTickets: number): { plan?: PlanJson; stacked?: PlanTicket[]; order?: OrderedTicket[]; errors: string[] } {
+export function validatePlan(
+  raw: unknown,
+  maxTickets: number,
+  opts: { line?: boolean } = {},
+): { plan?: PlanJson; stacked?: PlanTicket[]; needs?: Map<string, string[]>; order?: OrderedTicket[]; errors: string[] } {
   const parsed = planSchema.safeParse(raw);
   if (!parsed.success) {
     return {
@@ -64,11 +74,56 @@ export function validatePlan(raw: unknown, maxTickets: number): { plan?: PlanJso
   }
   if (errors.length) return { errors };
 
-  const stackedDeps = stackDependencies(plan.tickets.map((t) => ({ key: t.key, dependsOn: t.depends_on })));
-  if (!stackedDeps) return { errors: ['tickets: depends_on contains a cycle'] };
-  const stacked = plan.tickets.map((t, i) => ({ ...t, depends_on: stackedDeps[i].dependsOn }));
-  return { plan, stacked, order: topoOrder(stackedDeps)!, errors: [] };
+  const apart = stackApartOverlaps(plan.tickets.map((t) => ({ key: t.key, dependsOn: t.depends_on, touches: t.touches ?? [] })));
+  if (!apart) return { errors: ['tickets: depends_on contains a cycle'] };
+  const { stacked: stackedDeps, needs } = apart;
+  const order = topoOrder(stackedDeps)!;
+  const lineParent = new Map(order.map((o, i) => [o.key, i ? [order[i - 1].key] : []]));
+  const stacked = plan.tickets.map((t, i) => ({ ...t, depends_on: opts.line ? lineParent.get(t.key)! : stackedDeps[i].dependsOn }));
+  return { plan, stacked, needs: new Map(needs.map((n) => [n.key, n.dependsOn])), order, errors: [] };
 }
+
+const GENERATED = 'generated:';
+
+function normalizedTouch(p: string): string | null {
+  const t = p.trim().replace(/^\.\//, '');
+  return !t || t.startsWith(GENERATED) ? null : t;
+}
+
+/** Two write sets overlap when they name the same file, or one names a folder the other's file is in. */
+export function touchesOverlap(a: string[], b: string[]): string[] {
+  const left = a.map(normalizedTouch).filter((p): p is string => !!p);
+  const right = b.map(normalizedTouch).filter((p): p is string => !!p);
+  const covers = (dir: string, p: string) => dir.endsWith('/') && p.startsWith(dir);
+  return left.filter((x) => right.some((y) => x === y || covers(x, y) || covers(y, x)));
+}
+
+type Touching = Dependent & { touches: string[] };
+
+function stackApartOverlaps<T extends Touching>(items: T[]): { stacked: T[]; needs: T[] } | null {
+  let current = items;
+  for (;;) {
+    const stacked = stackDependencies(current);
+    if (!stacked) return null;
+    const parentOf = (key: string) => stacked.find((s) => s.key === key)!.dependsOn[0] ?? null;
+    const isBelow = (low: string, high: string): boolean => {
+      for (let p = parentOf(high); p; p = parentOf(p)) if (p === low) return true;
+      return false;
+    };
+    const order = topoOrder(stacked)!.map((o) => o.key);
+    const clash = order
+      .flatMap((later, i) => order.slice(0, i).map((earlier) => ({ earlier, later })))
+      .find(({ earlier, later }) => !isBelow(earlier, later) && touchesOverlap(touchesOf(items, earlier), touchesOf(items, later)).length > 0);
+    if (!clash) return { stacked, needs: current };
+    current = current.map((t) => {
+      if (t.key !== clash.later) return t;
+      if (t.dependsOn.includes(clash.earlier)) throw new Error(`overlap stacking made no progress for ${clash.earlier} and ${clash.later}`);
+      return { ...t, dependsOn: [...t.dependsOn, clash.earlier] };
+    });
+  }
+}
+
+const touchesOf = (items: Touching[], key: string) => items.find((t) => t.key === key)!.touches;
 
 type Dependent = { key: string; dependsOn: string[] };
 
@@ -130,8 +185,30 @@ export function stackShape(needs: Dependent[], stacked: Dependent[]): StackShape
   return { longest, widest: Math.max(0, ...waves.values()), forced };
 }
 
-export function renderStacking(needs: Dependent[], stacked: Dependent[], concurrency: number): string {
+/** Tickets that stack on the same ticket beside an earlier one: a GitHub stack is one line, so their PRs sit outside it. */
+export function outsideGithubStack(stacked: Dependent[]): string[] {
+  const seen = new Set<string>();
+  return stacked.filter((t) => {
+    const parent = t.dependsOn[0];
+    if (!parent) return false;
+    if (seen.has(parent)) return true;
+    seen.add(parent);
+    return false;
+  }).map((t) => t.key);
+}
+
+/** Files in the write sets of three or more tickets: each one lines those tickets up, one after another. */
+export function sharedHotspots(tickets: { key: string; touches?: string[] }[]): { path: string; keys: string[] }[] {
+  const byPath = new Map<string, string[]>();
+  for (const t of tickets) for (const p of new Set((t.touches ?? []).map(normalizedTouch).filter((x): x is string => !!x))) byPath.set(p, [...(byPath.get(p) ?? []), t.key]);
+  return [...byPath].filter(([, keys]) => keys.length >= 3).map(([path, keys]) => ({ path, keys })).sort((a, b) => b.keys.length - a.keys.length);
+}
+
+export function renderStacking(needs: (Dependent & { touches?: string[] })[], stacked: Dependent[], concurrency: number, opts: { line?: boolean } = {}): string {
   const shape = stackShape(needs, stacked);
+  const outside = opts.line ? [] : outsideGithubStack(stacked);
+  const unstated = needs.filter((t) => !t.touches?.length).map((t) => t.key);
+  const hotspots = sharedHotspots(needs);
   return [
     '# How the factory will build these tickets',
     '',
@@ -144,10 +221,18 @@ export function renderStacking(needs: Dependent[], stacked: Dependent[], concurr
     ...(shape.forced.length
       ? [
           '',
-          'Stacked on a ticket they do not need, because a later ticket needs both and a branch has one base:',
+          'Stacked on a ticket they do not need, because a later ticket needs both, a branch has one base, or the two touch the same files:',
           ...shape.forced.map((f) => `- ${f.key} on ${f.on}`),
         ]
       : []),
+    ...(opts.line ? ['', 'Every PR joins one GitHub stack in plan order; tickets still build side by side when what they need is ready.'] : []),
+    ...(outside.length
+      ? ['', `A GitHub stack is a single line, so these PRs will sit outside it (and skip CI that runs only for the stack): ${outside.join(', ')}.`]
+      : []),
+    ...(hotspots.length
+      ? [, 'Shared hotspots, files three or more tickets change, so those tickets build one after another; a foundation ticket that makes the shared change first lets the rest build side by side:', ...hotspots.map((h) => `- ${h.path}: ${h.keys.join(', ')}`)]
+      : []),
+    ...(unstated.length ? ['', `No \`touches\` (write set) given for: ${unstated.join(', ')}. Without it the factory cannot keep side-by-side tickets out of each other's files.`] : []),
   ].join('\n');
 }
 

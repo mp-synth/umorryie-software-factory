@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fairLimiter } from './limiter.ts';
+import { fairLimiter, slotPool } from './limiter.ts';
 
 function job() {
   let finish!: () => void;
@@ -71,4 +71,78 @@ test('frees the slot when the work throws', async () => {
   const limiter = fairLimiter(() => 1);
   await assert.rejects(limiter.run('A', async () => Promise.reject(new Error('setup failed'))), /setup failed/);
   assert.equal(await limiter.run('A', async () => 'next'), 'next');
+});
+
+test('heavy work takes several slots, and work heavier than the whole capacity still runs alone', async () => {
+  const limiter = fairLimiter(() => 4);
+  const heavy = job();
+  const started: string[] = [];
+  const runs = [
+    limiter.run('A', () => (started.push('checks'), heavy.done), undefined, 3),
+    limiter.run('B', async () => void started.push('another checks'), undefined, 3),
+    limiter.run('C', async () => void started.push('checkout'), undefined, 1),
+  ];
+  await settle();
+  assert.deepEqual(started, ['checks', 'checkout']);
+  heavy.finish();
+  await settle();
+  assert.deepEqual(started, ['checks', 'checkout', 'another checks']);
+  await Promise.all(runs);
+  assert.equal(await limiter.run('A', async () => 'huge', undefined, 10), 'huge');
+});
+
+test('slots are numbered, never shared, and handed on when freed', async () => {
+  const pool = slotPool(2);
+  const held = [job(), job()];
+  const slots: number[] = [];
+  const runs = [pool.with((s) => (slots.push(s), held[0].done)), pool.with((s) => (slots.push(s), held[1].done)), pool.with(async (s) => void slots.push(s))];
+  await settle();
+  assert.deepEqual(slots, [1, 2]);
+  held[1].finish();
+  await settle();
+  assert.deepEqual(slots, [1, 2, 2]);
+  held[0].finish();
+  await Promise.all(runs);
+});
+
+test('a slot held for work adopted after a restart is not handed out until that work ends', async () => {
+  const pool = slotPool(2);
+  let release!: () => void;
+  const adopted = pool.holding(1, () => new Promise<void>((r) => (release = r)));
+  const got = await pool.with(async (slot) => slot);
+  assert.equal(got, 2);
+  release();
+  await adopted;
+  assert.equal(await pool.with(async (slot) => slot), 1);
+});
+
+test('recovered slots can be reserved synchronously before scheduling starts', async () => {
+  const pool = slotPool(2);
+  const recovered = pool.reserve(1);
+  assert.equal(recovered.slot, 1);
+  assert.equal(await pool.with(async (slot) => slot), 2);
+  recovered.release();
+  assert.equal(await pool.with(async (slot) => slot), 1);
+});
+
+test('holding validates the slot and never grants double ownership', async () => {
+  assert.throws(() => slotPool(0), /positive integer/);
+  const pool = slotPool(2);
+  await assert.rejects(pool.holding(0, async () => {}), /integer from 1 to 2/);
+  await assert.rejects(pool.holding(3, async () => {}), /integer from 1 to 2/);
+
+  const first = pool.reserve(1);
+  let ran = false;
+  await assert.rejects(
+    pool.holding(1, async () => {
+      ran = true;
+    }),
+    /already owned/,
+  );
+  assert.equal(ran, false);
+  first.release();
+  await pool.holding(1, async () => {
+    ran = true;
+  });
+  assert.equal(ran, true);
 });

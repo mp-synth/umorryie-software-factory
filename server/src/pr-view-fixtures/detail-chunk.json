@@ -1,0 +1,436 @@
+{
+ "data": {
+  "rateLimit": {
+   "cost": 4,
+   "remaining": 4872,
+   "limit": 5000,
+   "resetAt": "2026-11-26T20:05:36Z"
+  },
+  "repository": {
+   "pr0": {
+    "number": 21093,
+    "url": "https://github.com/acme/widgets/pull/21093",
+    "state": "OPEN",
+    "isDraft": false,
+    "mergeable": "MERGEABLE",
+    "baseRefName": "factory/feature-1234abcd/06-sf-create-organization",
+    "headRefOid": "d0d129d17f6c654dbedd9b4e4af4b75e85ce098c",
+    "commits": {
+     "nodes": [
+      {
+       "commit": {
+        "statusCheckRollup": {
+         "contexts": {
+          "pageInfo": {
+           "hasNextPage": true,
+           "endCursor": "MTAw"
+          },
+          "nodes": [
+           {
+            "__typename": "CheckRun",
+            "name": "Enable auto-merge / enable",
+            "conclusion": "SKIPPED",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:45:14Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870354752/job/140083908736",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Auto-merge new PRs"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "Enable auto-merge / enable",
+            "conclusion": "SKIPPED",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:45:37Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870408435/job/140084099495",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Auto-merge new PRs"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "Enable auto-merge / enable",
+            "conclusion": "SKIPPED",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:48:58Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870866728/job/140085675665",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Auto-merge new PRs"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "claude-code-action",
+            "conclusion": "SKIPPED",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:50:22Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45871073990/job/140086326981",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Claude Code"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "test-unit-shard (1)",
+            "conclusion": "FAILURE",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:46:01Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870000001/job/140080000001",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Unit tests (merge queue)"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "lint",
+            "conclusion": "SUCCESS",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:46:01Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870000001/job/140080000002",
+            "title": null,
+            "isRequired": true,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Unit tests (merge queue)"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "plan",
+            "conclusion": "CANCELLED",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:40:00Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870000010/job/140080000010",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Terragrunt"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "plan",
+            "conclusion": "SUCCESS",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:45:00Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870000011/job/140080000011",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Terragrunt"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "docker_build_ecs",
+            "conclusion": null,
+            "status": "IN_PROGRESS",
+            "startedAt": "2026-11-26T09:12:50Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870000020/job/140080000020",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Test build ECS"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "stop-timeout",
+            "conclusion": null,
+            "status": "QUEUED",
+            "startedAt": null,
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870000030/job/140080000030",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Worker stop timeout"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "Code review gate",
+            "conclusion": "FAILURE",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:45:30Z",
+            "detailsUrl": "https://github.com/acme/widgets/actions/runs/45870000040/job/140080000040",
+            "title": null,
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "Code review gate"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "Cursor Bugbot",
+            "conclusion": "NEUTRAL",
+            "status": "COMPLETED",
+            "startedAt": "2026-11-26T17:44:48Z",
+            "detailsUrl": "https://cursor.com/docs/bugbot",
+            "title": "Bugbot Review",
+            "isRequired": false,
+            "checkSuite": {
+             "workflowRun": null
+            }
+           }
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    "reviewThreads": {
+     "pageInfo": {
+      "hasNextPage": false,
+      "endCursor": "Mw"
+     },
+     "nodes": [
+      {
+       "id": "PRRT_kwDODL90Ac68ghjF",
+       "isResolved": false,
+       "isOutdated": false,
+       "path": "service/billing/controllers/workflows/activities/salesforce_renewal_activities.py",
+       "line": 41,
+       "comments": {
+        "nodes": [
+         {
+          "databaseId": 4711909470,
+          "author": {
+           "login": "cursor",
+           "__typename": "Bot"
+          },
+          "body": "### Retry skip hides incomplete provisioning\n\n**High Severity**\n\nThe retry returns early before the second step runs.",
+          "createdAt": "2026-11-26T17:50:17Z"
+         }
+        ]
+       }
+      },
+      {
+       "id": "PRRT_resolved",
+       "isResolved": true,
+       "isOutdated": false,
+       "path": "a.py",
+       "line": 3,
+       "comments": {
+        "nodes": [
+         {
+          "databaseId": 11,
+          "author": {
+           "login": "reviewer",
+           "__typename": "User"
+          },
+          "body": "fixed already",
+          "createdAt": "2026-11-25T10:00:00Z"
+         }
+        ]
+       }
+      },
+      {
+       "id": "PRRT_answered",
+       "isResolved": false,
+       "isOutdated": true,
+       "path": "b.py",
+       "line": null,
+       "comments": {
+        "nodes": [
+         {
+          "databaseId": 21,
+          "author": {
+           "login": "reviewer",
+           "__typename": "User"
+          },
+          "body": "Why a list here?",
+          "createdAt": "2026-11-25T10:00:00Z"
+         },
+         {
+          "databaseId": 22,
+          "author": {
+           "login": "owner",
+           "__typename": "User"
+          },
+          "body": "<!-- software-factory -->\n**Claude Bot Automation**\n\nA set keeps the order wrong.",
+          "createdAt": "2026-11-25T11:00:00Z"
+         }
+        ]
+       }
+      },
+      {
+       "id": "PRRT_ghost",
+       "isResolved": false,
+       "isOutdated": false,
+       "path": "c.py",
+       "line": 7,
+       "comments": {
+        "nodes": [
+         {
+          "databaseId": 31,
+          "author": null,
+          "body": "Rename this.",
+          "createdAt": "2026-11-25T12:00:00Z"
+         }
+        ]
+       }
+      }
+     ]
+    },
+    "comments": {
+     "pageInfo": {
+      "hasPreviousPage": false,
+      "startCursor": "Y3Vyc29yOnYyOjE="
+     },
+     "nodes": [
+      {
+       "author": {
+        "login": "github-actions",
+        "__typename": "Bot"
+       },
+       "body": "## Coverage report\n\n100% of the statement lines added by this PR are covered.",
+       "createdAt": "2026-11-25T03:11:24Z",
+       "url": "https://github.com/acme/widgets/pull/21093#issuecomment-7151677137",
+       "isMinimized": false
+      },
+      {
+       "author": {
+        "login": "owner",
+        "__typename": "User"
+       },
+       "body": "<!-- software-factory -->\n**Claude Bot Automation**\n\n**Review round 1: CHANGES**",
+       "createdAt": "2026-11-25T03:15:37Z",
+       "url": "https://github.com/acme/widgets/pull/21093#issuecomment-7151744674",
+       "isMinimized": false
+      },
+      {
+       "author": {
+        "login": "reviewer",
+        "__typename": "User"
+       },
+       "body": "This hides the outage, please log it.",
+       "createdAt": "2026-11-26T12:00:00Z",
+       "url": "https://github.com/acme/widgets/pull/21093#issuecomment-7190500001",
+       "isMinimized": true
+      },
+      {
+       "author": {
+        "login": "reviewer",
+        "__typename": "User"
+       },
+       "body": "Can the cron run hourly instead?",
+       "createdAt": "2026-11-26T12:05:00Z",
+       "url": "https://github.com/acme/widgets/pull/21093#issuecomment-7190500002",
+       "isMinimized": false
+      }
+     ]
+    },
+    "reviews": {
+     "pageInfo": {
+      "hasPreviousPage": false,
+      "startCursor": "Y3Vyc29yOnYyOpO0MjAyNi0xMS0yNlQxNjoyOTowMlq0MjAyNi0xMS0yNlQxNjoyOTowMlrPAAAAAWpAScU="
+     },
+     "nodes": [
+      {
+       "author": {
+        "login": "owner",
+        "__typename": "User"
+       },
+       "state": "COMMENTED",
+       "body": "/forced-any-approval Billing changes only.",
+       "submittedAt": "2026-11-26T16:29:02Z"
+      },
+      {
+       "author": {
+        "login": "cursor",
+        "__typename": "Bot"
+       },
+       "state": "COMMENTED",
+       "body": "<!-- BUGBOT_REVIEW -->\nCursor Bugbot has reviewed your changes and found 1 potential issue.",
+       "submittedAt": "2026-11-26T17:50:17Z"
+      },
+      {
+       "author": {
+        "login": "reviewer",
+        "__typename": "User"
+       },
+       "state": "APPROVED",
+       "body": "",
+       "submittedAt": "2026-11-26T17:55:00Z"
+      },
+      {
+       "author": {
+        "login": "reviewer",
+        "__typename": "User"
+       },
+       "state": "CHANGES_REQUESTED",
+       "body": "",
+       "submittedAt": "2026-11-26T17:56:00Z"
+      }
+     ]
+    }
+   },
+   "pr1": null
+  }
+ },
+ "errors": [
+  {
+   "type": "NOT_FOUND",
+   "path": [
+    "repository",
+    "pr1"
+   ],
+   "message": "Could not resolve to a PullRequest with the number of 99999."
+  }
+ ]
+}

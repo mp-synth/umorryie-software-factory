@@ -41,6 +41,7 @@ test('parseAcceptance returns null when any data row has no result', () => {
 
 test('gateResult reads the gate verdict line', () => {
   assert.equal(gateResult('GATE: PASS'), 'PASS');
+  assert.equal(gateResult('GATE: WAITING'), 'WAITING');
   assert.equal(gateResult('GATE: skipped'), 'SKIPPED');
   assert.equal(gateResult('FIX: APPLIED'), null);
   assert.equal(gateResult(null), null);

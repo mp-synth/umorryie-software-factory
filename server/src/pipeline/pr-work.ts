@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { PrSweepSkip } from '@factory/shared';
-import type { HumanCheck, PrSnapshot, ReviewThread } from '../github.ts';
+import type { HumanCheck, PrCheck, PrSnapshot, ReviewThread } from '../github.ts';
+import { ACTIONABLE, type CheckVerdict } from './check-policy.ts';
 
 export interface PrWork {
   snap: PrSnapshot;
@@ -11,7 +12,11 @@ export interface PrWork {
   comments: PrSnapshot['comments'];
   reviews: PrSnapshot['reviews'];
   ignored: string[];
+  /** Failing checks only people, or work outside this repo, can turn green. */
+  waitingOn: string[];
 }
+
+export type ClassifyCheck = (check: PrCheck) => CheckVerdict;
 
 const time = (iso: string) => new Date(iso).getTime();
 
@@ -51,35 +56,68 @@ export function isBotCommand(body: string): boolean {
 // it, unless the last fix already saw it. A thread the factory has not answered counts even then:
 // a fix can succeed without a reply (verifier blocked, arbiter escalated), and the fingerprint
 // already keeps the same thread from being fixed twice. Only an outdated one needs a newer reply.
-export function prWorkFrom(snap: PrSnapshot, unresolved: ReviewThread[], opts: { lastFixAt: number | null; noiseCommentAuthors: string[] }): PrWork {
+const everyCheckActs: ClassifyCheck = () => ({ class: 'fix', note: null, needsLog: false });
+
+function splitByPolicy(checks: PrCheck[], classify: ClassifyCheck) {
+  // A rule that depends on the job log decides only once the log is read; until then the check counts as work.
+  const verdicts = checks.map((c) => ({ check: c, verdict: classify(c) })).map((v) => (v.verdict.needsLog ? { ...v, verdict: { ...v.verdict, class: 'fix' as const } } : v));
+  const of = (...classes: CheckVerdict['class'][]) => verdicts.filter((v) => classes.includes(v.verdict.class));
+  return {
+    actionable: of(...ACTIONABLE).map((v) => v.check),
+    waitingOn: of('people-only', 'waiting-on').map((v) => `${v.check.name}: ${v.verdict.note ?? (v.verdict.class === 'waiting-on' ? 'waits for work outside this repo' : 'only people turn it green')}`),
+    ignored: of('ignore').map((v) => `Failing CI check ${v.check.name}: the check policy ignores it`),
+  };
+}
+
+// Top-level comments and review bodies from bots name no work: a bot's finding that needs a change comes as a
+// review thread. An approval needs no change either, whatever its text says.
+function triageReason(item: { author: string; body: string; authorIsBot?: boolean }, noiseCommentAuthors: string[], state?: string): string | null {
+  if (isNoiseAuthor(item.author, noiseCommentAuthors)) return 'report-bot comment';
+  if (isApprovalRouting(item.body)) return 'the approval agent asking a human code owner to review; it names no defect';
+  if (isBotCommand(item.body)) return 'a command for a GitHub bot';
+  if (state && isFindingsSummary(item.body)) return 'Bugbot summary, each of its findings is an inline thread';
+  if (state === 'APPROVED') return 'an approval; it asks for no change';
+  if (item.authorIsBot) return "a bot's comment; a bot finding that needs a change comes as a review thread";
+  return null;
+}
+
+export function prWorkFrom(
+  snap: PrSnapshot,
+  unresolved: ReviewThread[],
+  opts: { lastFixAt: number | null; noiseCommentAuthors: string[]; classify?: ClassifyCheck },
+): PrWork {
   const isNew = (iso: string) => time(iso) > (opts.lastFixAt ?? 0);
-  const ciStillRunning = snap.failingChecks.length > 0 && snap.pendingChecks.length > 0;
-  const newComments = snap.comments.filter((c) => isNew(c.createdAt));
-  const newReviews = snap.reviews.filter((r) => r.body.trim() && isNew(r.submittedAt));
-  const noiseComments = newComments.filter((c) => isNoiseAuthor(c.author, opts.noiseCommentAuthors));
-  const routingComments = newComments.filter((c) => !noiseComments.includes(c) && isApprovalRouting(c.body));
-  const commandComments = newComments.filter((c) => !noiseComments.includes(c) && !routingComments.includes(c) && isBotCommand(c.body));
-  const noiseReviews = newReviews.filter((r) => isFindingsSummary(r.body));
-  const routingReviews = newReviews.filter((r) => !noiseReviews.includes(r) && isApprovalRouting(r.body));
-  const commandReviews = newReviews.filter((r) => !noiseReviews.includes(r) && !routingReviews.includes(r) && isBotCommand(r.body));
-  const dropped = new Set<unknown>([...noiseComments, ...routingComments, ...commandComments, ...noiseReviews, ...routingReviews, ...commandReviews]);
+  const policy = splitByPolicy(snap.failingChecks, opts.classify ?? everyCheckActs);
+  const ciStillRunning = policy.actionable.length > 0 && snap.pendingChecks.length > 0;
+  const comments = snap.comments.filter((c) => isNew(c.createdAt)).map((c) => ({ item: c, why: triageReason(c, opts.noiseCommentAuthors) }));
+  const reviews = snap.reviews
+    .filter((r) => r.body.trim() && isNew(r.submittedAt))
+    .map((r) => ({ item: r, why: triageReason(r, opts.noiseCommentAuthors, r.state) }));
   return {
     snap,
     conflicting: snap.mergeable === 'CONFLICTING',
     ciStillRunning,
-    failingChecks: ciStillRunning ? [] : snap.failingChecks,
+    failingChecks: ciStillRunning ? [] : policy.actionable,
     threads: unresolved.filter((t) => !t.awaitingReviewer && (!t.outdated || isNew(t.lastCommentAt))),
-    comments: newComments.filter((c) => !dropped.has(c)),
-    reviews: newReviews.filter((r) => !dropped.has(r)),
+    comments: comments.filter((c) => !c.why).map((c) => c.item),
+    reviews: reviews.filter((r) => !r.why).map((r) => r.item),
+    waitingOn: policy.waitingOn,
     ignored: [
       ...snap.supersededChecks.map((c) => `Failing CI check ${c.name}: a cancelled job superseded by a later run of the same workflow`),
-      ...noiseComments.map((c) => `PR comment by ${c.author} (${c.url}): report-bot comment`),
-      ...routingComments.map((c) => `PR comment by ${c.author} (${c.url}): the approval agent asking a human code owner to review; it names no defect`),
-      ...commandComments.map((c) => `PR comment by ${c.author} (${c.url}): a command for a GitHub bot`),
-      ...noiseReviews.map((r) => `PR review by ${r.author} (${r.state}): Bugbot summary, each of its findings is an inline thread`),
-      ...routingReviews.map((r) => `PR review by ${r.author} (${r.state}): the approval agent asking a human code owner to review; it names no defect`),
-      ...commandReviews.map((r) => `PR review by ${r.author} (${r.state}): a command for a GitHub bot`),
+      ...policy.ignored,
+      ...comments.filter((c) => c.why).map((c) => `PR comment by ${c.item.author} (${c.item.url}): ${c.why}`),
+      ...reviews.filter((r) => r.why).map((r) => `PR review by ${r.item.author} (${r.item.state}): ${r.why}`),
     ],
+  };
+}
+
+/** The work left once failing checks that also fail where the PR's base is are set aside: they are not this PR's. */
+export function withoutInherited(w: PrWork, inherited: string[]): PrWork {
+  if (!inherited.length) return w;
+  return {
+    ...w,
+    failingChecks: w.failingChecks.filter((c) => !inherited.includes(c.name)),
+    ignored: [...w.ignored, ...inherited.map((name) => `Failing CI check ${name}: fails the same way where the PR's base is, so it is not this PR's`)],
   };
 }
 
@@ -88,8 +126,9 @@ export function hasPrWork(w: PrWork): boolean {
 }
 
 // What keeps the PR from merging after a fixer already had this exact state, or null when nothing does
-// (threads and comments wait for people, not for another fixer). A review approves every fix that
-// changes code, which lets the arbiter decide again, so only the ticket's rounds bound the retries.
+// (threads and comments wait for people, not for another fixer). The arbiter decides even after the
+// ticket used its rounds, so a red PR never waits for the owner; the arbiter's own limit of decisions in
+// a row without progress bounds the retries.
 export function unmergeableStop(w: PrWork, rounds: { round: number; maxRounds: number }): { why: string; askArbiter: boolean } | null {
   const parts = [
     w.conflicting ? 'it conflicts with its base' : '',
@@ -98,16 +137,16 @@ export function unmergeableStop(w: PrWork, rounds: { round: number; maxRounds: n
   if (!parts.length) return null;
   const why = `${parts.join(' and ')} on ${w.snap.url}, and the PR is unchanged since a fixer had exactly this. It can't merge like this.`;
   if (rounds.round < rounds.maxRounds) return { why, askArbiter: true };
-  return { why: `${why} ${rounds.round} rounds of fixes did not get it there, so it waits for you.`, askArbiter: false };
+  return { why: `${why} ${rounds.round} rounds of fixes did not get it there, so the arbiter decides what happens next.`, askArbiter: true };
 }
 
 export function prWorkFingerprint(w: PrWork): string {
   const state = {
     head: w.snap.headRefOid,
     conflicting: w.conflicting,
-    failing: w.failingChecks.map((c) => c.name).sort(),
-    threads: w.threads.map((t) => `${t.id}:${t.comments.length}`).sort(),
-    comments: w.comments.map((c) => c.url).sort(),
+    failing: w.failingChecks.map((c) => `${c.workflowName ?? ''}:${c.name}:${c.url ?? ''}`).sort(),
+    threads: w.threads.map((t) => `${t.id}:${t.comments.map((c) => `${c.author}:${c.body}`).join('|')}`).sort(),
+    comments: w.comments.map((c) => `${c.url}:${c.body}`).sort(),
     reviews: w.reviews.map((r) => `${r.author}:${r.state}:${r.body}`).sort(),
   };
   return createHash('sha256').update(JSON.stringify(state)).digest('hex').slice(0, 16);
@@ -140,11 +179,16 @@ export function describePrWork(w: PrWork): string {
  * Why the sweep starts no fixer on an open PR, for the ticket to show: without it an adopted PR sits
  * at "built" with no runs and nothing says it only waits for people.
  */
-export function sweepSkip(w: PrWork, opts: { alreadyHandled: boolean; humanChecks: HumanCheck[] }): Omit<PrSweepSkip, 'since'> {
+export function sweepSkip(
+  w: PrWork,
+  opts: { alreadyHandled: boolean; humanChecks: HumanCheck[]; decided?: Pick<PrSweepSkip, 'reason' | 'why'> },
+): Omit<PrSweepSkip, 'since'> {
+  const human = opts.humanChecks.map((c) => `${c.name}: ${c.description || (c.state === 'pending' ? 'not approved yet' : 'failed')}`);
+  const duplicatesHumanCheck = (line: string) => opts.humanChecks.some((check) => line.startsWith(`${check.name}:`));
   return {
     headSha: w.snap.headRefOid,
-    ...skipReason(w, opts.alreadyHandled),
-    waitingOn: opts.humanChecks.map((c) => `${c.name}: ${c.description || (c.state === 'pending' ? 'not approved yet' : 'failed')}`),
+    ...(opts.decided ?? skipReason(w, opts.alreadyHandled)),
+    waitingOn: [...human, ...w.waitingOn.filter((line) => !duplicatesHumanCheck(line))],
     ignored: w.ignored,
   };
 }

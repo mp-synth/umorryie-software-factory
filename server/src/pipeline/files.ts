@@ -146,6 +146,15 @@ export function renderTicket(t: Ticket, all: Ticket[]): string {
           '',
         ]
       : []),
+    ...(t.foundation ? ['## Foundation', 'Other tickets build on what this one defines. Its dependents wait until it is approved and green, so get the contract right here.', ''] : []),
+    ...(t.touches?.length
+      ? [
+          '## Files this ticket owns',
+          'The plan gives these files to this ticket. Change what the ticket needs here; a file another ticket of the stack owns is changed there, not here.',
+          t.touches.map((p) => `- \`${p}\``).join('\n'),
+          '',
+        ]
+      : []),
     '## Guidance for the agent',
     t.guidance.map((g) => `- ${g}`).join('\n'),
     '',

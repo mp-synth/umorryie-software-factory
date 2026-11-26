@@ -45,6 +45,12 @@ an order:
 - `verify-block.md`, when present: a verifier rejected your previous attempt
   at these same reports and the branch was reset. Read its reason and
   findings first and don't repeat what it blocked.
+- `used-above.md`, when present: names this branch adds that the PRs stacked
+  on it use. Renaming, moving or deleting one breaks them; keep it, or say in
+  fix.md which PR above must follow.
+- `changed-below.md`, when present: what changed in the PR below since this
+  branch last had it. The factory merged it into your branch before you
+  started.
 
 Also read `ticket.md` (the scope), `build.md`, and earlier rounds' `review.md`
 and `fix.md`, so you don't redo or undo earlier fixes.
@@ -122,10 +128,15 @@ verdict per finding inside its single reply.
 - Merge conflicts: `git fetch origin && git merge origin/<base>`, resolve,
   commit. Never rebase.
 - Generated files: regenerate with the repo's own generator, never hand-edit.
-- Tests that failed in the PR's CI (`pr-comments.md`): take the failing test
-  ids from the log tail and run exactly those, before your fix to reproduce
-  the failure and after it to confirm they pass. Run no other tests, even
-  when the repo's docs say to: the rest run in CI on the PR.
+- Tests that failed in the PR's CI (`pr-comments.md`) or in the gate's
+  checks (`checks.md`, whose checks command can run the tests of the changed files):
+  take the failing test ids from the log tail and run exactly those, before
+  your fix to reproduce the failure and after it to confirm they pass. Run no
+  other tests, even when the repo's docs say to; the checks command runs the
+  rest.
+- The gate merges the branch this PR targets (the PR below, or the base
+  branch) into this branch before its checks, as CI does. When `checks.md`
+  says that merge conflicts, merge it yourself as below.
 - When those tests can't run here (a service they need is missing), fix from
   the CI log: read the error, the test and the code it calls, and fix the
   cause. A check failing on the PR is never NO-CHANGES because it passes or
@@ -134,7 +145,8 @@ verdict per finding inside its single reply.
   that fails on something your branch doesn't touch (a runner or network
   error, a test of code the branch doesn't touch) goes under `## Reruns` in
   fix.md, one run id per line with why. The factory re-runs it once.
-- Then run the checks command from your prompt; it must pass.
+- Then run the quick checks your prompt names, when it names any. The
+  factory runs the full checks command after you finish; don't run it.
 - When a fix changes behaviour that reaches a live dev service your prompt
   lists, re-run the matching live check from build.md's `## Live validation`
   (read-only, never production) and put its result under `## Validation`.
@@ -163,8 +175,8 @@ Each commit (short sha and subject) and which items it fixes. For a behaviour
 fix, the test that covers it and why it fails before and passes after.
 
 ## Validation
-Commands you ran and their results: the checks command, and the CI-failing
-tests you re-ran before and after the fix.
+Commands you ran and their results: the quick checks, and the failing tests
+you re-ran before and after the fix.
 
 ## Replies
 - T1 [VALID]: Added the null check and a test for an empty cart (a1b2c3d).

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PlanJson } from '@factory/shared';
-import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, renderStacking, section, slugify, stackDependencies, stackShape, topoOrder, validatePlan } from './plan.ts';
+import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, renderStacking, section, sharedHotspots, slugify, stackDependencies, stackShape, topoOrder, touchesOverlap, validatePlan } from './plan.ts';
 
 const ticket = (key: string, depends_on: string[] = []) => ({
   key,
@@ -226,4 +226,106 @@ test('renderPlanContext carries goal, criteria, definition of done and edge case
   assert.match(full, /## Definition of done\n- All tickets approved/);
   assert.match(full, /## Edge cases\n- Empty input/);
   assert.doesNotMatch(renderPlanContext({ ...withGuidance('Touch it'), edge_cases: [] }), /Edge cases/);
+});
+
+const planWith = (tickets: { key: string; depends_on?: string[]; touches?: string[] }[]) => ({
+  title: 'Plan title',
+  summary: ['first bullet here', 'second bullet here'],
+  goal: 'Users get the feature.',
+  success_criteria: ['a criterion'],
+  definition_of_done: ['a done item'],
+  test_strategy: ['unit tests'],
+  tickets: tickets.map((t) => ({
+    key: t.key,
+    title: `Build the ${t.key} part`,
+    what: 'What happens here.',
+    goal: 'Why it matters here.',
+    outcome: 'The measurable result.',
+    guidance: ['follow the code'],
+    acceptance: ['a check'],
+    depends_on: t.depends_on ?? [],
+    size: 'S',
+    touches: t.touches ?? [],
+  })),
+});
+
+test('side-by-side tickets that touch the same files are chained, generated files aside', () => {
+  const { stacked } = validatePlan(
+    planWith([
+      { key: 'base', touches: ['svc/routes.py'] },
+      { key: 'a', depends_on: ['base'], touches: ['svc/errors.py', 'generated:idl/openapi.json'] },
+      { key: 'b', depends_on: ['base'], touches: ['svc/b.py', 'generated:idl/openapi.json'] },
+      { key: 'c', depends_on: ['base'], touches: ['svc/'] },
+    ]),
+    10,
+  );
+  const on = Object.fromEntries(stacked!.map((t) => [t.key, t.depends_on[0] ?? null]));
+  assert.deepEqual([on.a, on.b, on.c], ['base', 'a', 'b'], 'svc/ covers both siblings, so the three form one line');
+  const generatedOnly = validatePlan(planWith([{ key: 'base' }, { key: 'a', depends_on: ['base'], touches: ['generated:idl/x.json'] }, { key: 'b', depends_on: ['base'], touches: ['generated:idl/x.json'] }]), 10);
+  assert.deepEqual(generatedOnly.stacked!.map((t) => t.depends_on[0] ?? null), [null, 'base', 'base'], 'a shared generated file does not chain them');
+});
+
+test('four or more tickets on one hotspot are fully serialized', () => {
+  const keys = ['a', 'b', 'c', 'd', 'e'];
+  const { stacked, needs } = validatePlan(
+    planWith(keys.map((key) => ({ key, touches: ['src/shared/hotspot.ts'] }))),
+    10,
+  );
+  const parent = new Map(stacked!.map((t) => [t.key, t.depends_on[0] ?? null]));
+  const isBelow = (low: string, high: string) => {
+    for (let current: string | null | undefined = parent.get(high); current; current = parent.get(current)) {
+      if (current === low) return true;
+    }
+    return false;
+  };
+
+  for (const [i, later] of keys.entries()) {
+    for (const earlier of keys.slice(0, i)) assert.equal(isBelow(earlier, later), true, `${earlier} must be below ${later}`);
+  }
+  assert.deepEqual(needs!.get('e'), ['a', 'b', 'c', 'd']);
+});
+
+test('in one line every ticket stacks on the one before it, in plan order', () => {
+  const { stacked, order } = validatePlan(planWith([{ key: 'base' }, { key: 'a', depends_on: ['base'] }, { key: 'b', depends_on: ['base'] }]), 10, { line: true });
+  assert.deepEqual(stacked!.map((t) => t.depends_on), [[], ['base'], ['a']]);
+  assert.deepEqual(order!.map((o) => o.wave), [0, 1, 1], 'a and b still build side by side');
+});
+
+test('touchesOverlap compares files and folders', () => {
+  assert.deepEqual(touchesOverlap(['src/a.ts'], ['src/a.ts']), ['src/a.ts']);
+  assert.deepEqual(touchesOverlap(['src/'], ['src/b/c.ts']), ['src/']);
+  assert.deepEqual(touchesOverlap(['src/a.ts'], ['src/b.ts']), []);
+  assert.deepEqual(touchesOverlap(['generated:idl/x.json'], ['generated:idl/x.json']), []);
+});
+
+test('the stacking note names the PRs that fall outside the single GitHub stack', () => {
+  const md = renderStacking([{ key: 'base', dependsOn: [] }, { key: 'a', dependsOn: ['base'] }, { key: 'b', dependsOn: ['base'] }], [{ key: 'base', dependsOn: [] }, { key: 'a', dependsOn: ['base'] }, { key: 'b', dependsOn: ['base'] }], 4);
+  assert.match(md, /sit outside it .*: b\./);
+});
+
+test('a ticket waits for an earlier ticket whose write set overlaps its own, also in one line', () => {
+  const plan = planWith([
+    { key: 'a', touches: ['src/a.ts'] },
+    { key: 'b', depends_on: ['a'], touches: ['src/shared.ts'] },
+    { key: 'c', depends_on: ['a'], touches: ['src/shared.ts', 'src/c.ts'] },
+    { key: 'd', depends_on: ['a'], touches: ['src/d.ts'] },
+  ]);
+  for (const line of [false, true]) {
+    const { needs, errors } = validatePlan(plan, 10, { line });
+    assert.deepEqual(errors, []);
+    assert.deepEqual(needs!.get('c'), ['a', 'b']);
+    assert.deepEqual(needs!.get('d'), ['a']);
+  }
+});
+
+test('names the files three or more tickets change as shared hotspots', () => {
+  const tickets = [
+    { key: 'a', touches: ['src/errors.py', 'src/a.py'] },
+    { key: 'b', touches: ['./src/errors.py'] },
+    { key: 'c', touches: ['src/errors.py', 'src/a.py', 'generated:idl/spec.json'] },
+    { key: 'd', touches: ['generated:idl/spec.json', 'src/d.py'] },
+    { key: 'e', touches: ['generated:idl/spec.json'] },
+  ];
+  assert.deepEqual(sharedHotspots(tickets), [{ path: 'src/errors.py', keys: ['a', 'b', 'c'] }]);
+  assert.match(renderStacking(tickets.map((t) => ({ ...t, dependsOn: [] })), tickets.map((t) => ({ key: t.key, dependsOn: [] })), 4), /- src\/errors\.py: a, b, c/);
 });

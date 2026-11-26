@@ -302,7 +302,15 @@ function TicketRow({ ticket: t, all, runs, open, onToggle, initiativeId, approve
         <div className="flex shrink-0 flex-col items-end gap-1.5 @md:flex-row @md:items-center @md:gap-3">
           <div className="flex items-center gap-1.5">
             <TicketBadge status={t.status} arbitrating={arbitrating} />
-            <span className="hidden @lg:inline-flex">{t.lastVerdict ? <VerdictBadge verdict={t.lastVerdict} /> : t.gateStatus === 'fail' ? <VerdictBadge verdict="GATE: FAIL" /> : null}</span>
+            <span className="hidden @lg:inline-flex">
+              {t.lastVerdict ? (
+                <VerdictBadge verdict={t.lastVerdict} />
+              ) : t.gateStatus === 'fail' ? (
+                <VerdictBadge verdict="GATE: FAIL" />
+              ) : t.gateStatus === 'waiting' ? (
+                <VerdictBadge verdict="GATE: WAITING" />
+              ) : null}
+            </span>
           </div>
           <span className="numeric hidden w-14 text-right text-xs text-ink-tertiary @lg:block">{cost ? money(cost) : ''}</span>
           <div className="flex items-center gap-1">
@@ -370,7 +378,7 @@ function SweepSkipPanel({ skip }: { skip: PrSweepSkip }) {
       <p>{skip.why}</p>
       {skip.waitingOn.length > 0 && (
         <div className="mt-2">
-          <div className="eyebrow">Waiting on people</div>
+          <div className="eyebrow">Waiting on people or external work</div>
           <ul className="mt-1 list-disc space-y-0.5 pl-4">
             {skip.waitingOn.map((w) => (
               <li key={w}>{w}</li>

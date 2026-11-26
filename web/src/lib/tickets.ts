@@ -17,7 +17,9 @@ export function primaryTicketAction(t: Ticket, { approved, activeRun, waitingOn 
     case 'changes_requested':
       return { kind: 'act', label: 'Fix', action: 'fix' };
     case 'blocked':
-      if (t.branch && t.gateStatus === 'fail') return { kind: 'act', label: 'Re-run checks', action: 'check' };
+      if (t.branch && (t.gateStatus === 'fail' || t.gateStatus === 'infra' || t.gateStatus === 'waiting')) {
+        return { kind: 'act', label: 'Re-run checks', action: 'check' };
+      }
       return t.branch ? { kind: 'act', label: 'Fix', action: 'fix' } : { kind: 'act', label: 'Retry build', action: 'run' };
     default:
       return null;
@@ -61,6 +63,10 @@ export function sweepSkipLabel(skip: PrSweepSkip): string {
   if (skip.reason === 'already-tried') return 'fixer already tried';
   if (skip.reason === 'ci-running') return 'waiting for CI';
   if (skip.reason === 'merge-unknown') return 'checking mergeability';
+  if (skip.reason === 'inherited') return 'fails on its base too';
+  if (skip.reason === 'rerun') return 're-ran a flaky check';
+  if (skip.reason === 'stack-below') return 'waiting on the PR below';
+  if (skip.reason === 'waiting-on') return 'waiting on people or external work';
   return skip.waitingOn.length ? 'waiting on people' : 'nothing to fix';
 }
 

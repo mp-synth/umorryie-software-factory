@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as gitx from '../git.ts';
+import { discardDir } from '../discard.ts';
 import { slugify } from './plan.ts';
 
 export interface BaseCheckout {
@@ -78,7 +79,8 @@ async function headOf(dir: string): Promise<string | null> {
 async function atCommit(repoDir: string, checkouts: string[], sha: string, opts: BaseCheckoutOptions): Promise<string | null> {
   for (const dir of checkouts) {
     if ((await headOf(dir)) !== sha) continue;
-    if (await gitx.finishCheckout(dir, opts.heavy)) await copyLocal(repoDir, dir, opts);
+    await gitx.finishCheckout(dir, opts.heavy);
+    await copyLocal(repoDir, dir, opts);
     return dir;
   }
   return null;
@@ -105,7 +107,7 @@ async function addCheckout(repoDir: string, root: string, slug: string, checkout
   let n = 1;
   while (taken.has(`${slug}${SEPARATOR}${n}`)) n++;
   const dir = path.join(root, `${slug}${SEPARATOR}${n}`);
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  discardDir(dir, root);
   await gitx.withRepoLock(repoDir, async () => {
     await gitx.git(repoDir, ['worktree', 'prune']);
     fs.mkdirSync(root, { recursive: true });
