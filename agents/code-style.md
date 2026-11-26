@@ -15,6 +15,9 @@ where the two disagree.
 - Define no function, method, constant, class, enum member, error code or
   model field that nothing in production code calls, raises or reads. Tests
   don't count as a caller: a function only a test calls is unused.
+- A parameter lives in the PR that first passes it. Don't give a function
+  an optional `message=` or `context=` that no caller in its PR passes; the
+  PR whose caller first needs it adds it.
 - An error code or enum member lives in the PR that first raises or uses it,
   like a function. Never add a whole catalogue of codes up front.
 - A function lives in the PR that first calls it from production code. When
@@ -35,7 +38,9 @@ where the two disagree.
   value and change nothing, `set_` assigns a field or role, `create_` /
   `add_` / `remove_` / `delete_` / `send_` change state, `is_` / `has_`
   answer yes or no. Name what the code really returns (oldest, latest,
-  first), not a role it might play.
+  first), not a role it might play. A function that writes is never `get_`,
+  even when it returns a result: `add_workspace_admin_if_missing`, not
+  `get_workspace_admin_result`.
 - When a name says what a docstring or comment said, delete that docstring
   or comment.
 
@@ -62,6 +67,9 @@ where the two disagree.
   effects (inside or after the transaction, one by one or batched). When an
   extraction needs any of those to change, the change goes to the behaviour
   ticket that needs it.
+- A rename or move of existing code is a refactor even when only a later
+  PR reads the new name: it goes in the refactor PR, where the existing code
+  still uses it, not in the behaviour PR that first needs the new name.
 - Don't rename or restructure code the ticket doesn't need to touch.
 - Reuse the helpers and patterns lower PRs or the codebase already have
   (validators, regex patterns, builders, field types, error mappings) instead
