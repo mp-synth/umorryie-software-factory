@@ -68,7 +68,7 @@ import {
 } from './arbiter.ts';
 import { ticketLabel } from './labels.ts';
 import { adoptablePrs, adoptedKey, adoptedTicket, remoteBranchOf, reopenedTicket } from './adopted-prs.ts';
-import { isSamePullRequestText, pullRequestText, revisedPullRequestText } from './pull-request.ts';
+import { asPullRequestSection, isSamePullRequestText, pullRequestText, revisedPullRequestText } from './pull-request.ts';
 import { earlierBranches, rebuildBlocker, startedAbove } from './rebuild.ts';
 import { planTicketSeqs, renameCanceledKeys, replanAwaitsAnswers, revisePlannedTickets, wasApproved } from './replan.ts';
 import { firstLine, missingPlanPaths, renderPlanContext, renderPlanPaths, renderStacking, section, slugify, validatePlan } from './plan.ts';
@@ -1960,6 +1960,9 @@ async function describeRebuiltPr(run: Run, init: Initiative, ticket: Ticket, tex
 // behind what was pushed. The newest fix that wrote one wins; a fix that wrote none (CI, lint) leaves it.
 async function describeFixedPr(run: Run, ticket: Ticket, fixes: Run[]): Promise<void> {
   const revised = fixes.map((f) => revisedPullRequestText(f.outputMd)).find((t) => t !== null);
+  if (!revised && fixes.some((f) => f.outputMd && section(f.outputMd, 'Pull request'))) {
+    await log(run, `The fixer's ## Pull request broke the PR text rules, so ${ticket.prUrl} keeps its description.`);
+  }
   if (!revised || !ticket.prNumber) return;
   try {
     const current = await gh.prText(ticket.worktreePath!, ticket.prNumber);
@@ -2223,7 +2226,7 @@ async function runFix(run: Run): Promise<void> {
     ...collected.reports,
     writeTicket(init, ticket, all),
     ...(build?.outputPath && fs.existsSync(build.outputPath) ? [build.outputPath] : []),
-    ...(description ? [write(path.join(dir, 'pr-description.md'), `${description.title}\n\n${description.body}`)] : []),
+    ...(description ? [write(path.join(dir, 'pr-description.md'), asPullRequestSection(description))] : []),
     ...historyFiles(init, ticket, run.round),
   ];
   const model = collected.mechanicalOnly ? s.models.mechanicalFix : s.models.fix;

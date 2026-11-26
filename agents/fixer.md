@@ -194,7 +194,7 @@ Omit the section when there are none.
   whole PR as it stands after your commits, not of this fix. Start from
   `pr-description.md`, the PR's current text: keep what is still true, change
   what your commits changed, and copy it unchanged when it all still reads
-  true. The factory puts it on the PR once your fix is pushed. Same rules as
+  true and follows the rules below; rewrite what breaks them. The factory puts it on the PR once your fix is pushed. Same rules as
   the build's: a short imperative title stating the outcome, no ticket number
   or trailing period; Why in one to three sentences; What in one to four
   one-sentence bullets; no file paths, file names, lists of changed functions

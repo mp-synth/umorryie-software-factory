@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CLAUDE_CODE_ATTRIBUTION, isSamePullRequestText, pullRequestText, revisedPullRequestText } from './pull-request.ts';
+import { asPullRequestSection, CLAUDE_CODE_ATTRIBUTION, isSamePullRequestText, pullRequestText, revisedPullRequestText } from './pull-request.ts';
 
 const withAttribution = (description: string) => `${description}\n\n${CLAUDE_CODE_ATTRIBUTION}`;
 
@@ -100,4 +100,15 @@ test("a fixer's rewritten PR text replaces the description only when it is compl
 test('PR text that differs only in surrounding whitespace is the same', () => {
   assert.ok(isSamePullRequestText({ title: 'A title here', body: 'Body\n' }, { title: 'A title here ', body: 'Body' }));
   assert.ok(!isSamePullRequestText({ title: 'A title here', body: 'Body' }, { title: 'A title here', body: 'Other body' }));
+});
+
+test("a fixer that copies the PR's current text unchanged gives back the same text", () => {
+  const current = pullRequestText(
+    'BUILD: DONE\n\n## Pull request\nRestore charge amounts after add-on removal\n\n### Why\nRemoving an unlimited add-on left the feature billed at 0.\n\n### What\n- The template charge amount goes back on the subscription.',
+    ticket,
+  );
+  const fix = `FIX: APPLIED\n\n## Summary\n- Renamed a helper\n\n${asPullRequestSection(current)}`;
+  const copied = revisedPullRequestText(fix);
+  assert.ok(copied, 'the copied section parses');
+  assert.ok(isSamePullRequestText(copied, current));
 });

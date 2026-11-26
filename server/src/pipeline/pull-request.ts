@@ -97,3 +97,9 @@ export function revisedPullRequestText(fixMd: string | null | undefined): PullRe
 export function isSamePullRequestText(a: PullRequestText, b: PullRequestText): boolean {
   return a.title.trim() === b.title.trim() && a.body.trim() === b.body.trim();
 }
+
+/** The PR's current text in the fix.md form, so a fixer can copy what still holds. */
+export function asPullRequestSection(text: PullRequestText): string {
+  const body = text.body.replace(/^#{2,}\s+/gm, '### ').split('\n').filter((line) => !ATTRIBUTION_LINE.test(line)).join('\n').trim();
+  return `## Pull request\n${text.title}\n\n${body}\n`;
+}
