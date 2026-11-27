@@ -41,7 +41,7 @@ step small, reproducible and re-runnable on its own.
 | fixing | A fixer gives every item a verdict before touching code (VALID / PARTIAL / INVALID / UNCONFIRMED / NEEDS-HUMAN): a bug is fixed only after it is traced and gets a test that would fail without the fix (written, not run: CI runs tests, and the fixer re-runs only the tests that failed in the PR's CI, before and after its fix); a claim is rejected only by pointing at the code. Rounds with only failing checks, CI or conflicts get a cheaper mechanical fixer that first checks whether the base branch fails the same way and lists flaky runs for one re-run. Fixes are committed locally; after the checks pass, a fresh **verifier** reads the commits and drafted replies. Approved: the factory pushes, updates the PR's title and description when the fixer rewrote them for the PR as it now stands (every fixer that commits starts from the current text and keeps what is still true; CI and lint fixes leave it alone), replies in each review thread, answers top-level comments in one summary, and resolves every thread it fixed once the fix is on the PR (bot threads it rejects with a code pointer too; a human's disputed or partly fixed thread stays open for them). Blocked: the branch is reset and a fresh fixer retries once with the findings; a second block pushes nothing and waits for you. When only rewriting pushed commits would fix the branch (someone else's commit in its history), the fixer answers REBUILD: the factory builds the ticket again from its base and puts the result on its existing PR as one new commit, so the PR keeps its number, stack place and discussion; it never opens a replacement PR or closes the old one. It stops for you instead when another ticket already builds on it or it was built 3 times. When a PR has nothing to act on, no agent is started |
 | approved | The reviewer, or the arbiter over the reviewer's remaining findings, would merge it. The PR stays a draft until you mark it ready. Tickets stacked on it that waited for approval start, and held reviews above it start (with "Dependents wait for green CI" on, only once the PR's CI is green or has no checks; CI shows on the ticket row) |
 | merged | Seen by Sync PRs (automatic every 5 min) or marked by you. Unblocks dependents. Its local worktree is removed, and its local branch too once no unmerged ticket is stacked on it |
-| needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row. With the arbiter on, it decides first and the row shows **Arbiter deciding**; it stays **Needs you** only when the arbiter escalates or has used its decisions |
+| needs you | An agent reported BLOCKED, rounds ran out, or something failed. The reason is on the row. With the arbiter on, it decides first and the row shows **Arbiter deciding**; it stays **Needs you** only when the arbiter needs an external action no agent can perform |
 
 Agents never run the checks command or tests; they run only the project's quick checks (lint and types on their files). A project can configure their git to skip commit hooks; the gate then runs the configured checks once, which need not include every hook. A fix round with only failing checks, CI or a stack conflict goes to the cheaper fixer (Sonnet); when that fixer's last round did not hold (blocked, red gate, verifier block), the next goes to the full fixer. A round whose only commits are the factory's own (merges, autofix) and that drafted no replies is pushed without a verifier. `maxRounds` counts fix rounds in a row on one problem, whatever started them (review, checks, CI, conflicts, the sweep); the ticket's build, an approving review or a message from you starts the count again.
 
@@ -154,14 +154,14 @@ the code, then writes one of three decisions:
   binding feedback, labelled as the arbiter's (it answers planner questions by
   number). A step that crashed runs again.
 - **ESCALATE**: only for what you alone have (credentials, access, money,
-  production data, a costly product call the brief doesn't inform). The ticket
+  production data or another external action no agent can perform). The ticket
   keeps waiting with the arbiter's one-line question on top of the reason.
 
-The arbiter decides at most **Arbiter decisions in a row** times (3) per plan or
-ticket on the same problem; after that it waits for you. A new row starts with
-your next message there or to the whole initiative, when a reviewer or
-verifier approves the ticket, and when the plan reviewer passes the plan, so a ticket that moved on and stops again on new
-feedback still goes to the arbiter.
+Product and code decisions never wait for you: Fable takes the recommended
+answer or the smallest reversible choice and keeps retrying until the checks
+and review pass. On server startup and once a minute afterward, a blocked
+ticket whose work stopped after its latest arbiter decision is handed back to
+Fable automatically.
 Anything you do on that plan or ticket stops a running arbiter, and a decision
 that lands after you acted is not applied. While it decides, the ticket shows
 **Arbiter deciding** instead of **Needs you**, and the dashboard doesn't count

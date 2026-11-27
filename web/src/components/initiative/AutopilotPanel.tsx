@@ -123,10 +123,9 @@ export function AutopilotPanel({ detail }: { detail: InitiativeDetail }) {
         <Card>
           <CardHeader icon={<SlidersHorizontal />} title="Limits" description="When a ticket or the plan runs out of rounds, it waits for you." />
           <div className="grid grid-cols-2 gap-4 p-4">
-            <NumberStepper label="Fix rounds in a row" hint="Fix rounds on one problem before the arbiter or you decide" value={s.maxRounds} min={1} max={10} onChange={(v) => save.mutate({ maxRounds: v })} />
+            <NumberStepper label="Fix rounds in a row" hint="Fix rounds on one problem before Fable decides the next step" value={s.maxRounds} min={1} max={10} onChange={(v) => save.mutate({ maxRounds: v })} />
             <NumberStepper label="Tickets at once" hint="Tickets of this initiative built in parallel" value={s.concurrency} min={1} max={10} onChange={(v) => save.mutate({ concurrency: v })} />
             <NumberStepper label="Plan rounds" hint="Plan and review rounds before the plan waits for you" value={s.maxPlanRounds} min={1} max={5} onChange={(v) => save.mutate({ maxPlanRounds: v })} />
-            <NumberStepper label="Arbiter decisions in a row" hint="Before a step waits for you anyway" value={s.maxArbiterDecisions} min={1} max={10} onChange={(v) => save.mutate({ maxArbiterDecisions: v })} />
           </div>
         </Card>
         <Card>

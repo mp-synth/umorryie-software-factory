@@ -30,6 +30,18 @@ export function waitsForOwner(init: Pick<Initiative, 'status'>, ticket: Pick<Tic
   return ticket.status === 'blocked' && INITIATIVES_WITH_LIVE_TICKETS.includes(init.status);
 }
 
+export function blockedTicketNeedsArbiter(
+  ticket: Pick<Ticket, 'status'>,
+  stopped: Pick<Run, 'queuedAt' | 'finishedAt'> | null,
+  arbiter: Pick<Run, 'queuedAt' | 'verdict'> | null,
+  arbiterApplied: boolean,
+): boolean {
+  if (ticket.status !== 'blocked' || !stopped) return false;
+  const stoppedAt = new Date(stopped.finishedAt ?? stopped.queuedAt).getTime();
+  if (!arbiter || new Date(arbiter.queuedAt).getTime() < stoppedAt) return true;
+  return !arbiterApplied || !/^DECISION:\s*ESCALATE/i.test(arbiter.verdict ?? '');
+}
+
 export function retryStep(stopped: Pick<Run, 'kind' | 'status'> | null): RunKind {
   if (!stopped) return 'execute';
   if (stopped.status !== 'succeeded') return stopped.kind;

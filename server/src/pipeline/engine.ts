@@ -55,6 +55,7 @@ import { gateResult, parseAcceptance, reviewComment } from './verification.ts';
 import {
   agentName,
   arbiterInstructions,
+  blockedTicketNeedsArbiter,
   decisionText,
   escalatedReason,
   escalationQuestion,
@@ -553,6 +554,7 @@ export async function startScheduler(): Promise<void> {
     { firstAfterMs: 60_000 },
   );
   periodic('base-watch', BASE_WATCH_MS, watchBases);
+  periodic('blocked-arbiters', CI_POLL_MS, resumeBlockedArbiters, { firstAfterMs: 0 });
   periodic('agent-probe', AGENT_PROBE_MS, resumeAgentsWhenAvailable);
   periodic('keep-awake', 15_000, holdMacAwake, { firstAfterMs: 0 });
   periodic(
@@ -3564,15 +3566,52 @@ async function handOverToArbiter(run: Run): Promise<void> {
 
 async function askArbiterInsteadOfOwner(init: Initiative, ticket: Ticket | null): Promise<void> {
   if (!waitsForOwner(init, ticket)) return;
-  const s = repo.initiativeSettings(init);
-  if (!s.autoArbiter) return;
-  const decided = await repo.arbiterDecisionsInARow(init.id, ticket?.id ?? null);
-  if (decided >= s.maxArbiterDecisions) {
-    const subject = ticket ? `${ticketLabel(ticket)}: the arbiter` : 'The arbiter';
-    await systemMessage({ initiativeId: init.id, ticketId: ticket?.id }, `${subject} decided ${decided} times in a row on this without it moving forward, so this waits for you.`);
-    return;
+  if (!repo.initiativeSettings(init).autoArbiter) return;
+  if (ticket) return resumeBlockedArbiters(ticket.id);
+  await enqueue({ kind: 'arbitrate', initiativeId: init.id, ticketId: null, trigger: 'auto' });
+}
+
+let blockedArbiterPass: Promise<void> = Promise.resolve();
+
+function resumeBlockedArbiters(finishingTicketId?: string): Promise<void> {
+  const pass = blockedArbiterPass.catch(() => undefined).then(() => resumeBlockedArbitersOnce(finishingTicketId));
+  blockedArbiterPass = pass;
+  return pass;
+}
+
+async function resumeBlockedArbitersOnce(finishingTicketId?: string): Promise<void> {
+  const blocked = await sql<Ticket[]>`
+    select t.* from tickets t join initiatives i on i.id = t.initiative_id
+    where t.status = 'blocked' and i.status in ('in_progress','done')`;
+  for (const initiativeId of new Set(blocked.map((ticket) => ticket.initiativeId))) {
+    const init = await repo.getInitiative(initiativeId);
+    if (!init || !repo.initiativeSettings(init).autoArbiter) continue;
+    const [all, busy] = await Promise.all([
+      repo.listTickets(init.id),
+      sql<{ ticketId: string }[]>`
+        select distinct ticket_id from runs
+        where initiative_id = ${init.id} and ticket_id is not null
+          and status in ('queued','running') and kind not in ${sql([...SIDE_RUN_KINDS])}`,
+    ]);
+    const locallyBusy = [...inFlight.values(), ...wrappingUpTickets.values()]
+      .filter((run) => run.initiativeId === init.id && run.ticketId && run.ticketId !== finishingTicketId)
+      .map((run) => run.ticketId!);
+    const busyIds = new Set([...busy.map((run) => run.ticketId), ...locallyBusy]);
+    const lanes = new StackWorkLanes(all, all.filter((ticket) => busyIds.has(ticket.id)));
+    for (const ticket of sortBottomUp(blocked.filter((candidate) => candidate.initiativeId === init.id), all)) {
+      if (!lanes.available(ticket)) continue;
+      const [stopped, arbiter] = await Promise.all([repo.lastStoppedStep(init.id, ticket.id), repo.latestRun(init.id, ticket.id, 'arbitrate')]);
+      const [applied] = arbiter ? await sql`select 1 from messages where run_id = ${arbiter.id} and author = 'agent' limit 1` : [];
+      if (!blockedTicketNeedsArbiter(ticket, stopped, arbiter, !!applied)) continue;
+      try {
+        await enqueue({ kind: 'arbitrate', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
+        lanes.occupy(ticket);
+        await systemMessage({ initiativeId: init.id, ticketId: ticket.id }, `${ticketLabel(ticket)}: Fable is deciding how to continue the stopped work.`);
+      } catch (err) {
+        console.warn('[arbiter-resume]', `${ticketLabel(ticket)}: ${(err as Error).message}`);
+      }
+    }
   }
-  await enqueue({ kind: 'arbitrate', initiativeId: init.id, ticketId: ticket?.id ?? null, trigger: 'auto' });
 }
 
 function latestStepOutputs(runsNewestFirst: Run[], dir: string): string[] {

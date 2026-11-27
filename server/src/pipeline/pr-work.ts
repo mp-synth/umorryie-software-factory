@@ -127,8 +127,7 @@ export function hasPrWork(w: PrWork): boolean {
 
 // What keeps the PR from merging after a fixer already had this exact state, or null when nothing does
 // (threads and comments wait for people, not for another fixer). The arbiter decides even after the
-// ticket used its rounds, so a red PR never waits for the owner; the arbiter's own limit of decisions in
-// a row without progress bounds the retries.
+// ticket used its rounds, so a red PR never waits for the owner.
 export function unmergeableStop(w: PrWork, rounds: { round: number; maxRounds: number }): { why: string; askArbiter: boolean } | null {
   const parts = [
     w.conflicting ? 'it conflicts with its base' : '',

@@ -82,7 +82,6 @@ export interface InitiativeSettings {
   resumeFixSessions: boolean;
   maxRounds: number;
   maxPlanRounds: number;
-  maxArbiterDecisions: number;
   concurrency: number;
   maxTickets: number;
   models: Record<AgentRunKind, Model> & { mechanicalFix: Model };
@@ -110,7 +109,6 @@ export const DEFAULT_INITIATIVE_SETTINGS: InitiativeSettings = {
   resumeFixSessions: false,
   maxRounds: 5,
   maxPlanRounds: 3,
-  maxArbiterDecisions: 3,
   concurrency: 4,
   maxTickets: 10,
   models: {

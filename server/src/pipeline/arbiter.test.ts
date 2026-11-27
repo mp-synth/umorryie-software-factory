@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { Initiative, PlanJson, Run, Ticket } from '@factory/shared';
 import {
   arbiterInstructions,
+  blockedTicketNeedsArbiter,
   decisionText,
   escalatedReason,
   escalationQuestion,
@@ -30,6 +31,19 @@ test('a ticket waits for the owner only when blocked in a live initiative', () =
   assert.equal(waitsForOwner(init('archived'), ticket('blocked')), false);
   assert.equal(waitsForOwner(init('in_progress'), ticket('changes_requested')), false);
   assert.equal(waitsForOwner(init('awaiting_approval'), ticket('blocked')), false);
+});
+
+test('startup re-arms a blocked ticket only when work stopped after its latest arbiter decision', () => {
+  const run = (queuedAt: string, verdict: string | null = null, finishedAt: string | null = queuedAt) => ({ queuedAt, finishedAt, verdict });
+  const blockedTicket = ticket('blocked');
+  const stopped = run('2026-01-01T10:10:00Z');
+  assert.equal(blockedTicketNeedsArbiter(blockedTicket, stopped, null, false), true);
+  assert.equal(blockedTicketNeedsArbiter(blockedTicket, stopped, run('2026-01-01T10:00:00Z'), true), true);
+  assert.equal(blockedTicketNeedsArbiter(blockedTicket, stopped, run('2026-01-01T10:20:00Z', 'DECISION: RETRY'), true), true);
+  assert.equal(blockedTicketNeedsArbiter(blockedTicket, stopped, run('2026-01-01T10:20:00Z', 'DECISION: ESCALATE'), false), true);
+  assert.equal(blockedTicketNeedsArbiter(blockedTicket, stopped, run('2026-01-01T10:20:00Z', 'DECISION: ESCALATE'), true), false);
+  assert.equal(blockedTicketNeedsArbiter(ticket('approved'), stopped, null, false), false);
+  assert.equal(blockedTicketNeedsArbiter(blockedTicket, null, null, false), false);
 });
 
 test('a failed step runs again; a finished one goes to a builder or a fixer', () => {

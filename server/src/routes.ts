@@ -50,7 +50,6 @@ const settingsPatch = z
     resumeFixSessions: z.boolean(),
     maxRounds: z.number().int().min(1).max(10),
     maxPlanRounds: z.number().int().min(1).max(5),
-    maxArbiterDecisions: z.number().int().min(1).max(10),
     concurrency: z.number().int().min(1).max(10),
     maxTickets: z.number().int().min(1).max(30),
     models: z

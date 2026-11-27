@@ -42,7 +42,7 @@ export async function updateAppSettings(patch: Partial<AppSettings>): Promise<Ap
 }
 
 export function initiativeSettings(i: Pick<Initiative, 'settings'>): InitiativeSettings {
-  const s = (i.settings ?? {}) as Partial<InitiativeSettings>;
+  const { maxArbiterDecisions: _, ...s } = (i.settings ?? {}) as Partial<InitiativeSettings> & { maxArbiterDecisions?: number };
   return {
     ...DEFAULT_INITIATIVE_SETTINGS,
     ...s,
@@ -350,24 +350,6 @@ export async function listRunsById(id: string): Promise<Run[]> {
 }
 
 export const isVerdict = (verdicts: string[]) => sql`upper(regexp_replace(verdict, '[[:space:]]+', '', 'g')) in ${sql(verdicts)}`;
-
-// The arbiter's decisions in a row on the same problem. The owner speaking (on the ticket or to the whole
-// initiative) starts a new row, and so does a ticket a reviewer approved, or a plan the plan reviewer passed,
-// since: what stops it next is a new problem. A verifier's approval does not: a verified fix that leaves the
-// PR as red as before is the loop the limit guards against.
-export async function arbiterDecisionsInARow(initiativeId: string, ticketId: string | null): Promise<number> {
-  const [{ n }] = await sql<{ n: number }[]>`
-    select count(*)::int as n from runs
-    where ${ticketScope(initiativeId, ticketId)} and kind = 'arbitrate' and status = 'succeeded'
-      and ${isVerdict(['DECISION:APPROVE', 'DECISION:RETRY'])}
-      and queued_at > greatest(
-        (select max(created_at) from messages
-          where initiative_id = ${initiativeId} and author = 'human' and ${ticketId ? sql`(ticket_id is null or ticket_id = ${ticketId})` : sql`ticket_id is null`}),
-        (select max(finished_at) from runs
-          where ${ticketScope(initiativeId, ticketId)} and kind in ('review', 'plan_review') and status = 'succeeded' and ${isVerdict(['VERDICT:APPROVE', 'VERDICT:PASS'])}),
-        'epoch'::timestamptz)`;
-  return n;
-}
 
 export async function lastStoppedStep(initiativeId: string, ticketId: string | null): Promise<Run | null> {
   const [r] = await sql<Run[]>`

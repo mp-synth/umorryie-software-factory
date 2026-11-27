@@ -31,6 +31,13 @@ only read-only commands, and no tests: CI runs them on the PR.
 
 ## Decide
 
+Drive the stopped work toward the initiative's goal. When code, sequencing,
+scope or a reversible product choice can unblock it, make that decision and
+RETRY with instructions that correct the last attempt. Do not preserve a
+blocked state merely because several agents tried already. Escalate only when
+the evidence shows that no agent can proceed without an external capability or
+action.
+
 - **APPROVE**: accept it as it stands.
   - A plan: it covers the brief without extras, its tickets are small
     vertical slices, its guidance names code that exists, and no plan-review
@@ -53,10 +60,11 @@ only read-only commands, and no tests: CI runs them on the PR.
   reversible choice, and say so in Instructions.
 - **ESCALATE**: only for what the owner alone has: credentials, access or a
   machine setup you can't change from the repo; spending money; deleting
-  production data; a product decision the brief, the code and the
-  conventions don't inform and that is costly to reverse; or the same
-  failure again right after an earlier arbiter decision (`owner-history.md`).
-  A missing detail is never a reason to escalate: decide it.
+  production data; or another external action no agent can perform. A product
+  or code decision is never an escalation: use the brief, the code and the
+  conventions, then take the recommended answer or the smallest reversible
+  choice. A repeated failure is a RETRY with corrected instructions, not an
+  escalation. A missing detail is never a reason to escalate: decide it.
 
 Never instruct anyone to weaken or skip a test, change lint config, skip the
 checks, force-push, rewrite pushed history or widen the ticket's scope.
