@@ -2880,8 +2880,20 @@ async function pendingPrWork(project: Project, cwd: string, ticket: Ticket, last
   const state = known ?? (await readPrState(project, cwd, ticket));
   if (!state || state.snap.state !== 'OPEN') return null;
   await recordCi(ticket, state.snap);
-  const app = await repo.getAppSettings();
-  return prWorkFrom(state.snap, state.threads, { lastFixAt, noiseCommentAuthors: app.prNoiseCommentAuthors, classify: checkClassifier(project, state.required) });
+  const [app, ownerDecidedAt] = await Promise.all([repo.getAppSettings(), lastDecisionAt(ticket.id)]);
+  return prWorkFrom(state.snap, state.threads, {
+    lastFixAt,
+    ownerDecidedAt,
+    noiseCommentAuthors: app.prNoiseCommentAuthors,
+    classify: checkClassifier(project, state.required),
+  });
+}
+
+/** When the owner, or the arbiter or router on their behalf, last gave the ticket feedback. */
+async function lastDecisionAt(ticketId: string): Promise<number | null> {
+  const [{ at }] = await sql<{ at: Date | null }[]>`
+    select max(created_at) as at from messages where ticket_id = ${ticketId} and kind = 'feedback' and author in ('human', 'agent')`;
+  return at ? at.getTime() : null;
 }
 
 interface FixWork {
@@ -3288,7 +3300,7 @@ async function postVerifiedReplies(run: Run, ticket: Ticket, init: Initiative, f
   const failures: string[] = [];
   for (const { thread, reply, resolve } of threadReplies) {
     try {
-      await gh.replyToThread(ticket.worktreePath, ticket.prNumber, thread.rootCommentId, reply.body);
+      await gh.replyToThread(ticket.worktreePath, ticket.prNumber, thread.rootCommentId, reply.body, reply.verdict);
       if (resolve && (fixOnPr || reply.verdict !== 'VALID')) await gh.resolveThread(ticket.worktreePath, thread.id);
     } catch (err) {
       failures.push(`- Reply to ${thread.label} failed: ${(err as Error).message.slice(0, 300)}`);

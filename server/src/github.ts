@@ -2,6 +2,7 @@ import { exec } from './git.ts';
 
 export const FACTORY_MARKER = '<!-- software-factory -->';
 export const COMMENT_PREFIX = '**Claude Bot Automation**';
+const REPLY_VERDICT = /<!-- verdict: ([A-Z-]+) -->/;
 
 export function factoryCommentBody(body: string): string {
   return `${FACTORY_MARKER}\n${COMMENT_PREFIX}\n\n${body}`;
@@ -448,6 +449,8 @@ export interface ReviewThread {
   outdated: boolean;
   /** The factory wrote the newest comment, so the thread waits for its reviewer. */
   awaitingReviewer: boolean;
+  /** The verdict of the factory's newest reply; null when it carries none (replies posted before verdicts were). */
+  answeredAs: string | null;
   lastCommentAt: string;
   comments: { author: string; body: string }[];
 }
@@ -476,6 +479,7 @@ export function threadsFrom(nodes: ThreadNode[]): ReviewThread[] {
         line: t.line,
         outdated: t.isOutdated,
         awaitingReviewer: last.body.includes(FACTORY_MARKER),
+        answeredAs: last.body.includes(FACTORY_MARKER) ? (REPLY_VERDICT.exec(last.body)?.[1] ?? null) : null,
         lastCommentAt: last.createdAt,
         comments: all
           .filter((c) => !c.body.includes(FACTORY_MARKER))
@@ -497,9 +501,9 @@ export async function unresolvedThreads(cwd: string, prNumber: number): Promise<
   return threadsFrom(JSON.parse(r.stdout)?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? []);
 }
 
-export async function replyToThread(cwd: string, prNumber: number, rootCommentId: number, body: string): Promise<void> {
+export async function replyToThread(cwd: string, prNumber: number, rootCommentId: number, body: string, verdict: string): Promise<void> {
   const r = await gh(cwd, [
-    'api', '-X', 'POST', `repos/{owner}/{repo}/pulls/${prNumber}/comments/${rootCommentId}/replies`, '-f', `body=${factoryCommentBody(body)}`,
+    'api', '-X', 'POST', `repos/{owner}/{repo}/pulls/${prNumber}/comments/${rootCommentId}/replies`, '-f', `body=${factoryCommentBody(body)}\n\n<!-- verdict: ${verdict} -->`,
   ]);
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
 }

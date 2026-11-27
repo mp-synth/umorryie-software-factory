@@ -36,7 +36,10 @@ an order:
 - `feedback.md`: the project owner's own words, or an arbiter's decision
   made on the owner's behalf. Authoritative on product decisions; still
   check it against the code. An arbiter decision settles the NEEDS-HUMAN
-  items it answers: act on them instead of blocking again. When the owner
+  items it answers: act on them instead of blocking again. A review thread
+  the factory answered NEEDS-HUMAN comes back once such a decision is made;
+  when the decision is already done on the branch (an earlier round), reply
+  VALID with the commit that does it. When the owner
   states a rule with an example ("names must state intent, e.g. ..."), the
   rule applies to every instance in this ticket's diff, not only the example:
   find them all (`git diff <base>...HEAD`) and list each one in Triage. A note from the

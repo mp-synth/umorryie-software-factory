@@ -67,14 +67,21 @@ test('a human thread the fixer disputes or only partly fixes stays open for them
   for (const verdict of ['INVALID', 'PARTIAL', 'UNCONFIRMED', 'NEEDS-HUMAN']) {
     assert.equal(shouldResolve({ item: 'T1', verdict, body: 'x' }, { rootAuthor: 'jane' }), false, verdict);
   }
-  assert.equal(shouldResolve({ item: 'T1', verdict: 'PARTIAL', body: 'x' }, { rootAuthor: 'cursor[bot]' }), false);
 });
 
-test('a bot thread rejected with a code pointer resolves with or without the [bot] suffix', () => {
-  const invalid = { item: 'T2', verdict: 'INVALID', body: 'x' };
-  assert.equal(shouldResolve(invalid, { rootAuthor: 'cursor', rootIsBot: true }), true);
-  assert.equal(shouldResolve(invalid, { rootAuthor: 'cursor[bot]' }), true);
-  assert.equal(shouldResolve(invalid, { rootAuthor: 'cursor' }), false);
+test('a bot thread rejected or partly fixed resolves with or without the [bot] suffix', () => {
+  for (const verdict of ['INVALID', 'PARTIAL']) {
+    const reply = { item: 'T2', verdict, body: 'x' };
+    assert.equal(shouldResolve(reply, { rootAuthor: 'cursor', rootIsBot: true }), true, verdict);
+    assert.equal(shouldResolve(reply, { rootAuthor: 'cursor[bot]' }), true, verdict);
+    assert.equal(shouldResolve(reply, { rootAuthor: 'cursor' }), false, verdict);
+  }
+});
+
+test('a bot thread waiting for a decision or more evidence stays open', () => {
+  for (const verdict of ['UNCONFIRMED', 'NEEDS-HUMAN']) {
+    assert.equal(shouldResolve({ item: 'T1', verdict, body: 'x' }, { rootAuthor: 'cursor[bot]' }), false, verdict);
+  }
 });
 
 test('top-level comments are answered in the summary; factory-only items stay off the PR', () => {

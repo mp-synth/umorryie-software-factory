@@ -107,6 +107,7 @@ const detail = (patch: Partial<PrDetail['snapshot']> = {}, threadBody = 'rename 
         line: 1,
         outdated: false,
         awaitingReviewer: false,
+        answeredAs: null,
         lastCommentAt: '2026-01-01T10:00:00Z',
         comments: [{ author: 'reviewer', body: threadBody }],
       },

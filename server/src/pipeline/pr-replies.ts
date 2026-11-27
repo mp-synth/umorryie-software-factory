@@ -38,8 +38,12 @@ export function parseRerunIds(md: string): { ids: string[]; unparsed: number } {
   return { ids: [...new Set(found.flat())], unparsed: found.filter((ids) => !ids.length).length };
 }
 
+/** Verdicts that settle a thread: anything else asks the owner for a decision or more evidence. */
+export const SETTLING_VERDICTS = ['VALID', 'PARTIAL', 'INVALID'];
+
+// A person's thread stays open for them to accept a rejection; a bot never answers, so a settled bot thread closes.
 export function shouldResolve(reply: Reply, root: Pick<PrItems['threads'][number], 'rootAuthor' | 'rootIsBot'>): boolean {
-  return reply.verdict === 'VALID' || ((root.rootIsBot ?? isBot(root.rootAuthor)) && reply.verdict === 'INVALID');
+  return reply.verdict === 'VALID' || ((root.rootIsBot ?? isBot(root.rootAuthor)) && SETTLING_VERDICTS.includes(reply.verdict));
 }
 
 type PrComment = PrItems['comments'][number];

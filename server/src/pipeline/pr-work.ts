@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { PrSweepSkip } from '@factory/shared';
 import type { HumanCheck, PrCheck, PrSnapshot, ReviewThread } from '../github.ts';
 import { ACTIONABLE, type CheckVerdict } from './check-policy.ts';
+import { SETTLING_VERDICTS } from './pr-replies.ts';
 
 export interface PrWork {
   snap: PrSnapshot;
@@ -84,9 +85,12 @@ function triageReason(item: { author: string; body: string; authorIsBot?: boolea
 export function prWorkFrom(
   snap: PrSnapshot,
   unresolved: ReviewThread[],
-  opts: { lastFixAt: number | null; noiseCommentAuthors: string[]; classify?: ClassifyCheck },
+  opts: { lastFixAt: number | null; ownerDecidedAt?: number | null; noiseCommentAuthors: string[]; classify?: ClassifyCheck },
 ): PrWork {
   const isNew = (iso: string) => time(iso) > (opts.lastFixAt ?? 0);
+  // A thread the factory left open for a decision goes back to a fixer once the owner or the arbiter gave one.
+  const decidedSinceReply = (t: ReviewThread) =>
+    !SETTLING_VERDICTS.includes(t.answeredAs ?? '') && time(t.lastCommentAt) < (opts.ownerDecidedAt ?? 0);
   const policy = splitByPolicy(snap.failingChecks, opts.classify ?? everyCheckActs);
   const ciStillRunning = policy.actionable.length > 0 && snap.pendingChecks.length > 0;
   const comments = snap.comments.filter((c) => isNew(c.createdAt)).map((c) => ({ item: c, why: triageReason(c, opts.noiseCommentAuthors) }));
@@ -98,7 +102,7 @@ export function prWorkFrom(
     conflicting: snap.mergeable === 'CONFLICTING',
     ciStillRunning,
     failingChecks: ciStillRunning ? [] : policy.actionable,
-    threads: unresolved.filter((t) => !t.awaitingReviewer && (!t.outdated || isNew(t.lastCommentAt))),
+    threads: unresolved.filter((t) => (t.awaitingReviewer ? decidedSinceReply(t) : !t.outdated || isNew(t.lastCommentAt))),
     comments: comments.filter((c) => !c.why).map((c) => c.item),
     reviews: reviews.filter((r) => !r.why).map((r) => r.item),
     waitingOn: policy.waitingOn,

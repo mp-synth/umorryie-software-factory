@@ -179,16 +179,16 @@ test('builds the unresolved threads unresolvedThreads() builds', async () => {
     {
       id: 'PRRT_kwDODL90Ac68ghjF', rootCommentId: 4711909470, rootAuthor: 'cursor', rootIsBot: true,
       path: 'service/billing/controllers/workflows/activities/salesforce_renewal_activities.py', line: 41, outdated: false,
-      awaitingReviewer: false, lastCommentAt: '2026-11-26T17:50:17Z',
+      awaitingReviewer: false, answeredAs: null, lastCommentAt: '2026-11-26T17:50:17Z',
       comments: [{ author: 'cursor', body: '### Retry skip hides incomplete provisioning\n\n**High Severity**\n\nThe retry returns early before the second step runs.' }],
     },
     {
       id: 'PRRT_answered', rootCommentId: 21, rootAuthor: 'reviewer', rootIsBot: false, path: 'b.py', line: null, outdated: true,
-      awaitingReviewer: true, lastCommentAt: '2026-11-25T11:00:00Z', comments: [{ author: 'reviewer', body: 'Why a list here?' }],
+      awaitingReviewer: true, answeredAs: null, lastCommentAt: '2026-11-25T11:00:00Z', comments: [{ author: 'reviewer', body: 'Why a list here?' }],
     },
     {
       id: 'PRRT_ghost', rootCommentId: 31, rootAuthor: 'unknown', rootIsBot: false, path: 'c.py', line: 7, outdated: false,
-      awaitingReviewer: false, lastCommentAt: '2026-11-25T12:00:00Z', comments: [{ author: 'unknown', body: 'Rename this.' }],
+      awaitingReviewer: false, answeredAs: null, lastCommentAt: '2026-11-25T12:00:00Z', comments: [{ author: 'unknown', body: 'Rename this.' }],
     },
   ]);
 });

@@ -30,6 +30,7 @@ const thread = (id: string, patch: Partial<ReviewThread> = {}): ReviewThread => 
   line: 3,
   outdated: false,
   awaitingReviewer: false,
+  answeredAs: null,
   lastCommentAt: '2026-01-01T10:00:00Z',
   comments: [{ author: 'alice', body: 'rename this' }],
   ...patch,
@@ -82,6 +83,17 @@ test('keeps a thread the factory never answered after a fix that succeeded witho
   const afterFix = prWorkFrom(snapshot(), [unanswered, answered], { ...fresh, lastFixAt: Date.parse('2026-01-01T10:00:00Z') });
   assert.deepEqual(afterFix.threads.map((t) => t.id), ['unanswered']);
   assert.equal(prWorkFingerprint(afterFix), prWorkFingerprint(prWorkFrom(snapshot(), [unanswered], fresh)), 'the same thread is not fixed twice');
+});
+
+test('a thread left open for a decision goes back to a fixer once a decision came after the reply', () => {
+  const asked = thread('asked', { awaitingReviewer: true, answeredAs: 'NEEDS-HUMAN', lastCommentAt: '2026-01-01T10:00:00Z', outdated: true });
+  const legacy = thread('legacy', { awaitingReviewer: true, lastCommentAt: '2026-01-01T10:00:00Z' });
+  const settled = thread('settled', { awaitingReviewer: true, answeredAs: 'INVALID', lastCommentAt: '2026-01-01T10:00:00Z' });
+  const repliedAfter = thread('replied-after', { awaitingReviewer: true, answeredAs: 'NEEDS-HUMAN', lastCommentAt: '2026-01-01T12:00:00Z' });
+  const all = [asked, legacy, settled, repliedAfter];
+  const ids = (ownerDecidedAt: number | null) => prWorkFrom(snapshot(), all, { ...fresh, ownerDecidedAt }).threads.map((t) => t.id);
+  assert.deepEqual(ids(null), []);
+  assert.deepEqual(ids(Date.parse('2026-01-01T11:00:00Z')), ['asked', 'legacy']);
 });
 
 test('counts a Bugbot review thread like any other unresolved thread', () => {

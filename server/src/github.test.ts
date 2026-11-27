@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, humanChecksFrom, hungJobAction, hungJobsOf, splitFailingChecks, type ActionsJob, type CheckRun, type HungJob } from './github.ts';
+import { COMMENT_PREFIX, FACTORY_MARKER, factoryCommentBody, ciStateOf, humanChecksFrom, hungJobAction, hungJobsOf, splitFailingChecks, threadsFrom, type ActionsJob, type CheckRun, type HungJob } from './github.ts';
 
 test('starts every factory comment with the automation prefix and keeps the loop marker', () => {
   const body = factoryCommentBody('Fixed the lint error.');
@@ -104,4 +104,30 @@ test('a hung job is started again once per run, whoever re-ran the run before', 
   assert.equal(hungJobAction(hung, { ...second, previous: earlier({ status: 'in_progress', conclusion: '', completedAt: '' }) }, now), 'already-restarted');
   assert.equal(hungJobAction(hung, { ...second, previous: earlier({ conclusion: 'cancelled', startedAt: '2026-11-25T22:00:00Z', completedAt: '2026-11-26T04:20:00Z' }) }, now), 'already-restarted');
   assert.equal(hungJobAction(hung, { ...second, jobAttempt: 1, previous: null }, now), 'superseded');
+});
+
+test('reads the verdict of the factory’s newest thread reply, and none from a reply without one', () => {
+  const node = (id: string, last: string) => ({
+    id,
+    isResolved: false,
+    isOutdated: false,
+    path: 'a.py',
+    line: 1,
+    comments: {
+      nodes: [
+        { databaseId: 1, author: { login: 'cursor', __typename: 'Bot' }, body: 'Bug', createdAt: '2026-01-01T09:00:00Z' },
+        { databaseId: 2, author: { login: 'me', __typename: 'User' }, body: last, createdAt: '2026-01-01T10:00:00Z' },
+      ],
+    },
+  });
+  const threads = threadsFrom([
+    node('decided', `${factoryCommentBody('Decide X.')}\n\n<!-- verdict: NEEDS-HUMAN -->`),
+    node('legacy', factoryCommentBody('Fixed.')),
+    node('person', 'Still wrong.'),
+  ]);
+  assert.deepEqual(threads.map((t) => [t.id, t.awaitingReviewer, t.answeredAs]), [
+    ['decided', true, 'NEEDS-HUMAN'],
+    ['legacy', true, null],
+    ['person', false, null],
+  ]);
 });
