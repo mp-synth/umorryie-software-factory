@@ -148,7 +148,7 @@ test('the supervisor stops a process that prints nothing for the stall time, lon
 
 test('a process that keeps printing is not stalled, however long it runs', async () => {
   const dir = newSpool();
-  launch(dir, 'slow', { stallMs: 400 }, { FAKE_STEPS: '10', FAKE_STEP_MS: '100' });
+  launch(dir, 'slow', { stallMs: 2000 }, { FAKE_STEPS: '30', FAKE_STEP_MS: '100' });
   const { end } = await followAll(dir);
   assert.deepEqual(end.kind === 'exited' && [end.exit.code, end.exit.stalled], [0, false]);
 });
