@@ -69,7 +69,7 @@ import {
   type DecisionText,
 } from './arbiter.ts';
 import { ticketLabel } from './labels.ts';
-import { adoptablePrs, adoptedKey, adoptedTicket, remoteBranchOf, reopenedTicket } from './adopted-prs.ts';
+import { adoptablePrs, adoptedKey, adoptedTicket, branchToCheckOutFromOrigin, remoteBranchOf, reopenedTicket } from './adopted-prs.ts';
 import { asPullRequestSection, isSamePullRequestText, pullRequestText, revisedPullRequestText } from './pull-request.ts';
 import { earlierBranches, rebuildBlocker, startedAbove } from './rebuild.ts';
 import { planTicketSeqs, renameCanceledKeys, replanAwaitsAnswers, revisePlannedTickets, wasApproved } from './replan.ts';
@@ -1771,8 +1771,7 @@ async function readOnlyBase(run: Run, init: Initiative, project: Project): Promi
   }
 }
 
-async function fetchPrHead(project: Project, ticket: Ticket): Promise<void> {
-  const head = ticket.prHeadRef!;
+async function fetchPrHead(project: Project, head: string): Promise<void> {
   const fetch = () => gitx.fetchOrigin(project.repoPath, { refs: [gitx.trackingRefspec(head)] });
   const first = await fetch();
   const r = first.code === 0 ? first : await fetch();
@@ -1780,7 +1779,7 @@ async function fetchPrHead(project: Project, ticket: Ticket): Promise<void> {
 }
 
 async function catchUpWithPrHead(run: Run, project: Project, ticket: Ticket): Promise<void> {
-  await fetchPrHead(project, ticket);
+  await fetchPrHead(project, ticket.prHeadRef!);
   const r = await gitx.git(ticket.worktreePath!, ['merge', '--ff-only', '--quiet', `origin/${ticket.prHeadRef}`]);
   if (r.code !== 0) {
     throw new Error(`${ticket.branch} has diverged from origin/${ticket.prHeadRef}, so the fix would not push cleanly: ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
@@ -1852,10 +1851,11 @@ async function ensureTicketWorktree(run: Run, init: Initiative, project: Project
     await prepareWorktree(run, init, project, restored);
     return restored;
   }
-  if (ticket.prHeadRef) {
-    await log(run, `Checking out ${ticket.prHeadRef} from origin as ${ticket.branch}`);
-    await fetchPrHead(project, ticket);
-    await gitx.ensureWorktree(project.repoPath, wt, ticket.branch!, `origin/${ticket.prHeadRef}`, checkout);
+  const prHead = branchToCheckOutFromOrigin(ticket);
+  if (prHead) {
+    await log(run, `Checking out ${prHead} from origin as ${ticket.branch}`);
+    await fetchPrHead(project, prHead);
+    await gitx.ensureWorktree(project.repoPath, wt, ticket.branch!, `origin/${prHead}`, checkout);
     const checkedOut = await recordWorktree(project, ticket.id, wt, ticket.branch!);
     await prepareWorktree(run, init, project, checkedOut);
     return checkedOut;

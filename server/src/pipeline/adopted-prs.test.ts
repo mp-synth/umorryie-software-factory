@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { OpenPr } from '../github.ts';
-import { adoptablePrs, adoptedTicket, remoteBranchOf, reopenedTicket } from './adopted-prs.ts';
+import { adoptablePrs, adoptedTicket, branchToCheckOutFromOrigin, remoteBranchOf, reopenedTicket } from './adopted-prs.ts';
 
 const pr = (number: number, patch: Partial<OpenPr> = {}): OpenPr => ({
   number,
@@ -51,4 +51,13 @@ test('builds a ticket that fixes the PR on its own branch and is never built fro
 
 test('a factory ticket pushes to the branch it built', () => {
   assert.equal(remoteBranchOf({ branch: 'factory/usage/01-x', prHeadRef: null }), 'factory/usage/01-x');
+});
+
+test('a ticket whose local branch is gone checks out its open PR from origin instead of starting over', () => {
+  const factory = { branch: 'factory/usage/01-x', prHeadRef: null, prNumber: 7, prState: 'OPEN' };
+  assert.equal(branchToCheckOutFromOrigin(factory), 'factory/usage/01-x');
+  assert.equal(branchToCheckOutFromOrigin({ ...factory, branch: 'factory/pr-7', prHeadRef: 'cursor-matej/fix' }), 'cursor-matej/fix');
+  assert.equal(branchToCheckOutFromOrigin({ ...factory, prState: 'MERGED' }), null);
+  assert.equal(branchToCheckOutFromOrigin({ ...factory, prNumber: null, prState: null }), null);
+  assert.equal(branchToCheckOutFromOrigin({ ...factory, branch: null }), null);
 });

@@ -15,6 +15,15 @@ export function remoteBranchOf(t: Pick<Ticket, 'branch' | 'prHeadRef'>): string 
   return t.prHeadRef ?? t.branch;
 }
 
+/**
+ * The branch on origin a ticket's worktree is checked out from when its local branch is gone: the head of its PR.
+ * A new branch from the base would leave the open PR behind and lose its code.
+ */
+export function branchToCheckOutFromOrigin(t: Pick<Ticket, 'branch' | 'prHeadRef' | 'prNumber' | 'prState'>): string | null {
+  if (t.prHeadRef) return t.prHeadRef;
+  return t.branch && t.prNumber && t.prState === 'OPEN' ? t.branch : null;
+}
+
 export interface LivePrs {
   prNumbers: Set<number>;
   /** Branches under these prefixes belong to a live initiative, which opens and links their PRs itself. */
