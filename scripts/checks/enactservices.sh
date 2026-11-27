@@ -88,14 +88,14 @@ env_in_sync() { uv sync --frozen --check >"$scratch/sync.log" 2>&1; }
 
 require_synced_env() {
   [ -x .venv/bin/python ] || { echo "No .venv here: the project's setup command (uv sync --frozen) has not run."; exit 126; }
-  env_in_sync
+  env_in_sync && return 0
   local code=$?
-  if [ "$code" -ne 0 ]; then
-    case "$code" in 126|127) exit "$code" ;; esac
-    echo "The environment does not match this branch's uv.lock or project metadata:"
-    tail -n 20 "$scratch/sync.log"
-    exit 1
-  fi
+  case "$code" in 126|127) exit "$code" ;; esac
+  # A merge of the base branch can bring a new uv.lock; the project's setup command brings the environment along.
+  { uv sync --frozen || uv sync --frozen --offline; } >"$scratch/sync.log" 2>&1 && env_in_sync && return 0
+  echo "The environment does not match this branch's uv.lock or project metadata, even after uv sync --frozen:"
+  tail -n 20 "$scratch/sync.log"
+  exit 1
 }
 
 port_open() { (exec 3<>"/dev/tcp/localhost/$1") 2>/dev/null; }
