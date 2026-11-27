@@ -97,7 +97,7 @@ import { agentUnavailable, pauseReason } from './agent-health.ts';
 import { batteryHold, keepAwake, readBattery } from '../machine-state.ts';
 import { addedDefinitions, checkOwnerRules, renderOwnerRules } from './owner-rules.ts';
 import { escapeRegExp, globPattern } from './globs.ts';
-import { dependsOnTicket, findFeedbackBlocker, gateTarget, nextStackStep, openPrsBelow, sameStackLine, sortBottomUp, StackWorkLanes, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
+import { dependsOnTicket, findFeedbackBlocker, gateTarget, nextStackStep, openPrsBelow, propagationTargets, sameStackLine, sortBottomUp, StackWorkLanes, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
 import { autoMergeStep, landingTops, MERGE_QUEUE_ATTEMPTS_PER_HEAD, possibleDraftPrs } from './auto-merge.ts';
 import { isDrainablePrAttention, PrAttentionQueue, prAttentionFingerprint } from './pr-attention.ts';
 
@@ -4449,7 +4449,8 @@ export async function refreshInitiativeStatus(initiativeId: string): Promise<voi
   const init = await repo.getInitiative(initiativeId);
   if (!init || !['in_progress', 'done'].includes(init.status)) return;
   const tickets = (await repo.listTickets(init.id)).filter((t) => t.status !== 'canceled');
-  const done = tickets.length > 0 && tickets.every((t) => ['approved', 'merged'].includes(t.status));
+  const withFeedback = await getTicketsWithPendingFeedback(init.id);
+  const done = tickets.length > 0 && tickets.every((t) => ['approved', 'merged'].includes(t.status) && !withFeedback.has(t.id));
   if (done && init.status !== 'done') {
     const firstToSeeItDone = await repo.moveInitiativeStatus(init.id, 'in_progress', 'done');
     if (!firstToSeeItDone) return;
@@ -5012,9 +5013,10 @@ async function propagationSecured(ticket: Ticket): Promise<boolean> {
   if (await hasUnpushedCommits(ticket)) return !(await ticketIdle(ticket.id));
   const init = await mustInitiative(ticket.initiativeId);
   const all = await repo.listTickets(init.id);
-  const above = sortBottomUp(
+  const above = propagationTargets(
     all.filter((candidate) => candidate.id !== ticket.id && hasOpenPr(candidate) && dependsOnTicket(candidate, ticket.key, all)),
     all,
+    await getTicketsBlockingStackSync(init.id),
   );
   if (!above.length) return true;
   const source = remoteBranchOf(ticket);

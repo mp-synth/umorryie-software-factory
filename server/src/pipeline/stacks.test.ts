@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TicketStatus } from '@factory/shared';
-import { findFeedbackBlocker, gateTarget, openPrsBelow, getStackDepth, nextStackStep, sameStackLine, sortBottomUp, StackWorkLanes, stackBase, stackChain, stackStepMessage, syncTarget } from './stacks.ts';
+import { findFeedbackBlocker, gateTarget, openPrsBelow, getStackDepth, nextStackStep, propagationTargets, sameStackLine, sortBottomUp, StackWorkLanes, stackBase, stackChain, stackStepMessage, syncTarget } from './stacks.ts';
 
 const ticket = (branch: string, baseRef: string, prNumber: number | null, prState: string | null = 'OPEN', prHeadRef: string | null = null) => ({
   branch,
@@ -179,6 +179,16 @@ test('feedback waits while a ticket below has feedback to fix or is being fixed'
   assert.equal(findFeedbackBlocker(all[2], all, new Set(['c', 'side'])), null);
   const fixing = [stacked('a', [], 'fixing'), stacked('b', ['a'])];
   assert.equal(findFeedbackBlocker(fixing[1], fixing, new Set())?.key, 'a');
+});
+
+test('a handoff waits only for the branches below the first ticket above with work of its own', () => {
+  const all = [stacked('src', []), stacked('a', ['src']), stacked('b', ['a']), stacked('c', ['b']), stacked('side', ['src']), stacked('side2', ['side'])];
+  const above = all.slice(1);
+  const keys = (takingOver: string[]) => propagationTargets(above, all, new Set(takingOver)).map((t) => t.key);
+  assert.deepEqual(keys([]), ['a', 'side', 'b', 'side2', 'c']);
+  assert.deepEqual(keys(['b']), ['a', 'side', 'side2'], 'b and c wait for the fix on b');
+  assert.deepEqual(keys(['a']), ['side', 'side2'], 'another line of the stack is still waited for');
+  assert.deepEqual(keys(['src']), ['a', 'side', 'b', 'side2', 'c'], 'work on the source itself takes nothing over');
 });
 
 test('merged tickets below never hold feedback', () => {

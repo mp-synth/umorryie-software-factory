@@ -72,6 +72,17 @@ export function findFeedbackBlocker<T extends StackMember & { id: string }>(tick
   return null;
 }
 
+// The tickets above a handed-off fix whose branches must hold it before the handoff is done. A ticket with PR work
+// or feedback of its own takes the propagation over: its fixer merges the branch below first, and the tickets
+// above it wait for that fix, so neither it nor they are waited for.
+export function propagationTargets<T extends StackMember & { id: string }>(above: T[], all: T[], takingOver: ReadonlySet<string>): T[] {
+  const owners = above.filter((t) => takingOver.has(t.id));
+  return sortBottomUp(
+    above.filter((t) => !owners.some((owner) => dependsOnTicket(t, owner.key, all))),
+    all,
+  );
+}
+
 export function syncTarget<T extends StackMember & StackFields>(ticket: T, all: T[], baseBranch: string): { parent: T | null; target: string } | null {
   const parent = stackBase(ticket, all);
   if (parent) return isOpenPr(parent) ? { parent, target: remoteBranchOf(parent)! } : null;
