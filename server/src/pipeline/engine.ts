@@ -3401,10 +3401,11 @@ async function reviewAfterFixStarted(ticket: Ticket, fixes: Run[]): Promise<bool
 /**
  * While a ticket below is still taking its part of the same round of fixes, a verified fix waits to be pushed:
  * it goes out once, with the code from below merged in, instead of being pushed now and merged into again.
+ * CI still running below holds nothing: the checks passed locally, and a later failure comes back as PR work.
  */
 async function pushHoldBelow(init: Initiative, ticket: Ticket): Promise<Ticket | null> {
   const all = await repo.listTickets(init.id);
-  const pending = await getTicketsNeedingStackWork(init.id);
+  const pending = new Set([...(await getTicketsWithPendingFeedback(init.id)), ...(await prAttention.propagatingTicketIds(init.id))]);
   for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
     if (below.status === 'fixing' || pending.has(below.id) || fs.existsSync(pushHeldFile(init, below))) return below;
   }
@@ -3991,17 +3992,9 @@ async function getDrainablePrAttention(initiativeId: string): Promise<Set<string
   );
 }
 
-async function getActivePrAttention(initiativeId: string, pendingOnly = false): Promise<Set<string>> {
-  const [drainable, propagating] = await Promise.all([getDrainablePrAttention(initiativeId), prAttention.propagatingTicketIds(initiativeId)]);
-  return pendingOnly ? drainable : new Set([...drainable, ...propagating]);
-}
-
-async function getTicketsNeedingStackWork(initiativeId: string): Promise<Set<string>> {
-  return new Set([...(await getTicketsWithPendingFeedback(initiativeId)), ...(await getActivePrAttention(initiativeId))]);
-}
-
-async function getTicketsBlockingStackSync(initiativeId: string): Promise<Set<string>> {
-  return new Set([...(await getTicketsWithPendingFeedback(initiativeId)), ...(await getActivePrAttention(initiativeId, true))]);
+/** Tickets a fixer may still take up: feedback waiting, or a PR change the sweep has not looked at yet. */
+async function getTicketsWithOwnWork(initiativeId: string): Promise<Set<string>> {
+  return new Set([...(await getTicketsWithPendingFeedback(initiativeId)), ...(await getDrainablePrAttention(initiativeId))]);
 }
 
 // Fixes below a ticket never hold its fixer: it starts at once, and its verified fix waits to be pushed until
@@ -4712,10 +4705,11 @@ async function syncStackOnce(initiativeId: string): Promise<void> {
 /**
  * Why the PR below is not worth merging up yet: it is still changing (being fixed, built or checked, feedback
  * waiting, a verified fix held back) or its pushed head has not passed its checks. Merging it now would be
- * merged again within the hour, and every push re-runs CI on this PR.
+ * merged again within the hour, and every push re-runs CI on this PR. Its CI still running is no reason:
+ * the checks passed locally, and a later failure comes back as PR work.
  */
 async function syncHoldBelow(init: Initiative, project: Project, ticket: Ticket, all: Ticket[]): Promise<Ticket | null> {
-  const pending = await getTicketsBlockingStackSync(init.id);
+  const pending = await getTicketsWithPendingFeedback(init.id);
   for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
     if (!SETTLED_TICKET_STATUSES.includes(below.status) || pending.has(below.id) || fs.existsSync(pushHeldFile(init, below))) return below;
     if (!(await ticketIdle(below.id)) || !(await passedChecksAtPushedHead(project, below))) return below;
@@ -4989,7 +4983,7 @@ async function propagationSecured(ticket: Ticket): Promise<boolean> {
   const above = propagationTargets(
     all.filter((candidate) => candidate.id !== ticket.id && hasOpenPr(candidate) && dependsOnTicket(candidate, ticket.key, all)),
     all,
-    await getTicketsBlockingStackSync(init.id),
+    await getTicketsWithOwnWork(init.id),
   );
   if (!above.length) return true;
   const source = remoteBranchOf(ticket);
@@ -5462,7 +5456,7 @@ async function adoptPrsFor(scope: SweepScope): Promise<void> {
 }
 
 async function drainPrAttention(initiativeId: string): Promise<number> {
-  const ticketIds = [...(await getActivePrAttention(initiativeId, true))];
+  const ticketIds = [...(await getDrainablePrAttention(initiativeId))];
   return ticketIds.length ? sweepOpenPrs({ initiativeId, ticketIds }) : 0;
 }
 
