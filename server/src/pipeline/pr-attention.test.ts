@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PrDetail } from '../pr-view.ts';
 import type { RememberedStorage } from './memory.ts';
-import { PrAttentionQueue, prAttentionFingerprint } from './pr-attention.ts';
+import { isDrainablePrAttention, PrAttentionQueue, prAttentionFingerprint } from './pr-attention.ts';
 
 class MemoryStorage implements RememberedStorage {
   readonly rows = new Map<string, string>();
@@ -68,16 +68,6 @@ test('a comment that arrives during propagation remains queued after the stack s
   assert.deepEqual(await queue.pendingTicketIds('initiative-a'), new Set(['ticket-a']));
 });
 
-test('acknowledges inspected no-work states without deleting claimed or newer attention', async () => {
-  const queue = new PrAttentionQueue(new MemoryStorage());
-  await queue.note('ticket-a', attention('one'));
-  assert.equal(await queue.acknowledge('ticket-a', 'stale'), false);
-  assert.equal(await queue.claim('ticket-a', 'one'), true);
-  assert.equal(await queue.acknowledge('ticket-a', 'one'), false);
-  await queue.releaseClaim('ticket-a', 'one');
-  assert.equal(await queue.acknowledge('ticket-a', 'one'), true);
-});
-
 test('every started sweep owns durable attention and claims a newer observation atomically', async () => {
   const queue = new PrAttentionQueue(new MemoryStorage());
   assert.equal(await queue.claimLatest('ticket-a', attention('fallback'), '2026-01-01T10:00:00Z'), 'fallback');
@@ -130,4 +120,12 @@ test('attention fingerprint moves with review work and settled check details hid
   assert.notEqual(prAttentionFingerprint('light', detail({ pendingChecks: ['test'] })), base);
   assert.notEqual(prAttentionFingerprint('light', detail({ failingChecks: [{ name: 'test', url: null }] as never[] })), base);
   assert.notEqual(prAttentionFingerprint('new-light', detail()), base);
+});
+
+test('only actionable settled tickets hold a stack line as drainable attention', () => {
+  assert.equal(isDrainablePrAttention({ status: 'approved', gateStatus: 'pass' }, false, true), true);
+  assert.equal(isDrainablePrAttention({ status: 'blocked', gateStatus: 'fail' }, false, true), false);
+  assert.equal(isDrainablePrAttention({ status: 'approved', gateStatus: 'infra' }, false, true), false);
+  assert.equal(isDrainablePrAttention({ status: 'approved', gateStatus: 'pass' }, true, true), false);
+  assert.equal(isDrainablePrAttention({ status: 'approved', gateStatus: 'pass' }, false, false), false);
 });

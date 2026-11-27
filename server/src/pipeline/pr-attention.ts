@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { SETTLED_TICKET_STATUSES, type Ticket } from '@factory/shared';
 import type { PrDetail } from '../pr-view.ts';
 import type { RememberedStorage } from './memory.ts';
 import { Remembered } from './memory.ts';
@@ -122,15 +123,6 @@ export class PrAttentionQueue {
     });
   }
 
-  async acknowledge(ticketId: string, fingerprint: string): Promise<boolean> {
-    return this.mutate(ticketId, async () => {
-      const current = await this.rows.get(ticketId);
-      if (!current || current.claimedFingerprint || current.handoffReady || current.propagating || current.fingerprint !== fingerprint) return false;
-      await this.rows.delete(ticketId);
-      return true;
-    });
-  }
-
   async markHandoffReady(ticketId: string): Promise<boolean> {
     return this.mutate(ticketId, async () => {
       const current = await this.rows.get(ticketId);
@@ -187,4 +179,12 @@ export function prAttentionFingerprint(lightFingerprint: string, detail: PrDetai
     )
     .digest('hex')
     .slice(0, 16);
+}
+
+export function isDrainablePrAttention(
+  ticket: Pick<Ticket, 'status' | 'gateStatus'>,
+  hasHeldPush: boolean,
+  sweepEnabled: boolean,
+): boolean {
+  return sweepEnabled && SETTLED_TICKET_STATUSES.includes(ticket.status) && ticket.gateStatus !== 'infra' && !hasHeldPush;
 }

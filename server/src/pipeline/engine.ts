@@ -97,7 +97,7 @@ import { addedDefinitions, checkOwnerRules, renderOwnerRules } from './owner-rul
 import { escapeRegExp, globPattern } from './globs.ts';
 import { dependsOnTicket, findFeedbackBlocker, gateTarget, nextStackStep, openPrsBelow, sameStackLine, sortBottomUp, StackWorkLanes, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
 import { autoMergeStep, landingTops, MERGE_QUEUE_ATTEMPTS_PER_HEAD, possibleDraftPrs } from './auto-merge.ts';
-import { PrAttentionQueue, prAttentionFingerprint } from './pr-attention.ts';
+import { isDrainablePrAttention, PrAttentionQueue, prAttentionFingerprint } from './pr-attention.ts';
 
 export class PipelineError extends Error {
   constructor(message: string, public status = 409) {
@@ -1579,7 +1579,6 @@ async function finishPurposeGate(run: Run, init: Initiative, project: Project, t
   const outcome = await pushIfAhead(run, ticket, marker.purpose === 'repair' ? "the factory's fixes" : 'the merge of its base');
   if (outcome === 'pushed') {
     await systemMessage(run, `${ticketLabel(ticket)}: passed its checks${marker.purpose === 'repair' ? ' after the factory fixed what scripts can' : ' with the branch it targets merged in'}, and pushed.`);
-    await announceHeldPush(run, init, await mustTicket(ticket.id));
   } else if (marker.purpose === 'repair' && outcome === 'current') {
     await systemMessage(run, `${ticketLabel(ticket)}: its checks pass here, so the PR's CI failure needs a fixer that reads the CI log.`);
     await enqueue({ kind: 'fix', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
@@ -1587,6 +1586,7 @@ async function finishPurposeGate(run: Run, init: Initiative, project: Project, t
   } else if (outcome === 'current') {
     await systemMessage(run, `${ticketLabel(ticket)}: passed its checks at the commit its PR shows.`);
   }
+  if (outcome !== 'failed') await announceHeldPush(run, init, await mustTicket(ticket.id));
   await refreshInitiativeStatus(init.id);
   void syncStack(init.id);
 }
@@ -3355,6 +3355,34 @@ function pushHeldFile(init: Initiative, ticket: Ticket): string {
   return path.join(ticketDir(init, ticket), 'push-held.json');
 }
 
+interface HeldPush {
+  fixRunIds: string[];
+  start: string;
+  reviewAfterPush?: boolean;
+  announced?: boolean;
+}
+
+function writeHeldPush(file: string, held: HeldPush): void {
+  write(file, JSON.stringify(held));
+}
+
+function fixRequiresReview(init: Initiative, ticket: Ticket, fixes: Run[]): boolean {
+  return (
+    repo.initiativeSettings(init).autoReview &&
+    (ticket.lastVerdict !== 'APPROVE' || fixes.some((fix) => fs.existsSync(path.join(roundDirOf(init, ticket, fix), 'review.md'))))
+  );
+}
+
+async function reviewAfterFixStarted(ticket: Ticket, fixes: Run[]): Promise<boolean> {
+  const newestFix = fixes[0];
+  if (!newestFix) return false;
+  const [review] = await sql`
+    select 1 from runs
+    where ticket_id = ${ticket.id} and kind = 'review' and queued_at > ${newestFix.queuedAt}
+    limit 1`;
+  return !!review;
+}
+
 /**
  * While a ticket below is still taking its part of the same round of fixes, a verified fix waits to be pushed:
  * it goes out once, with the code from below merged in, instead of being pushed now and merged into again.
@@ -3374,9 +3402,10 @@ async function pushVerified(run: Run, init: Initiative, project: Project, ticket
   const wt = ticket.worktreePath!;
   const start = opts.start ?? (await verifyRangeStart(init, ticket, fixes));
   const commits = (await gitx.git(wt, ['log', '--reverse', '--first-parent', '--format=- `%h` %s', `${start}..HEAD`])).stdout.trim();
+  const reviewAfterPush = fixRequiresReview(init, ticket, fixes);
   const hold = commits && ticket.prNumber && project.checksCommand?.trim() ? await pushHoldBelow(init, ticket) : null;
   if (hold) {
-    write(pushHeldFile(init, ticket), JSON.stringify({ fixRunIds: fixes.map((f) => f.id), start }));
+    writeHeldPush(pushHeldFile(init, ticket), { fixRunIds: fixes.map((f) => f.id), start, reviewAfterPush });
     await repo.updateTicket(ticket.id, { status: settledStatus(ticket), blockedReason: null });
     await systemMessage(run, `${ticketLabel(ticket)}: the fix is ready; it is pushed once ${ticketLabel(hold)} below it has its fixes in, together with them, so the PR is pushed and tested once.`);
     return;
@@ -3384,9 +3413,7 @@ async function pushVerified(run: Run, init: Initiative, project: Project, ticket
   const pushed = commits && s.createPrs ? await publish(run, init, project, ticket) : false;
   await announcePush(run, init, ticket, fixes, pushed ? commits : '', !commits || !!pushed);
   if (pushed && !opts.verified) await log(run, "Pushed without a verifier: the round's only commits are the factory's own (merges and autofix).");
-  const fixDirs = fixes.map((f) => roundDirOf(init, ticket, f));
-  const fixedFactoryReview = fixDirs.some((d) => fs.existsSync(path.join(d, 'review.md')));
-  if ((fixedFactoryReview || ticket.lastVerdict !== 'APPROVE') && s.autoReview) {
+  if (reviewAfterPush) {
     await enqueueAutoReview(run, init, await mustTicket(ticket.id));
   } else {
     await repo.updateTicket(ticket.id, { status: settledStatus(ticket), blockedReason: null });
@@ -3403,11 +3430,19 @@ async function announcePush(run: Run, init: Initiative, ticket: Ticket, fixes: R
 async function announceHeldPush(run: Run, init: Initiative, ticket: Ticket): Promise<void> {
   const file = pushHeldFile(init, ticket);
   if (!fs.existsSync(file)) return;
-  const held = JSON.parse(fs.readFileSync(file, 'utf8')) as { fixRunIds: string[]; start: string };
-  fs.rmSync(file, { force: true });
+  const held = JSON.parse(fs.readFileSync(file, 'utf8')) as HeldPush;
   const fixes = await runsById(held.fixRunIds);
-  const commits = (await gitx.git(ticket.worktreePath!, ['log', '--reverse', '--first-parent', '--format=- `%h` %s', `${held.start}..HEAD`])).stdout.trim();
-  await announcePush(run, init, ticket, fixes, commits, true);
+  if (!held.announced) {
+    const commits = (await gitx.git(ticket.worktreePath!, ['log', '--reverse', '--first-parent', '--format=- `%h` %s', `${held.start}..HEAD`])).stdout.trim();
+    await announcePush(run, init, ticket, fixes, commits, true);
+    held.announced = true;
+    writeHeldPush(file, held);
+  }
+  if (held.reviewAfterPush ?? fixRequiresReview(init, ticket, fixes)) {
+    const activeReview = await activeRunFor(init.id, ticket.id, ['review']);
+    if (!activeReview && !(await reviewAfterFixStarted(ticket, fixes))) await enqueueAutoReview(run, init, await mustTicket(ticket.id));
+  }
+  fs.rmSync(file, { force: true });
 }
 
 async function afterVerify(run: Run, step: StepResult, state: StepStates['verify']): Promise<void> {
@@ -3870,9 +3905,29 @@ async function getTicketsWithPendingFeedback(initiativeId: string): Promise<Set<
   return new Set(rows.map((r) => r.ticketId));
 }
 
+async function getDrainablePrAttention(initiativeId: string): Promise<Set<string>> {
+  const sweepEnabled = (await repo.getAppSettings()).sweepOpenPrs;
+  if (!sweepEnabled) return new Set();
+  const [init, tickets, pending] = await Promise.all([
+    repo.getInitiative(initiativeId),
+    repo.listTickets(initiativeId),
+    prAttention.pendingTicketIds(initiativeId),
+  ]);
+  if (!init) return new Set();
+  return new Set(
+    tickets
+      .filter(
+        (ticket) =>
+          pending.has(ticket.id) &&
+          isDrainablePrAttention(ticket, fs.existsSync(pushHeldFile(init, ticket)), sweepEnabled),
+      )
+      .map((ticket) => ticket.id),
+  );
+}
+
 async function getActivePrAttention(initiativeId: string, pendingOnly = false): Promise<Set<string>> {
-  if (!(await repo.getAppSettings()).sweepOpenPrs) return new Set();
-  return pendingOnly ? prAttention.pendingTicketIds(initiativeId) : prAttention.ticketIds(initiativeId);
+  const [drainable, propagating] = await Promise.all([getDrainablePrAttention(initiativeId), prAttention.propagatingTicketIds(initiativeId)]);
+  return pendingOnly ? drainable : new Set([...drainable, ...propagating]);
 }
 
 async function getTicketsNeedingStackWork(initiativeId: string): Promise<Set<string>> {
@@ -5175,6 +5230,12 @@ async function sweepTicket(t: Ticket, manual: boolean, light?: LightPr): Promise
   }
 }
 
+async function acknowledgePrAttention(t: Ticket, fingerprint: string): Promise<void> {
+  if (!(await prAttention.claim(t.id, fingerprint))) return;
+  await prAttention.markHandoffReady(t.id);
+  await completeSweepHandoffIfIdle(t.id);
+}
+
 async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Promise<boolean> {
   if (!manual && t.gateStatus === 'infra') return false;
   if (!(await ticketIdle(t.id))) return false;
@@ -5202,7 +5263,7 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
       sweeps.schedule(t.initiativeId, MERGEABILITY_RECHECK_MS, () => sweepOpenPrs({ initiativeId: t.initiativeId }));
     }
     await noteSweepSkip(cwd, t, read, false);
-    if (attention) await prAttention.acknowledge(t.id, attention.fingerprint);
+    if (attention) await acknowledgePrAttention(t, attention.fingerprint);
     return false;
   }
   mergeabilityRechecks.known(t.id);
@@ -5224,7 +5285,8 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
     if (light && SEEN_SKIPS.includes(decision.reason)) await sweepSeen.set(t.id, { fingerprint: light.fingerprint, at: Date.now() });
     if (decision.reason === 'already-tried') await stopUnmergeablePr(init, t, decision.work);
     if (decision.reason === 'stack-below' && unready) await startPurposeGate(init, unready, 'readiness');
-    if (attention) await prAttention.acknowledge(t.id, attention.fingerprint);
+    const waitsForRunningChecks = decision.reason === 'ci-running' && hasPrWork(decision.work);
+    if (attention && !waitsForRunningChecks) await acknowledgePrAttention(t, attention.fingerprint);
     return false;
   }
   if (decision.kind === 'rerun') {
@@ -5234,7 +5296,7 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
       if (outcome === 'rerun') await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${r.name} failed in tests this PR doesn't touch, so the factory re-ran it once instead of starting a fixer.`);
     }
     await noteSweepSkip(cwd, t, decision.work, false, { reason: 'rerun', why: `Re-ran ${runs.map((r) => r.name).join(', ')} once: the failing tests are outside this PR's changes.` });
-    if (attention) await prAttention.acknowledge(t.id, attention.fingerprint);
+    if (attention) await acknowledgePrAttention(t, attention.fingerprint);
     return false;
   }
   const fingerprint = sweepDecisionFingerprint(decision);
@@ -5246,7 +5308,7 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
   if (!(await fixRoundAllowed(init, t, `${describePrWork(decision.work)} on ${decision.work.snap.url}`))) {
     if (attentionFingerprint && (await ticketIdle(t.id))) {
       await prAttention.releaseClaim(t.id, attentionFingerprint);
-      await prAttention.acknowledge(t.id, attentionFingerprint);
+      await acknowledgePrAttention(t, attentionFingerprint);
     }
     return false;
   }
