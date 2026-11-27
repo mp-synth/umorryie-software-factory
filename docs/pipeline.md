@@ -82,16 +82,15 @@ checks command) and pushes only when it passes, then the next PR up follows.
 A merge that conflicts or breaks the checks goes to the cheaper fixer; with
 auto-fix off, or when a fixer already tried that same merge, the ticket waits
 for you. Projects without a checks command keep the old push-at-once merge.
-During a round of your feedback, a fix that is verified waits to be pushed
-until the fixes below it are in, and goes out once, with them; the router can
-mark a route `(independent)` so its fixer starts at once instead of waiting. Once everything below a PR has merged, the PR
+A fixer never waits for the fixes below its PR: it starts at once, and once it
+is verified its fix waits to be pushed until the fixes below are in, and goes
+out once, with them. Once everything below a PR has merged, the PR
 targets the base branch. When GitHub rewrites a branch itself (**Rebase stack**,
 or the rebase after the bottom PR merges), the factory's copy follows it unless
 it holds unpushed commits. The factory merges rather than rebases, so GitHub may
 ask you to **Rebase stack** before it merges a stack.
 
-A stack is fixed bottom-up, and each PR is ready before the one above it takes
-a fix. The checks merge the branch a PR targets (the PR below, or the base
+Every PR in a stack is fixed at once. The checks merge the branch a PR targets (the PR below, or the base
 branch) into it first, as CI does, and a fixer starts on a stacked PR only
 once every open PR below it passed its checks at the commit it shows on GitHub.
 When one hasn't (a stack sync merged into it), the factory runs its checks

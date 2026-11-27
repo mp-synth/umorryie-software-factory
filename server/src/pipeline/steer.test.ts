@@ -20,10 +20,9 @@ Naming lives in 01, the retry in 03.
 
 test('routes are read per ticket heading', () => {
   assert.deepEqual(parseRoutes(route), [
-    { ref: 'api-client', instructions: '1. Rename `fetchAll` to `listAll` (`src/api.ts:12`).', independent: false },
-    { ref: '03-retry', instructions: '1. Retry twice, not five times.', independent: false },
+    { ref: 'api-client', instructions: '1. Rename `fetchAll` to `listAll` (`src/api.ts:12`).' },
+    { ref: '03-retry', instructions: '1. Retry twice, not five times.' },
   ]);
-  assert.deepEqual(parseRoutes('ROUTE: TICKETS\n\n## Ticket api-client (independent)\n1. Drop the comment.'), [{ ref: 'api-client', instructions: '1. Drop the comment.', independent: true }]);
   assert.equal(routeReason(route), 'Naming lives in 01, the retry in 03.');
   assert.deepEqual(parseRoutes('ROUTE: NONE\n\n## Reason\nAll merged.'), []);
 });
@@ -41,10 +40,10 @@ test('two sections for one ticket reach it as one set of instructions, and unkno
   const tickets = [ticket(1, 'api-client'), ticket(3, 'retry')];
   const { routed, unknownRefs } = routesByTicket(
     [
-      { ref: 'api-client', instructions: '1. Rename `fetchAll`.', independent: false },
-      { ref: 'nowhere', instructions: '1. Lost.', independent: false },
-      { ref: '01-api-client', instructions: '1. Drop the debug log.', independent: false },
-      { ref: 'retry', instructions: '1. Retry twice.', independent: false },
+      { ref: 'api-client', instructions: '1. Rename `fetchAll`.' },
+      { ref: 'nowhere', instructions: '1. Lost.' },
+      { ref: '01-api-client', instructions: '1. Drop the debug log.' },
+      { ref: 'retry', instructions: '1. Retry twice.' },
     ],
     tickets,
   );

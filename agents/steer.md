@@ -84,14 +84,6 @@ When the owner names the PRs to change, route to those tickets only.
   move.
 - Keep the owner's intent and scope. Don't add changes they didn't ask for,
   and don't drop any they did.
-- Mark a route `(independent)` in its heading when its change needs nothing
-  from the changes you route to the tickets below it in the same stack: a
-  rename, a comment or helper only this ticket's diff has. Its fixer then
-  starts at once instead of waiting for the fixes below, and its PR is still
-  pushed once, after them. Leave the mark off when the change depends on code
-  a lower ticket changes now (a moved function, a renamed name it calls, a
-  changed contract).
-
 ## Write route.md
 
 ```markdown
@@ -108,7 +100,7 @@ feedback changes.
 ## Drop
 - <key>
 
-## Ticket <key> (independent)
+## Ticket <key>
 What this ticket's fixer must change, as numbered items: the owner's point
 (quote it), the files and lines it concerns (`path:line`), and the result
 the owner expects. Decide what, not how: the fixer reads the code and plans
@@ -121,7 +113,6 @@ the change itself.
 - `## Drop` only when the owner asks to drop tickets, one `- <key>` line
   each; leave it out otherwise.
 - One `## Ticket <key>` section per ticket you route to, with the key from
-  `tickets.md`, followed by `(independent)` when it qualifies. Leave them out
-  with `ROUTE: REPLAN` and `ROUTE: NONE`.
+  `tickets.md`. Leave them out with `ROUTE: REPLAN` and `ROUTE: NONE`.
 
 When you're done, reply with one line: the first line of route.md.

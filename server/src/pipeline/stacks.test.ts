@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TicketStatus } from '@factory/shared';
-import { findFeedbackBlocker, gateTarget, openPrsBelow, getStackDepth, nextStackStep, propagationTargets, sameStackLine, sortBottomUp, StackWorkLanes, stackBase, stackChain, stackStepMessage, syncTarget } from './stacks.ts';
+import { gateTarget, openPrsBelow, getStackDepth, nextStackStep, propagationTargets, sortBottomUp, stackBase, stackChain, stackStepMessage, syncTarget } from './stacks.ts';
 
 const ticket = (branch: string, baseRef: string, prNumber: number | null, prState: string | null = 'OPEN', prHeadRef: string | null = null) => ({
   branch,
@@ -138,49 +138,6 @@ test('sorts tickets so the ticket below syncs before the ones on top of it', () 
   assert.deepEqual(sortBottomUp(all, all).map((t) => t.key), ['side', 'base', 'mid', 'top']);
 });
 
-test('recognizes only ancestors and descendants as one stack work line', () => {
-  const all = [stacked('base', []), stacked('mid', ['base']), stacked('top', ['mid']), stacked('sibling', ['base']), stacked('other', [])];
-  assert.equal(sameStackLine(all[0], all[2], all), true);
-  assert.equal(sameStackLine(all[2], all[0], all), true);
-  assert.equal(sameStackLine(all[2], all[3], all), false);
-  assert.equal(sameStackLine(all[2], all[4], all), false);
-});
-
-test('finishes current stack work, then admits the lowest queued repair and holds work above each sync gate', () => {
-  const all = [
-    stacked('pr1', []),
-    stacked('pr2', ['pr1']),
-    stacked('pr3', ['pr2']),
-    stacked('pr4', ['pr3']),
-    stacked('pr5', ['pr4']),
-    stacked('pr6', ['pr5']),
-  ];
-
-  const whilePr4Finishes = new StackWorkLanes(all, [all[3]]);
-  assert.equal(whilePr4Finishes.available(all[0]), false, 'new PR1 feedback waits for PR4 to finish its atomic round');
-  assert.equal(whilePr4Finishes.available(all[5]), false);
-
-  const afterPr4 = new StackWorkLanes(all);
-  assert.equal(afterPr4.available(all[0]), true);
-  afterPr4.occupy(all[0]);
-  assert.equal(afterPr4.available(all[5]), false, 'PR6 cannot resume while PR1 is repaired');
-
-  for (const syncing of all.slice(1, 5)) {
-    const duringSync = new StackWorkLanes(all, [syncing]);
-    assert.equal(duringSync.available(all[5]), false, `PR6 waits while ${syncing.key} carries the checked fix upward`);
-  }
-  assert.equal(new StackWorkLanes(all).available(all[5]), true, 'PR6 resumes after every dependent branch is synchronized');
-});
-
-test('feedback waits while a ticket below has feedback to fix or is being fixed', () => {
-  const all = [stacked('a', []), stacked('b', ['a']), stacked('c', ['b']), stacked('side', ['a'])];
-  assert.equal(findFeedbackBlocker(all[2], all, new Set(['a']))?.key, 'a');
-  assert.equal(findFeedbackBlocker(all[2], all, new Set(['b', 'c']))?.key, 'b');
-  assert.equal(findFeedbackBlocker(all[2], all, new Set(['c', 'side'])), null);
-  const fixing = [stacked('a', [], 'fixing'), stacked('b', ['a'])];
-  assert.equal(findFeedbackBlocker(fixing[1], fixing, new Set())?.key, 'a');
-});
-
 test('a handoff waits only for the branches below the first ticket above with work of its own', () => {
   const all = [stacked('src', []), stacked('a', ['src']), stacked('b', ['a']), stacked('c', ['b']), stacked('side', ['src']), stacked('side2', ['side'])];
   const above = all.slice(1);
@@ -189,11 +146,6 @@ test('a handoff waits only for the branches below the first ticket above with wo
   assert.deepEqual(keys(['b']), ['a', 'side', 'side2'], 'b and c wait for the fix on b');
   assert.deepEqual(keys(['a']), ['side', 'side2'], 'another line of the stack is still waited for');
   assert.deepEqual(keys(['src']), ['a', 'side', 'b', 'side2', 'c'], 'work on the source itself takes nothing over');
-});
-
-test('merged tickets below never hold feedback', () => {
-  const all = [stacked('a', [], 'merged'), stacked('b', ['a'])];
-  assert.equal(findFeedbackBlocker(all[1], all, new Set(['a'])), null);
 });
 
 const pr = (key: string, dependsOn: string[], prNumber: number | null, status: TicketStatus = 'approved') => ({

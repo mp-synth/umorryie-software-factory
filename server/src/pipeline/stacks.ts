@@ -39,39 +39,6 @@ export function dependsOnTicket<T extends StackMember>(ticket: T, key: string, a
   return false;
 }
 
-export function sameStackLine<T extends StackMember>(a: T, b: T, all: T[]): boolean {
-  return dependsOnTicket(a, b.key, all) || dependsOnTicket(b, a.key, all);
-}
-
-export class StackWorkLanes<T extends StackMember> {
-  private readonly occupied: T[];
-
-  constructor(
-    private readonly all: T[],
-    occupied: T[] = [],
-  ) {
-    this.occupied = [...occupied];
-  }
-
-  available(ticket: T): boolean {
-    return !this.occupied.some((busy) => sameStackLine(ticket, busy, this.all));
-  }
-
-  occupy(ticket: T): void {
-    if (!this.occupied.includes(ticket)) this.occupied.push(ticket);
-  }
-}
-
-// Feedback on a stacked ticket waits while a ticket below it still has feedback to fix or is being fixed:
-// its fix reaches this branch through the stack sync, and only then does this ticket's fixer see it.
-export function findFeedbackBlocker<T extends StackMember & { id: string }>(ticket: T, all: T[], withPendingFeedback: ReadonlySet<string>): T | null {
-  let steps = 0;
-  for (let below = stackBase(ticket, all); below && steps < all.length; below = stackBase(below, all), steps++) {
-    if (below.status === 'fixing' || withPendingFeedback.has(below.id)) return below;
-  }
-  return null;
-}
-
 // The tickets above a handed-off fix whose branches must hold it before the handoff is done. A ticket with PR work
 // or feedback of its own takes the propagation over: its fixer merges the branch below first, and the tickets
 // above it wait for that fix, so neither it nor they are waited for.
