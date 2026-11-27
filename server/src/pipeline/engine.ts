@@ -4939,6 +4939,13 @@ async function noteSweepSkip(cwd: string, t: Ticket, work: PrWork, alreadyHandle
   }
 }
 
+/** Records that the PR's feedback waits for the fixes below it; the hold is decided without asking GitHub, and so is this. */
+async function noteSweepHold(t: Ticket, hold: string): Promise<void> {
+  const skip = { headSha: t.ciHeadSha ?? t.prSweepSkip?.headSha ?? '', reason: 'stack-below' as const, why: `Its feedback ${hold}.`, waitingOn: [], ignored: [] };
+  if (t.prSweepSkip && sameSweepSkip(t.prSweepSkip, skip)) return;
+  await repo.setPrSweepSkip(t.id, { ...skip, since: new Date().toISOString() });
+}
+
 const MAX_LOGS_PER_PR = 6;
 const FAILED_TEST_PATH = /^(?:FAILED|ERROR)\s+([\w./-]+\.py)/gm;
 
@@ -5043,9 +5050,14 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
   if (!(await ticketIdle(t.id))) return false;
   const init = await mustInitiative(t.initiativeId);
   // A fixer started now would also take the ticket's feedback, which is written for the code the fixes below
-  // it will bring. The sweep looks again once they are in; a conflict until then is expected.
+  // it will bring. The sweep looks again once they are in. A ticket without feedback of its own does not wait:
+  // its review threads are about its own diff, and CI or a conflict caused below is the stack-below rule's.
   const all = await repo.listTickets(init.id);
-  if (!manual && (await findFixBelowHold(init, t, all))) return false;
+  const hold = !manual && (await repo.pendingFeedback(init.id, t.id)).length ? await findFixBelowHold(init, t, all) : null;
+  if (hold) {
+    await noteSweepHold(t, hold);
+    return false;
+  }
   if (!manual && light && t.prSweepSkip && (await sweepSawUnchanged(t.id, light.fingerprint))) return false;
   const project = await mustProject(init.projectId);
   const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;
