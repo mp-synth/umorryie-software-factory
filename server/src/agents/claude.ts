@@ -45,6 +45,9 @@ export interface AgentResult {
 }
 
 const KILL_LINGERING_PROCESSES_AFTER_RESULT_MS = 30_000;
+// An agent that ended its turn before writing its output waits for a background command it started (pre-commit
+// hooks, a test run), which wakes it again; Bash gives a command at most 10 minutes too.
+const WAIT_FOR_OUTPUT_AFTER_RESULT_MS = 10 * 60_000;
 // No agent tool call may run this long (Bash stops at 10 minutes), so this much silence means it hung.
 export const AGENT_STALL_MS = 20 * 60_000;
 // Agents and the tools they run yield to the server, so a machine full of agents still answers the UI and schedules work.
@@ -405,13 +408,25 @@ function followAgent(
   return { ...superviseSpool(dir, opts.pid, onLines, conclude), scratchDir: opts.scratchDir };
 }
 
-export function startDetachedAgent(spec: AgentSpec, dir: string, sink: AgentSink, marker?: string): DetachedAgentHandle {
+export function startDetachedAgent(spec: AgentSpec, dir: string, sink: AgentSink, marker?: string, outputPath?: string): DetachedAgentHandle {
   const bin = resolveClaudeBin();
   if (!bin) return { pid: undefined, scratchDir: null, cancel: () => {}, leave: () => {}, abandon: () => {}, done: Promise.resolve(CLAUDE_NOT_FOUND) };
   const scratchDir = makeScratchDir();
   const pid = launchSpooled(
     dir,
-    { bin, args: buildArgs(spec), cwd: spec.cwd, timeoutMs: spec.timeoutMs, lingerAfterResultMs: KILL_LINGERING_PROCESSES_AFTER_RESULT_MS, stallMs: AGENT_STALL_MS, scratchDir, marker, nice: AGENT_NICE },
+    {
+      bin,
+      args: buildArgs(spec),
+      cwd: spec.cwd,
+      timeoutMs: spec.timeoutMs,
+      lingerAfterResultMs: KILL_LINGERING_PROCESSES_AFTER_RESULT_MS,
+      outputPath,
+      lingerForOutputMs: WAIT_FOR_OUTPUT_AFTER_RESULT_MS,
+      stallMs: AGENT_STALL_MS,
+      scratchDir,
+      marker,
+      nice: AGENT_NICE,
+    },
     isolatedAgentEnv(spec, scratchDir),
   );
   return followAgent(dir, { pid, scratchDir, from: NOTHING_STORED, redact: spec.redact }, sink);

@@ -971,7 +971,7 @@ async function runAgent<K extends AgentKind>(
   const guardsTicketWorktree = READ_ONLY_WORKTREE_STEPS.includes(opts.kind) && opts.cwd !== project.repoPath;
   const snapshot: AgentSnapshot = { startedAt, worktreeBefore: guardsTicketWorktree ? await gitx.worktreeState(opts.cwd) : null };
   const spool = await repo.insertRunSpool(run.id, spoolDir(run.id), { agent: snapshot, step: state } satisfies PersistedStep);
-  const handle = startDetachedAgent(spec, spool.dir, storeEvents(run), opts.runDir);
+  const handle = startDetachedAgent(spec, spool.dir, storeEvents(run), opts.runDir, opts.outputPath);
   const launched = await repo.updateRun(run.id, { pid: handle.pid ?? null });
   if (handle.scratchDir) await log(run, `Scratch space for this session only (TMPDIR): ${handle.scratchDir}`);
   const step = await collectAgent(launched, handle, snapshot, spec.redact);

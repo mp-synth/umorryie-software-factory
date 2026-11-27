@@ -21,6 +21,9 @@ export interface SpoolLaunch {
   cwd: string;
   timeoutMs: number;
   lingerAfterResultMs?: number;
+  /** The file the agent's turn ends by writing; while it is missing the agent may linger `lingerForOutputMs` instead. */
+  outputPath?: string;
+  lingerForOutputMs?: number;
   stallMs?: number;
   scratchDir?: string | null;
   marker?: string;

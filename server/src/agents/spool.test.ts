@@ -161,6 +161,34 @@ test('the supervisor stops a process that lingers after its result line', async 
   assert.deepEqual(end.kind === 'exited' && [end.exit.timedOut, end.exit.canceled], [false, false]);
 });
 
+test('an agent its own background command wakes after its result line works on until its next result', async () => {
+  const dir = newSpool();
+  launch(dir, 'wakes', { lingerAfterResultMs: 300 }, { FAKE_WAKE_MS: '100', FAKE_STEPS: '6' });
+  const { lines, end } = await followAll(dir);
+  assert.deepEqual(typesOf(lines), ['system', 'result', 'system', ...Array(6).fill('assistant'), 'result']);
+  assert.deepEqual(end.kind === 'exited' && [end.exit.code, end.exit.signal], [0, null]);
+});
+
+test('an agent that has not written its output yet gets longer to wake after its result line', async () => {
+  const dir = newSpool();
+  const outputPath = path.join(dir, 'fix.md');
+  launch(dir, 'wakes', { lingerAfterResultMs: 200, outputPath, lingerForOutputMs: 10_000 }, { FAKE_WAKE_MS: '600' });
+  const { lines, end } = await followAll(dir);
+  assert.deepEqual(typesOf(lines), ['system', 'result', 'system', 'assistant', 'result']);
+  assert.deepEqual(end.kind === 'exited' && [end.exit.code, end.exit.signal], [0, null]);
+});
+
+test('an agent that lingers after writing its output is stopped as soon as one without an output file', async () => {
+  const dir = newSpool();
+  const outputPath = path.join(dir, 'fix.md');
+  fs.writeFileSync(outputPath, 'FIX: APPLIED');
+  const startedAt = Date.now();
+  launch(dir, 'linger', { lingerAfterResultMs: 200, outputPath, lingerForOutputMs: 60_000 });
+  const { end } = await followAll(dir);
+  assert.ok(Date.now() - startedAt < 10_000);
+  assert.deepEqual(end.kind === 'exited' && [end.exit.timedOut, end.exit.canceled], [false, false]);
+});
+
 test('cancel stops the process tree and the exit says it was canceled', async () => {
   const dir = newSpool();
   const pid = launch(dir, 'hang');

@@ -81,6 +81,21 @@ switch (process.env.FAKE_SCENARIO) {
     result();
     setInterval(() => {}, 1000);
     break;
+  case 'wakes':
+    init();
+    result({ result: 'waiting for a background command' });
+    setTimeout(() => {
+      init();
+      let step = 0;
+      const timer = setInterval(() => {
+        step += 1;
+        emit({ type: 'assistant', message: { content: [{ type: 'text', text: `step ${step}` }] } });
+        if (step < Number(process.env.FAKE_STEPS ?? 1)) return;
+        clearInterval(timer);
+        result();
+      }, 100);
+    }, Number(process.env.FAKE_WAKE_MS ?? 100));
+    break;
   case 'background-child': {
     const background = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     background.unref();

@@ -68,17 +68,26 @@ function isResultLine(line) {
   }
 }
 
-function resultWatcher(onResult) {
+function lastLineWatcher(onLastLine) {
   let unfinished = '';
-  let seen = false;
   return (chunk) => {
-    if (seen) return;
     const lines = (unfinished + chunk.toString('utf8')).split('\n');
     unfinished = lines.pop();
-    if (!lines.some(isResultLine)) return;
-    seen = true;
-    onResult();
+    const last = lines.filter((line) => line.trim()).pop();
+    if (last !== undefined) onLastLine(last);
   };
+}
+
+// An agent exits after its result line, so a process still there then is stopped. A line after the result means
+// a background command the agent started woke it again: it has until its next result. While its output file is
+// still missing it may be waiting for such a command, so it gets longer.
+function lingerAfterResult() {
+  let timer = null;
+  const lingerMs = () => (launch.outputPath && !fs.existsSync(launch.outputPath) ? launch.lingerForOutputMs ?? launch.lingerAfterResultMs : launch.lingerAfterResultMs);
+  return lastLineWatcher((line) => {
+    clearTimeout(timer);
+    timer = isResultLine(line) ? setTimeout(stopProcessTree, lingerMs()) : null;
+  });
 }
 
 // Time limits count only the time the machine is awake: a laptop that sleeps under a run must not find it
@@ -150,7 +159,7 @@ function run() {
       })
     : null;
   const noteProgress = () => stall?.restart();
-  const watch = launch.lingerAfterResultMs ? resultWatcher(() => setTimeout(stopProcessTree, launch.lingerAfterResultMs)) : () => {};
+  const watch = launch.lingerAfterResultMs ? lingerAfterResult() : () => {};
   child.stdout.on('data', (chunk) => {
     fs.writeSync(out, chunk);
     noteProgress();
