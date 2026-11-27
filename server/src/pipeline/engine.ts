@@ -224,6 +224,7 @@ async function failedRoundsInARow(ticketId: string): Promise<number> {
       and f.queued_at > greatest(
         (select max(queued_at) from runs where ticket_id = ${ticketId} and kind = 'execute' and status = 'succeeded'),
         (select max(finished_at) from runs where ticket_id = ${ticketId} and kind = 'review' and status = 'succeeded' and ${repo.isVerdict(['VERDICT:APPROVE'])}),
+        (select max(finished_at) from runs where ticket_id = ${ticketId} and kind = 'arbitrate' and status = 'succeeded' and ${repo.isVerdict(['DECISION:RETRY'])}),
         (select max(m.created_at) from messages m where m.ticket_id = ${ticketId} and m.author = 'human'),
         'epoch'::timestamptz)`;
   return n;
