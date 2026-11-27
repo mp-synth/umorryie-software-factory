@@ -17,7 +17,7 @@ import * as gh from '../github.ts';
 import * as repo from '../repo.ts';
 import { baseCheckout } from './base-checkout.ts';
 import { readRebuildState, stateAfterReset, writeRebuildState, type ReusedPr } from './pr-reuse.ts';
-import { CI_POLL_MS, CiHeadsSeen, ciSettledRed, ciWorthPolling } from './ci-poll.ts';
+import { CI_POLL_MS, CiHeadsSeen, ciSettledGreen, ciSettledRed, ciWorthPolling } from './ci-poll.ts';
 import { BASE_WATCH_MS, BaseHeads, MERGEABILITY_RECHECK_MS, MergeabilityRechecks, SWEEP_AFTER_BASE_MOVE_MS, parseLsRemote } from './base-watch.ts';
 import { SweepSchedule } from './sweep-schedule.ts';
 import {
@@ -4437,6 +4437,8 @@ export async function syncPrs(initiativeId: string): Promise<number> {
 
 // Head commit per ticket whose settled red CI the poll already handed to the PR sweep.
 const ciHandedOver = new Remembered<string>('ci-handed-over');
+// Head commit per ticket whose settled green CI the poll already handed to the PR sweep.
+const ciGreenHandedOver = new Remembered<string>('ci-green-handed-over');
 const ciHeadsSeen = new CiHeadsSeen();
 // The light fingerprint of each PR the poll last read in full: an unchanged one is not read again.
 const ciLightSeen = new Map<string, string>();
@@ -4454,7 +4456,7 @@ async function pollRunningCi(): Promise<void> {
       and t.status not in ('merged','canceled')`;
   const due: (Ticket & { projectId: string })[] = [];
   for (const t of open) if (ciWorthPolling(t, await ciHandedOver.get(t.id), ciHeadsSeen.since(t.id, t.ciHeadSha))) due.push(t);
-  const settledRed = new Set<string>();
+  const settled = new Set<string>();
   for (const projectId of new Set(due.map((t) => t.projectId))) {
     const project = await repo.getProject(projectId);
     const repoRef = project?.remoteUrl ? repoOf(project.remoteUrl) : null;
@@ -4475,12 +4477,15 @@ async function pollRunningCi(): Promise<void> {
       await recordCi(t, snap);
       if (ciSettledRed(snap, await ciHandedOver.get(t.id))) {
         await ciHandedOver.set(t.id, snap.headRefOid);
-        settledRed.add(t.initiativeId);
+        settled.add(t.initiativeId);
+      } else if (ciSettledGreen(snap, await ciGreenHandedOver.get(t.id))) {
+        await ciGreenHandedOver.set(t.id, snap.headRefOid);
+        settled.add(t.initiativeId);
       }
     }
   }
-  if (settledRed.size && (await repo.getAppSettings()).sweepOpenPrs) {
-    for (const initiativeId of settledRed) void sweepOpenPrs({ initiativeId }).catch((err) => console.warn('[ci-poll]', (err as Error).message));
+  if (settled.size && (await repo.getAppSettings()).sweepOpenPrs) {
+    for (const initiativeId of settled) void sweepOpenPrs({ initiativeId }).catch((err) => console.warn('[ci-poll]', (err as Error).message));
   }
 }
 

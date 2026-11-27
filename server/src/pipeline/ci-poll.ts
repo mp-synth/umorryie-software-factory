@@ -4,7 +4,7 @@ import type { PrCi } from '../github.ts';
 /** How often open factory PRs whose CI is still running are checked, between the 5-minute PR syncs. */
 export const CI_POLL_MS = 60_000;
 
-type CiSnapshot = Pick<PrCi, 'failingChecks' | 'pendingChecks' | 'headRefOid'>;
+type CiSnapshot = Pick<PrCi, 'failingChecks' | 'pendingChecks' | 'finishedChecks' | 'headRefOid'>;
 
 /** Right after a push GitHub may list no checks yet; `none` is polled this long before it counts as a PR without CI. */
 const NO_CHECKS_YET_MS = 10 * 60_000;
@@ -47,4 +47,13 @@ export function ciWorthPolling(
  */
 export function ciSettledRed(snap: CiSnapshot, handedOverSha: string | undefined): boolean {
   return snap.failingChecks.length > 0 && snap.pendingChecks.length === 0 && snap.headRefOid !== handedOverSha;
+}
+
+/**
+ * CI has finished green at this head. Bot reviewers post their findings as their own check finishes, so the
+ * PR's review threads are in now: the poll hands it to the sweep at once instead of at its next 15-minute
+ * pass. Each head commit is handed over once, apart from a red one, so an early green wave hides no failure.
+ */
+export function ciSettledGreen(snap: CiSnapshot, handedOverSha: string | undefined): boolean {
+  return snap.finishedChecks > 0 && snap.failingChecks.length === 0 && snap.pendingChecks.length === 0 && snap.headRefOid !== handedOverSha;
 }
