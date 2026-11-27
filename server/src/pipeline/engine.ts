@@ -65,6 +65,7 @@ import {
   renderTicketSituation,
   retryStep,
   ticketApprovalBlocker,
+  waitingPlanNeedsArbiter,
   waitsForOwner,
   type Decision,
   type DecisionText,
@@ -3579,6 +3580,22 @@ function resumeBlockedArbiters(finishingTicketId?: string): Promise<void> {
   return pass;
 }
 
+async function recoverWaitingPlans(): Promise<void> {
+  const plans = await sql<Initiative[]>`select * from initiatives where status in ('awaiting_approval','needs_input','failed')`;
+  for (const init of plans) {
+    if (!repo.initiativeSettings(init).autoArbiter || (await activeRunFor(init.id, null, ['arbitrate']))) continue;
+    const [stopped, arbiter] = await Promise.all([repo.lastStoppedStep(init.id, null), repo.latestRun(init.id, null, 'arbitrate')]);
+    const [applied] = arbiter ? await sql`select 1 from messages where run_id = ${arbiter.id} and author = 'agent' limit 1` : [];
+    if (!waitingPlanNeedsArbiter(init, stopped, arbiter, !!applied)) continue;
+    const current = await repo.getInitiative(init.id);
+    if (!current || !repo.initiativeSettings(current).autoArbiter || !waitsForOwner(current, null) || (await activeRunFor(init.id, null, ['arbitrate']))) continue;
+    await enqueue({ kind: 'arbitrate', initiativeId: current.id, ticketId: null, trigger: 'auto' });
+    await systemMessage({ initiativeId: current.id }, 'Fable is deciding how to continue the stopped plan.').catch((err) =>
+      console.warn('[arbiter-resume]', `${current.title}: ${(err as Error).message}`),
+    );
+  }
+}
+
 async function resumeBlockedArbitersOnce(finishingTicketId?: string): Promise<void> {
   const blocked = await sql<Ticket[]>`
     select t.* from tickets t join initiatives i on i.id = t.initiative_id
@@ -5729,6 +5746,7 @@ export async function recoverOnStartup(): Promise<void> {
     attentionToRetry.add(attention.initiativeId);
   }
   for (const initiativeId of new Set([...attentionToRetry, ...(await prAttention.initiativeIds())])) await drainPrAttention(initiativeId);
+  await recoverWaitingPlans();
   const withMergedWorktrees = await sql<{ id: string }[]>`
     select distinct initiative_id as id from tickets where status = 'merged' and worktree_path is not null`;
   for (const r of withMergedWorktrees) await cleanUpMergedTickets(r.id).catch((e) => console.warn('[recover]', e.message));

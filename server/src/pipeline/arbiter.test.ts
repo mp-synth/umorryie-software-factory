@@ -13,6 +13,7 @@ import {
   renderTicketSituation,
   retryStep,
   ticketApprovalBlocker,
+  waitingPlanNeedsArbiter,
   waitsForOwner,
 } from './arbiter.ts';
 
@@ -44,6 +45,16 @@ test('startup re-arms a blocked ticket only when work stopped after its latest a
   assert.equal(blockedTicketNeedsArbiter(blockedTicket, stopped, run('2026-01-01T10:20:00Z', 'DECISION: ESCALATE'), true), false);
   assert.equal(blockedTicketNeedsArbiter(ticket('approved'), stopped, null, false), false);
   assert.equal(blockedTicketNeedsArbiter(blockedTicket, null, null, false), false);
+});
+
+test('startup re-arms a waiting plan unless its latest escalation was applied', () => {
+  const run = (queuedAt: string, verdict: string | null = null) => ({ queuedAt, finishedAt: queuedAt, verdict });
+  const stopped = run('2026-01-01T10:10:00Z');
+  assert.equal(waitingPlanNeedsArbiter(init('needs_input'), stopped, null, false), true);
+  assert.equal(waitingPlanNeedsArbiter(init('failed'), stopped, run('2026-01-01T10:20:00Z', 'DECISION: RETRY'), true), true);
+  assert.equal(waitingPlanNeedsArbiter(init('awaiting_approval'), stopped, run('2026-01-01T10:20:00Z', 'DECISION: ESCALATE'), false), true);
+  assert.equal(waitingPlanNeedsArbiter(init('awaiting_approval'), stopped, run('2026-01-01T10:20:00Z', 'DECISION: ESCALATE'), true), false);
+  assert.equal(waitingPlanNeedsArbiter(init('in_progress'), stopped, null, false), false);
 });
 
 test('a failed step runs again; a finished one goes to a builder or a fixer', () => {

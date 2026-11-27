@@ -154,18 +154,21 @@ the code, then writes one of three decisions:
   binding feedback, labelled as the arbiter's (it answers planner questions by
   number). A step that crashed runs again.
 - **ESCALATE**: only for what you alone have (credentials, access, money,
-  production data or another external action no agent can perform). The ticket
-  keeps waiting with the arbiter's one-line question on top of the reason.
+  production data or another external action no agent can perform). The plan
+  or ticket keeps waiting with the arbiter's one-line question on top of the
+  reason.
 
 Product and code decisions never wait for you: Fable takes the recommended
 answer or the smallest reversible choice and keeps retrying until the checks
-and review pass. On server startup and once a minute afterward, a blocked
-ticket whose work stopped after its latest arbiter decision is handed back to
-Fable automatically.
+and review pass. On server startup, a waiting plan is handed back to Fable; a
+blocked ticket is checked then and once a minute afterward. A scope is re-armed
+when it has no decision, new work stopped after the last decision, RETRY or
+APPROVE left it waiting, or a decision crashed before it was applied. An
+applied ESCALATE remains waiting.
 Anything you do on that plan or ticket stops a running arbiter, and a decision
-that lands after you acted is not applied. While it decides, the ticket shows
-**Arbiter deciding** instead of **Needs you**, and the dashboard doesn't count
-it as waiting on you.
+that lands after you acted is not applied. While it decides, the plan or ticket
+shows **Arbiter deciding** instead of **Needs you**, and the dashboard doesn't
+count it as waiting on you.
 
 Every 15 minutes a PR sweep does the same on its own for every open factory PR
 across all initiatives, and for every other open PR you opened in a

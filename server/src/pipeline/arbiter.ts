@@ -30,16 +30,34 @@ export function waitsForOwner(init: Pick<Initiative, 'status'>, ticket: Pick<Tic
   return ticket.status === 'blocked' && INITIATIVES_WITH_LIVE_TICKETS.includes(init.status);
 }
 
+function waitingScopeNeedsArbiter(
+  waiting: boolean,
+  stopped: Pick<Run, 'queuedAt' | 'finishedAt'> | null,
+  arbiter: Pick<Run, 'queuedAt' | 'verdict'> | null,
+  arbiterApplied: boolean,
+): boolean {
+  if (!waiting || !stopped) return false;
+  const stoppedAt = new Date(stopped.finishedAt ?? stopped.queuedAt).getTime();
+  if (!arbiter || new Date(arbiter.queuedAt).getTime() < stoppedAt) return true;
+  return !arbiterApplied || !/^DECISION:\s*ESCALATE/i.test(arbiter.verdict ?? '');
+}
+
 export function blockedTicketNeedsArbiter(
   ticket: Pick<Ticket, 'status'>,
   stopped: Pick<Run, 'queuedAt' | 'finishedAt'> | null,
   arbiter: Pick<Run, 'queuedAt' | 'verdict'> | null,
   arbiterApplied: boolean,
 ): boolean {
-  if (ticket.status !== 'blocked' || !stopped) return false;
-  const stoppedAt = new Date(stopped.finishedAt ?? stopped.queuedAt).getTime();
-  if (!arbiter || new Date(arbiter.queuedAt).getTime() < stoppedAt) return true;
-  return !arbiterApplied || !/^DECISION:\s*ESCALATE/i.test(arbiter.verdict ?? '');
+  return waitingScopeNeedsArbiter(ticket.status === 'blocked', stopped, arbiter, arbiterApplied);
+}
+
+export function waitingPlanNeedsArbiter(
+  init: Pick<Initiative, 'status'>,
+  stopped: Pick<Run, 'queuedAt' | 'finishedAt'> | null,
+  arbiter: Pick<Run, 'queuedAt' | 'verdict'> | null,
+  arbiterApplied: boolean,
+): boolean {
+  return waitingScopeNeedsArbiter(PLAN_STATUSES_WAITING_FOR_OWNER.includes(init.status), stopped, arbiter, arbiterApplied);
 }
 
 export function retryStep(stopped: Pick<Run, 'kind' | 'status'> | null): RunKind {
