@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CiHeadsSeen, ciSettledGreen, ciSettledRed, ciWorthPolling } from './ci-poll.ts';
+import type { LightPr } from '../pr-view.ts';
+import { CiHeadsSeen, ciSettledGreen, ciSettledRed, ciWorthPolling, prsWorthReading } from './ci-poll.ts';
 
 const failing = [{ name: 'test-unit', url: null, conclusion: 'FAILURE' }] as never[];
 
@@ -51,4 +52,25 @@ test('CI that finished green is handed over once per head, so review threads bot
   assert.equal(ciSettledGreen({ failingChecks: [], pendingChecks: [], finishedChecks: 3, headRefOid: 'a1' }, 'a1'), false, 'already handed over');
   assert.equal(ciSettledGreen({ failingChecks: [], pendingChecks: [], finishedChecks: 0, headRefOid: 'a1' }, undefined), false, 'no check reported yet');
   assert.equal(ciSettledGreen({ failingChecks: failing, pendingChecks: [], finishedChecks: 3, headRefOid: 'a1' }, undefined), false, 'red');
+});
+
+const light = (fingerprint: string): LightPr =>
+  ({
+    number: 1,
+    fingerprint,
+  }) as LightPr;
+
+test('reads a green PR again when a comment or review changes its light fingerprint', () => {
+  const ticket = { id: 'ticket-a', prNumber: 1 };
+  assert.deepEqual(prsWorthReading([ticket], new Map([[1, light('new')]]), new Map([['ticket-a', 'old']]), new Set()), [
+    { ticket, light: light('new'), lightChanged: true },
+  ]);
+});
+
+test('keeps polling pending CI details even when the light rollup fingerprint stays unchanged', () => {
+  const ticket = { id: 'ticket-a', prNumber: 1 };
+  assert.deepEqual(prsWorthReading([ticket], new Map([[1, light('same')]]), new Map([['ticket-a', 'same']]), new Set(['ticket-a'])), [
+    { ticket, light: light('same'), lightChanged: false },
+  ]);
+  assert.deepEqual(prsWorthReading([ticket], new Map([[1, light('same')]]), new Map([['ticket-a', 'same']]), new Set()), []);
 });

@@ -17,9 +17,9 @@ import * as gh from '../github.ts';
 import * as repo from '../repo.ts';
 import { baseCheckout } from './base-checkout.ts';
 import { readRebuildState, stateAfterReset, writeRebuildState, type ReusedPr } from './pr-reuse.ts';
-import { CI_POLL_MS, CiHeadsSeen, ciSettledGreen, ciSettledRed, ciWorthPolling } from './ci-poll.ts';
+import { CI_POLL_MS, CiHeadsSeen, ciSettledGreen, ciSettledRed, ciWorthPolling, prsWorthReading } from './ci-poll.ts';
 import { BASE_WATCH_MS, BaseHeads, MERGEABILITY_RECHECK_MS, MergeabilityRechecks, SWEEP_AFTER_BASE_MOVE_MS, parseLsRemote } from './base-watch.ts';
-import { SweepSchedule } from './sweep-schedule.ts';
+import { CoalescedRun, SweepSchedule } from './sweep-schedule.ts';
 import {
   arbiterDir,
   askDir,
@@ -90,13 +90,14 @@ import { invalidateRemembered, Remembered } from './memory.ts';
 import { periodic } from './periodic.ts';
 import { classifyCheck } from './check-policy.ts';
 import { decideSweep, sweepDecisionFingerprint } from './sweep-decision.ts';
-import { failedJobLog, failedJobLogs, ghRunner, githubBudget, openPrsLight, prDetails, prStates, repoOf, type LightPr } from '../pr-view.ts';
+import { failedJobLog, failedJobLogs, ghRunner, githubBudget, openPrsLight, prDetails, prStates, repoOf, type LightPr, type PrDetail } from '../pr-view.ts';
 import { agentUnavailable, pauseReason } from './agent-health.ts';
 import { batteryHold, keepAwake, readBattery } from '../machine-state.ts';
 import { addedDefinitions, checkOwnerRules, renderOwnerRules } from './owner-rules.ts';
 import { escapeRegExp, globPattern } from './globs.ts';
-import { findFeedbackBlocker, gateTarget, nextStackStep, openPrsBelow, sortBottomUp, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
+import { dependsOnTicket, findFeedbackBlocker, gateTarget, nextStackStep, openPrsBelow, sameStackLine, sortBottomUp, StackWorkLanes, stackBase, stackChain, stackStepMessage, syncTarget, type StackStep } from './stacks.ts';
 import { autoMergeStep, landingTops, MERGE_QUEUE_ATTEMPTS_PER_HEAD, possibleDraftPrs } from './auto-merge.ts';
+import { PrAttentionQueue, prAttentionFingerprint } from './pr-attention.ts';
 
 export class PipelineError extends Error {
   constructor(message: string, public status = 409) {
@@ -109,6 +110,7 @@ type ServerExit = 'leave-agents-running' | 'stop-agents';
 
 const active = new Map<string, RunControls>();
 const inFlight = new Map<string, Run>();
+const wrappingUpTickets = new Map<string, Run>();
 const settling = new Set<string>();
 let serverExit: ServerExit | null = null;
 const syncingWorktrees = new Map<string, Promise<void>>();
@@ -627,12 +629,19 @@ async function failRun(run: Run, err: unknown): Promise<void> {
   }
 }
 
-async function wrapUp(run: Run): Promise<void> {
+async function wrapUp(run: Run): Promise<boolean> {
   await discardSpool(run.id).catch((err) => console.warn('[spool]', err.message));
-  if (run.ticketId) await releaseSweepClaimIfIdle(run.ticketId).catch((err) => console.warn('[pr-sweep]', err.message));
   await actOnPendingFeedback(run).catch((err) => console.warn('[feedback]', err.message));
   await handOverToArbiter(run).catch((err) => console.warn('[arbiter]', err.message));
   await syncIfReviewHeld(run).catch((err) => console.warn('[held-reviews]', err.message));
+  if (run.ticketId && !isSideRun(run.kind) && (await ticketIdle(run.ticketId))) {
+    try {
+      return await completeSweepHandoffIfIdle(run.ticketId);
+    } catch (err) {
+      console.warn('[pr-sweep]', (err as Error).message);
+    }
+  }
+  return false;
 }
 
 // A sync that ran while this ticket was busy held off: its own held review or PR, and the PRs stacked on it,
@@ -643,22 +652,41 @@ async function syncIfReviewHeld(run: Run): Promise<void> {
   if (!init || !ticket) return;
   const held = [heldReviewMarker(init, ticket), heldPublishMarker(init, ticket)].some((m) => fs.existsSync(m));
   const all = held || !hasOpenPr(ticket) ? [] : await repo.listTickets(init.id);
-  if (held || all.some((t) => hasOpenPr(t) && stackBase(t, all)?.id === ticket.id)) void syncStack(init.id);
+  if (held || all.some((t) => hasOpenPr(t) && stackBase(t, all)?.id === ticket.id)) await syncStack(init.id);
 }
 
 async function supervise(run: Run, work: () => Promise<void>): Promise<void> {
   inFlight.set(run.id, run);
   let leftRunning = false;
+  let completed = false;
   try {
     await work();
+    completed = true;
   } catch (err) {
     leftRunning = err instanceof LeftRunning;
     if (!leftRunning) await failRun(run, err);
   } finally {
     active.delete(run.id);
     canceling.delete(run.id);
+    if (completed && run.ticketId && !isSideRun(run.kind)) {
+      try {
+        const finished = await repo.getRun(run.id);
+        if (finished?.status === 'succeeded' && (await ticketIdle(run.ticketId, run.id))) await prAttention.markHandoffReady(run.ticketId);
+      } catch (err) {
+        console.warn('[pr-attention]', (err as Error).message);
+      }
+    }
+    if (!leftRunning && run.ticketId && !isSideRun(run.kind)) wrappingUpTickets.set(run.ticketId, run);
     inFlight.delete(run.id);
-    if (!leftRunning) await wrapUp(run);
+    let drainAttention = false;
+    try {
+      if (!leftRunning) drainAttention = await wrapUp(run);
+    } catch (err) {
+      console.error('[run cleanup]', err);
+    } finally {
+      if (run.ticketId && wrappingUpTickets.get(run.ticketId)?.id === run.id) wrappingUpTickets.delete(run.ticketId);
+    }
+    if (drainAttention) await drainPrAttention(run.initiativeId).catch((err) => console.warn('[pr-attention]', err.message));
     settling.delete(run.id);
     kick();
   }
@@ -3333,7 +3361,7 @@ function pushHeldFile(init: Initiative, ticket: Ticket): string {
  */
 async function pushHoldBelow(init: Initiative, ticket: Ticket): Promise<Ticket | null> {
   const all = await repo.listTickets(init.id);
-  const pending = await getTicketsWithPendingFeedback(init.id);
+  const pending = await getTicketsNeedingStackWork(init.id);
   for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
     if (below.status === 'fixing' || pending.has(below.id) || fs.existsSync(pushHeldFile(init, below))) return below;
   }
@@ -3842,6 +3870,19 @@ async function getTicketsWithPendingFeedback(initiativeId: string): Promise<Set<
   return new Set(rows.map((r) => r.ticketId));
 }
 
+async function getActivePrAttention(initiativeId: string, pendingOnly = false): Promise<Set<string>> {
+  if (!(await repo.getAppSettings()).sweepOpenPrs) return new Set();
+  return pendingOnly ? prAttention.pendingTicketIds(initiativeId) : prAttention.ticketIds(initiativeId);
+}
+
+async function getTicketsNeedingStackWork(initiativeId: string): Promise<Set<string>> {
+  return new Set([...(await getTicketsWithPendingFeedback(initiativeId)), ...(await getActivePrAttention(initiativeId))]);
+}
+
+async function getTicketsBlockingStackSync(initiativeId: string): Promise<Set<string>> {
+  return new Set([...(await getTicketsWithPendingFeedback(initiativeId)), ...(await getActivePrAttention(initiativeId, true))]);
+}
+
 // Marks routed feedback whose change needs nothing from the fixes below it in the same wave.
 const INDEPENDENT_ROUTE = '<!-- route: independent -->';
 
@@ -3854,8 +3895,12 @@ async function onlyIndependentFeedback(init: Initiative, ticket: Ticket): Promis
 // or is being fixed, or its pushed fix has not been merged into this branch. Feedback the router marked
 // independent starts at once; its verified fix waits to be pushed until the fixes below are in.
 async function findFixBelowHold(init: Initiative, ticket: Ticket, all: Ticket[]): Promise<string | null> {
+  const [feedback, attention] = await Promise.all([getTicketsWithPendingFeedback(init.id), getActivePrAttention(init.id)]);
+  const blocker = findFeedbackBlocker(ticket, all, new Set([...feedback, ...attention]));
+  if (blocker && attention.has(blocker.id)) {
+    return `waits for new PR work on ${ticketLabel(blocker)} below it, and starts once that fix is merged into its branch`;
+  }
   if (await onlyIndependentFeedback(init, ticket)) return null;
-  const blocker = findFeedbackBlocker(ticket, all, await getTicketsWithPendingFeedback(init.id));
   return blocker ? `waits for the fix on ${ticketLabel(blocker)} below it, and starts once that fix is merged into its branch` : null;
 }
 
@@ -4440,52 +4485,63 @@ const ciHandedOver = new Remembered<string>('ci-handed-over');
 // Head commit per ticket whose settled green CI the poll already handed to the PR sweep.
 const ciGreenHandedOver = new Remembered<string>('ci-green-handed-over');
 const ciHeadsSeen = new CiHeadsSeen();
-// The light fingerprint of each PR the poll last read in full: an unchanged one is not read again.
+const prAttention = new PrAttentionQueue();
+// The light fingerprint of each PR the minute watcher last read in full: an unchanged settled one costs no detail query.
 const ciLightSeen = new Map<string, string>();
 
 /**
- * Between the 5-minute PR syncs, PRs whose CI is still running are checked every minute: a green
- * result unblocks dependents waiting for it, and a red one that has finished goes to the PR sweep at
- * once instead of at its next 15-minute pass. One light GitHub call per repo says which PRs changed;
- * only those are read in full, in one batched call.
+ * Every minute, one light GitHub call per repo watches every tracked open PR, including green ones, for
+ * comments, reviews, head/base changes and check transitions. Changed PRs and still-running CI are read in
+ * one detailed batch. Attention is persisted before a sweep is attempted, so a busy ticket is retried as
+ * soon as its current round finishes instead of losing this hand-off until the 15-minute safety sweep.
  */
 async function pollRunningCi(): Promise<void> {
   const open = await sql<(Ticket & { projectId: string })[]>`
     select t.*, i.project_id from tickets t join initiatives i on i.id = t.initiative_id
     where i.status in ('in_progress','done') and t.pr_number is not null and t.pr_state = 'OPEN'
       and t.status not in ('merged','canceled')`;
-  const due: (Ticket & { projectId: string })[] = [];
-  for (const t of open) if (ciWorthPolling(t, await ciHandedOver.get(t.id), ciHeadsSeen.since(t.id, t.ciHeadSha))) due.push(t);
-  const settled = new Set<string>();
-  for (const projectId of new Set(due.map((t) => t.projectId))) {
+  const sweepEnabled = (await repo.getAppSettings()).sweepOpenPrs;
+  const ciDue = new Set<string>();
+  for (const t of open) {
+    if (ciWorthPolling(t, await ciHandedOver.get(t.id), ciHeadsSeen.since(t.id, t.ciHeadSha))) ciDue.add(t.id);
+  }
+  const changedInitiatives = new Set<string>();
+  for (const projectId of new Set(open.map((t) => t.projectId))) {
     const project = await repo.getProject(projectId);
     const repoRef = project?.remoteUrl ? repoOf(project.remoteUrl) : null;
     if (!project || !repoRef) continue;
     const run = ghRunner(project.repoPath);
     const light = await openPrsLight(run, repoRef);
     if (!light) continue;
-    const mine = due.filter((t) => t.projectId === projectId);
-    const changed = mine.filter((t) => {
-      const lp = light.find((p) => p.number === t.prNumber);
-      return lp && ciLightSeen.get(t.id) !== lp.fingerprint;
-    });
-    const details = changed.length ? await prDetails(run, repoRef, changed.map((t) => t.prNumber!)) : null;
-    for (const t of changed) {
-      const snap = details?.get(t.prNumber!)?.snapshot;
-      if (!snap || snap.state !== 'OPEN') continue;
-      ciLightSeen.set(t.id, light.find((p) => p.number === t.prNumber)!.fingerprint);
+    const mine = open.filter((t) => t.projectId === projectId);
+    const lightByNumber = new Map(light.map((pr) => [pr.number, pr]));
+    const watched = prsWorthReading(mine, lightByNumber, ciLightSeen, ciDue);
+    const details = watched.length ? await prDetails(run, repoRef, watched.map(({ ticket }) => ticket.prNumber!)) : new Map<number, PrDetail>();
+    for (const { ticket: t, light: lp, lightChanged } of watched) {
+      const detail = details?.get(t.prNumber!);
+      if (!detail || detail.snapshot.state !== 'OPEN') continue;
+      const snap = detail.snapshot;
       await recordCi(t, snap);
-      if (ciSettledRed(snap, await ciHandedOver.get(t.id))) {
+      const settledRed = ciSettledRed(snap, await ciHandedOver.get(t.id));
+      const settledGreen = ciSettledGreen(snap, await ciGreenHandedOver.get(t.id));
+      if (sweepEnabled && (lightChanged || settledRed || settledGreen)) {
+        await prAttention.note(t.id, {
+          initiativeId: t.initiativeId,
+          fingerprint: prAttentionFingerprint(lp.fingerprint, detail),
+          headSha: snap.headRefOid,
+        });
+        changedInitiatives.add(t.initiativeId);
+      }
+      ciLightSeen.set(t.id, lp.fingerprint);
+      if (settledRed) {
         await ciHandedOver.set(t.id, snap.headRefOid);
-        settled.add(t.initiativeId);
-      } else if (ciSettledGreen(snap, await ciGreenHandedOver.get(t.id))) {
+      } else if (settledGreen) {
         await ciGreenHandedOver.set(t.id, snap.headRefOid);
-        settled.add(t.initiativeId);
       }
     }
   }
-  if (settled.size && (await repo.getAppSettings()).sweepOpenPrs) {
-    for (const initiativeId of settled) void sweepOpenPrs({ initiativeId }).catch((err) => console.warn('[ci-poll]', (err as Error).message));
+  if (changedInitiatives.size && sweepEnabled) {
+    for (const initiativeId of changedInitiatives) void drainPrAttention(initiativeId).catch((err) => console.warn('[ci-poll]', (err as Error).message));
   }
 }
 
@@ -4496,29 +4552,24 @@ async function autoSyncPrs(): Promise<void> {
   await Promise.all(rows.map((r) => syncPrs(r.id).catch((e) => console.warn('[autoSyncPrs]', e.message))));
 }
 
-const stackSyncRerun = new Map<string, boolean>();
+const stackSyncs = new CoalescedRun();
 const conflictsSentToFixer = new Remembered<string | null>('conflict-sent');
 // Tickets whose merge conflict is posted as feedback but whose fixer waits for the fixes below them.
 const heldConflicts = new Remembered<string | null>('conflict-held');
 
-async function syncStack(initiativeId: string): Promise<void> {
-  if (stackSyncRerun.has(initiativeId)) {
-    stackSyncRerun.set(initiativeId, true);
-    return;
-  }
-  try {
-    do {
-      stackSyncRerun.set(initiativeId, false);
-      await syncStackOnce(initiativeId);
-    } while (stackSyncRerun.get(initiativeId));
-  } catch (err) {
-    console.warn('[stack-sync]', (err as Error).message);
-  } finally {
-    stackSyncRerun.delete(initiativeId);
-  }
-  // A review held for the ticket below starts once the sync merged that ticket's approved code.
-  await startHeldReviews(initiativeId, { fromSync: true }).catch((err) => console.warn('[held-reviews]', (err as Error).message));
-  await startHeldFeedback(initiativeId).catch((err) => console.warn('[held-feedback]', (err as Error).message));
+function syncStack(initiativeId: string): Promise<boolean> {
+  return stackSyncs.run(initiativeId, async () => {
+    try {
+        await syncStackOnce(initiativeId);
+      // A review or feedback held for the ticket below starts once this pass merged its approved code.
+      await startHeldReviews(initiativeId, { fromSync: true }).catch((err) => console.warn('[held-reviews]', (err as Error).message));
+      await startHeldFeedback(initiativeId).catch((err) => console.warn('[held-feedback]', (err as Error).message));
+      return true;
+    } catch (err) {
+      console.warn('[stack-sync]', (err as Error).message);
+      return false;
+    }
+  });
 }
 
 // One fetch for the whole stack; a branch deleted on GitHub (a merged PR) must not stop the others.
@@ -4553,6 +4604,7 @@ async function syncStackOnce(initiativeId: string): Promise<void> {
     } catch (err) {
       stackSyncErrors.set(t.id, (err as Error).message);
       console.warn('[stack-sync]', `${ticketLabel(t)}: ${(err as Error).message}`);
+      throw err;
     } finally {
       syncingWorktrees.delete(t.id);
     }
@@ -4565,7 +4617,7 @@ async function syncStackOnce(initiativeId: string): Promise<void> {
  * merged again within the hour, and every push re-runs CI on this PR.
  */
 async function syncHoldBelow(init: Initiative, project: Project, ticket: Ticket, all: Ticket[]): Promise<Ticket | null> {
-  const pending = await getTicketsWithPendingFeedback(init.id);
+  const pending = await getTicketsBlockingStackSync(init.id);
   for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
     if (!SETTLED_TICKET_STATUSES.includes(below.status) || pending.has(below.id) || fs.existsSync(pushHeldFile(init, below))) return below;
     if (!(await ticketIdle(below.id)) || !(await passedChecksAtPushedHead(project, below))) return below;
@@ -4839,20 +4891,72 @@ async function ticketIdle(ticketId: string, except?: string): Promise<boolean> {
   return !busy;
 }
 
-async function releaseSweepClaimIfIdle(ticketId: string): Promise<void> {
-  if (await ticketIdle(ticketId)) await repo.releasePrSweepClaim(ticketId, { forgetState: false });
+function scheduleSweepHandoffRetry(ticket: Ticket): void {
+  sweeps.schedule(`handoff:${ticket.id}`, CI_POLL_MS, async () => {
+    if (await completeSweepHandoffIfIdle(ticket.id)) await drainPrAttention(ticket.initiativeId);
+  });
+}
+
+async function propagationSecured(ticket: Ticket): Promise<boolean> {
+  if (await hasUnpushedCommits(ticket)) return !(await ticketIdle(ticket.id));
+  const init = await mustInitiative(ticket.initiativeId);
+  const all = await repo.listTickets(init.id);
+  const above = sortBottomUp(
+    all.filter((candidate) => candidate.id !== ticket.id && hasOpenPr(candidate) && dependsOnTicket(candidate, ticket.key, all)),
+    all,
+  );
+  if (!above.length) return true;
+  const source = remoteBranchOf(ticket);
+  if (!source) return true;
+  const project = await mustProject(init.projectId);
+  await fetchBranches(project.repoPath, [source, ...above.map((candidate) => remoteBranchOf(candidate)!).filter(Boolean)]);
+  for (const candidate of above) {
+    const remote = remoteBranchOf(candidate);
+    if (!remote || (await gitx.isAncestor(project.repoPath, `origin/${source}`, `origin/${remote}`))) continue;
+    return !(await ticketIdle(candidate.id));
+  }
+  return true;
+}
+
+async function completeSweepHandoffIfIdle(ticketId: string): Promise<boolean> {
+  if (!(await ticketIdle(ticketId))) return false;
+  const ticket = await repo.getTicket(ticketId);
+  if (!ticket) return false;
+  const attention = await prAttention.get(ticket.id);
+  if (attention?.claimedFingerprint && !attention.handoffReady && !attention.propagating) return false;
+  const handoff = await prAttention.beginPropagation(ticket.id);
+  if (!(await syncStack(ticket.initiativeId))) {
+    scheduleSweepHandoffRetry(ticket);
+    return false;
+  }
+  if (handoff === 'ready') {
+    if (!(await propagationSecured(ticket))) {
+      scheduleSweepHandoffRetry(ticket);
+      return false;
+    }
+    await prAttention.completePropagation(ticket.id);
+  }
+  await repo.releasePrSweepClaim(ticket.id, { forgetState: false });
+  return true;
 }
 
 async function settleSweepClaims(): Promise<void> {
   for (const t of await repo.listPrSweepClaims()) {
     if (Date.now() - ts(t.prSweepClaimedAt) > PR_SWEEP_CLAIM_MINUTES * 60_000) {
+      if (!(await ticketIdle(t.id))) continue;
+      const attention = await prAttention.get(t.id);
+      if (attention?.propagating || attention?.handoffReady) {
+        await completeSweepHandoffIfIdle(t.id);
+        continue;
+      }
       if (!(await repo.releasePrSweepClaim(t.id, { forgetState: true }))) continue;
+      if (attention?.claimedFingerprint) await prAttention.releaseClaim(t.id, attention.claimedFingerprint);
       await systemMessage(
         { initiativeId: t.initiativeId, ticketId: t.id },
         `${ticketLabel(t)}: the PR sweep's fixing mark expired after ${PR_SWEEP_CLAIM_MINUTES} minutes; the next sweep looks at the PR again.`,
       );
     } else {
-      await releaseSweepClaimIfIdle(t.id);
+      await completeSweepHandoffIfIdle(t.id);
     }
   }
 }
@@ -4861,6 +4965,7 @@ interface SweepScope {
   initiativeId?: string;
   projectId?: string;
   manual?: boolean;
+  ticketIds?: string[];
 }
 
 const baseHeads = new BaseHeads();
@@ -5040,9 +5145,29 @@ const SEEN_SKIPS: PrSweepSkip['reason'][] = ['idle', 'waiting-on', 'inherited', 
 // One sweep decides about a ticket at a time: the periodic pass and a base move can reach the same PR at once.
 const sweepingTickets = new Set<string>();
 
-async function sweepTicket(t: Ticket, manual: boolean, light?: LightPr): Promise<boolean> {
-  if (sweepingTickets.has(t.id)) return false;
+async function claimSweepLine(t: Ticket): Promise<boolean> {
+  const [all, busy, propagating] = await Promise.all([
+    repo.listTickets(t.initiativeId),
+    sql<{ ticketId: string }[]>`
+      select distinct ticket_id from runs
+      where initiative_id = ${t.initiativeId} and ticket_id is not null
+        and status in ('queued','running') and kind not in ${sql([...SIDE_RUN_KINDS])}`,
+    prAttention.propagatingTicketIds(t.initiativeId),
+  ]);
+  const locallyBusy = [...inFlight.values(), ...wrappingUpTickets.values()]
+    .filter((run) => run.initiativeId === t.initiativeId && run.ticketId)
+    .map((run) => run.ticketId!);
+  const busyIds = new Set([...busy.map((run) => run.ticketId), ...locallyBusy, ...sweepingTickets]);
+  const busyTickets = all.filter((ticket) => busyIds.has(ticket.id));
+  if (busyTickets.some((ticket) => sameStackLine(t, ticket, all))) return false;
+  const propagatingTickets = all.filter((ticket) => propagating.has(ticket.id));
+  if (propagatingTickets.some((source) => dependsOnTicket(t, source.key, all))) return false;
   sweepingTickets.add(t.id);
+  return true;
+}
+
+async function sweepTicket(t: Ticket, manual: boolean, light?: LightPr): Promise<boolean> {
+  if (!(await claimSweepLine(t))) return false;
   try {
     return await sweepTicketAlone(t, manual, light);
   } finally {
@@ -5054,16 +5179,17 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
   if (!manual && t.gateStatus === 'infra') return false;
   if (!(await ticketIdle(t.id))) return false;
   const init = await mustInitiative(t.initiativeId);
-  // A fixer started now would also take the ticket's feedback, which is written for the code the fixes below
-  // it will bring. The sweep looks again once they are in. A ticket without feedback of its own does not wait:
-  // its review threads are about its own diff, and CI or a conflict caused below is the stack-below rule's.
+  const foundAttention = await prAttention.get(t.id);
+  const attention = foundAttention?.propagating ? undefined : foundAttention;
+  // Finish one fix line bottom-up. A fixer above work already known below would read and test a branch that is
+  // about to change, then force every checked branch above it through another merge-and-check cycle.
   const all = await repo.listTickets(init.id);
-  const hold = !manual && (await repo.pendingFeedback(init.id, t.id)).length ? await findFixBelowHold(init, t, all) : null;
+  const hold = !manual ? await findFixBelowHold(init, t, all) : null;
   if (hold) {
     await noteSweepHold(t, hold);
     return false;
   }
-  if (!manual && light && t.prSweepSkip && (await sweepSawUnchanged(t.id, light.fingerprint))) return false;
+  if (!manual && !attention && light && t.prSweepSkip && (await sweepSawUnchanged(t.id, light.fingerprint))) return false;
   const project = await mustProject(init.projectId);
   const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;
   const lastFix = (await lastRuns(t.id)).find((r) => r.kind === 'fix');
@@ -5076,6 +5202,7 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
       sweeps.schedule(t.initiativeId, MERGEABILITY_RECHECK_MS, () => sweepOpenPrs({ initiativeId: t.initiativeId }));
     }
     await noteSweepSkip(cwd, t, read, false);
+    if (attention) await prAttention.acknowledge(t.id, attention.fingerprint);
     return false;
   }
   mergeabilityRechecks.known(t.id);
@@ -5097,6 +5224,7 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
     if (light && SEEN_SKIPS.includes(decision.reason)) await sweepSeen.set(t.id, { fingerprint: light.fingerprint, at: Date.now() });
     if (decision.reason === 'already-tried') await stopUnmergeablePr(init, t, decision.work);
     if (decision.reason === 'stack-below' && unready) await startPurposeGate(init, unready, 'readiness');
+    if (attention) await prAttention.acknowledge(t.id, attention.fingerprint);
     return false;
   }
   if (decision.kind === 'rerun') {
@@ -5106,11 +5234,26 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
       if (outcome === 'rerun') await systemMessage({ initiativeId: init.id, ticketId: t.id }, `${ticketLabel(t)}: ${r.name} failed in tests this PR doesn't touch, so the factory re-ran it once instead of starting a fixer.`);
     }
     await noteSweepSkip(cwd, t, decision.work, false, { reason: 'rerun', why: `Re-ran ${runs.map((r) => r.name).join(', ')} once: the failing tests are outside this PR's changes.` });
+    if (attention) await prAttention.acknowledge(t.id, attention.fingerprint);
     return false;
   }
   const fingerprint = sweepDecisionFingerprint(decision);
-  if (!(await fixRoundAllowed(init, t, `${describePrWork(decision.work)} on ${decision.work.snap.url}`))) return false;
-  if (!(await repo.claimPrSweep(t.id, fingerprint))) return false;
+  const attentionFingerprint = await prAttention.claimLatest(t.id, {
+    initiativeId: t.initiativeId,
+    fingerprint: `sweep-${fingerprint}-${decision.work.snap.headRefOid}`,
+    headSha: decision.work.snap.headRefOid,
+  });
+  if (!(await fixRoundAllowed(init, t, `${describePrWork(decision.work)} on ${decision.work.snap.url}`))) {
+    if (attentionFingerprint && (await ticketIdle(t.id))) {
+      await prAttention.releaseClaim(t.id, attentionFingerprint);
+      await prAttention.acknowledge(t.id, attentionFingerprint);
+    }
+    return false;
+  }
+  if (!(await repo.claimPrSweep(t.id, fingerprint))) {
+    if (attentionFingerprint) await prAttention.releaseClaim(t.id, attentionFingerprint);
+    return false;
+  }
   try {
     if (decision.kind === 'repair') {
       if (!(await startPurposeGate(init, await mustTicket(t.id), 'repair'))) throw new Error('the repair gate could not start');
@@ -5119,6 +5262,7 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
     }
   } catch (err) {
     await repo.releasePrSweepClaim(t.id, { forgetState: true });
+    if (attentionFingerprint) await prAttention.releaseClaim(t.id, attentionFingerprint);
     throw err;
   }
   await sweepSeen.delete(t.id);
@@ -5179,12 +5323,23 @@ async function sweepInitiative(initiativeId: string, tickets: Ticket[], manual: 
   if (!sweeps.begin(initiativeId, manual)) return 0;
   let started = 0;
   try {
-    for (const t of tickets) {
+    const [all, busy] = await Promise.all([
+      repo.listTickets(initiativeId),
+      sql<{ ticketId: string }[]>`
+        select distinct ticket_id from runs
+        where initiative_id = ${initiativeId} and ticket_id is not null
+          and status in ('queued','running') and kind not in ${sql([...SIDE_RUN_KINDS])}`,
+    ]);
+    const busyIds = new Set(busy.map((run) => run.ticketId));
+    const lanes = new StackWorkLanes(all, all.filter((ticket) => busyIds.has(ticket.id)));
+    for (const t of sortBottomUp(tickets, all)) {
+      if (!lanes.available(t)) continue;
       try {
         if (await sweepTicket(t, manual, light?.get(t.prNumber!))) started++;
       } catch (err) {
         console.warn('[pr-sweep]', `${ticketLabel(t)}: ${(err as Error).message}`);
       }
+      if (!(await ticketIdle(t.id))) lanes.occupy(t);
     }
   } finally {
     const again = sweeps.end(initiativeId);
@@ -5257,6 +5412,11 @@ async function adoptPrsFor(scope: SweepScope): Promise<void> {
   await Promise.all(projects.map((p) => adoptOpenPrs(p).catch((err) => console.warn('[pr-sweep]', `${p.name}: ${(err as Error).message}`))));
 }
 
+async function drainPrAttention(initiativeId: string): Promise<number> {
+  const ticketIds = [...(await getActivePrAttention(initiativeId, true))];
+  return ticketIds.length ? sweepOpenPrs({ initiativeId, ticketIds }) : 0;
+}
+
 export async function sweepOpenPrs(scope: SweepScope = {}): Promise<number> {
   const startedAt = Date.now();
   await adoptPrsFor(scope);
@@ -5268,6 +5428,7 @@ export async function sweepOpenPrs(scope: SweepScope = {}): Promise<number> {
       and t.status in ${sql(statuses)} and t.pr_sweep_claimed_at is null
       ${scope.initiativeId ? sql`and t.initiative_id = ${scope.initiativeId}` : sql``}
       ${scope.projectId ? sql`and i.project_id = ${scope.projectId}` : sql``}
+      ${scope.ticketIds ? (scope.ticketIds.length ? sql`and t.id in ${sql(scope.ticketIds)}` : sql`and false`) : sql``}
     order by t.initiative_id, t.seq`;
   const light = await lightPrsByProject([...new Set(candidates.map((t) => t.projectId))]);
   const perInitiative = new Map<string, (Ticket & { projectId: string })[]>();
@@ -5420,7 +5581,6 @@ export async function recoverOnStartup(): Promise<void> {
   }
   const stillWorkedOn = new Set(having('follow', 'requeue').filter((s) => s.run.kind !== 'ask').map((s) => s.run.ticketId));
   const claimed = (await repo.listPrSweepClaims()).filter((t) => !stillWorkedOn.has(t.id));
-  for (const t of claimed) await repo.releasePrSweepClaim(t.id, { forgetState: true });
   const sweepOwned = new Set(claimed.map((t) => t.id));
   const { resumeInterruptedRuns } = await repo.getAppSettings();
   for (const { run, fate } of having('requeue', 'hold', 'interrupt')) {
@@ -5433,6 +5593,41 @@ export async function recoverOnStartup(): Promise<void> {
   reportRecovery({ followed: having('follow').length, requeued: having('requeue').length, interrupted: having('interrupt', 'hold').length });
   const repaired = await repairOrphans();
   if (repaired) console.log(`[recover] repaired ${repaired} item(s) left mid-step`);
+  const attentionToRetry = new Set<string>();
+  for (const ticket of claimed) {
+    if (!(await ticketIdle(ticket.id))) continue;
+    const attention = await prAttention.get(ticket.id);
+    if (attention?.propagating) {
+      if (await completeSweepHandoffIfIdle(ticket.id)) attentionToRetry.add(ticket.initiativeId);
+      continue;
+    }
+    if (attention?.claimedFingerprint && attention.handoffReady) {
+      await prAttention.beginPropagation(ticket.id);
+      if (await completeSweepHandoffIfIdle(ticket.id)) attentionToRetry.add(ticket.initiativeId);
+      continue;
+    }
+    if (attention?.claimedFingerprint) await prAttention.releaseClaim(ticket.id, attention.claimedFingerprint);
+    if (!attention) {
+      await prAttention.note(ticket.id, {
+        initiativeId: ticket.initiativeId,
+        fingerprint: `recovery-${ticket.prSweepFingerprint ?? ticket.updatedAt}`,
+        headSha: ticket.ciHeadSha ?? '',
+      });
+    }
+    await repo.releasePrSweepClaim(ticket.id, { forgetState: true });
+    attentionToRetry.add(ticket.initiativeId);
+  }
+  const sweepClaimedIds = new Set(claimed.map((ticket) => ticket.id));
+  for (const [ticketId, attention] of await prAttention.claimed()) {
+    if (sweepClaimedIds.has(ticketId) || !(await ticketIdle(ticketId))) continue;
+    if (attention.propagating) {
+      if (await completeSweepHandoffIfIdle(ticketId)) attentionToRetry.add(attention.initiativeId);
+      continue;
+    }
+    await prAttention.releaseClaim(ticketId, attention.claimedFingerprint!);
+    attentionToRetry.add(attention.initiativeId);
+  }
+  for (const initiativeId of new Set([...attentionToRetry, ...(await prAttention.initiativeIds())])) await drainPrAttention(initiativeId);
   const withMergedWorktrees = await sql<{ id: string }[]>`
     select distinct initiative_id as id from tickets where status = 'merged' and worktree_path is not null`;
   for (const r of withMergedWorktrees) await cleanUpMergedTickets(r.id).catch((e) => console.warn('[recover]', e.message));

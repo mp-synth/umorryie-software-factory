@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
-import { SweepSchedule } from './sweep-schedule.ts';
+import { CoalescedRun, SweepSchedule } from './sweep-schedule.ts';
 
 test('many requests for one initiative leave one timer, and other initiatives keep their own', async () => {
   const schedule = new SweepSchedule();
@@ -35,4 +35,59 @@ test('a sweep asked for during a pass is owed once, as manual if any request was
   assert.equal(schedule.end('init-b'), null);
   assert.equal(schedule.begin('init-a'), true);
   assert.equal(schedule.end('init-a'), null);
+});
+
+test('concurrent callers await the requested rerun, not only the pass already running', async () => {
+  const runs = new CoalescedRun();
+  let release!: () => void;
+  let started!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const firstCanFinish = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let passes = 0;
+  const work = async () => {
+    passes++;
+    if (passes === 1) {
+      started();
+      await firstCanFinish;
+    }
+    return true;
+  };
+
+  const first = runs.run('stack-a', work);
+  await firstStarted;
+  const waitingForRerun = runs.run('stack-a', work);
+  assert.equal(waitingForRerun, first);
+  release();
+  assert.equal(await waitingForRerun, true);
+  assert.equal(passes, 2);
+});
+
+test('a failed pass releases the key when nobody requested another pass', async () => {
+  const runs = new CoalescedRun();
+  let passes = 0;
+  assert.equal(
+    await runs.run('stack-a', async () => {
+      passes++;
+      return false;
+    }),
+    false,
+  );
+  assert.equal(passes, 1);
+  assert.equal(await runs.run('stack-a', async () => true), true);
+});
+
+test('a rerun requested during a failed pass still runs before shared callers continue', async () => {
+  const runs = new CoalescedRun();
+  let passes = 0;
+  const work = async () => {
+    passes++;
+    if (passes === 1) void runs.run('stack-a', work);
+    return passes > 1;
+  };
+  assert.equal(await runs.run('stack-a', work), true);
+  assert.equal(passes, 2);
 });

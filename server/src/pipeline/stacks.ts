@@ -29,6 +29,39 @@ export function sortBottomUp<T extends StackMember>(tickets: T[], all: T[]): T[]
   return [...tickets].sort((a, b) => getStackDepth(a, all) - getStackDepth(b, all));
 }
 
+export function dependsOnTicket<T extends StackMember>(ticket: T, key: string, all: T[]): boolean {
+  const seen = new Set<string>();
+  for (let current: T | undefined = ticket; current && !seen.has(current.key); ) {
+    if (current.key === key) return true;
+    seen.add(current.key);
+    current = all.find((candidate) => candidate.key === current!.dependsOn[0]);
+  }
+  return false;
+}
+
+export function sameStackLine<T extends StackMember>(a: T, b: T, all: T[]): boolean {
+  return dependsOnTicket(a, b.key, all) || dependsOnTicket(b, a.key, all);
+}
+
+export class StackWorkLanes<T extends StackMember> {
+  private readonly occupied: T[];
+
+  constructor(
+    private readonly all: T[],
+    occupied: T[] = [],
+  ) {
+    this.occupied = [...occupied];
+  }
+
+  available(ticket: T): boolean {
+    return !this.occupied.some((busy) => sameStackLine(ticket, busy, this.all));
+  }
+
+  occupy(ticket: T): void {
+    if (!this.occupied.includes(ticket)) this.occupied.push(ticket);
+  }
+}
+
 // Feedback on a stacked ticket waits while a ticket below it still has feedback to fix or is being fixed:
 // its fix reaches this branch through the stack sync, and only then does this ticket's fixer see it.
 export function findFeedbackBlocker<T extends StackMember & { id: string }>(ticket: T, all: T[], withPendingFeedback: ReadonlySet<string>): T | null {

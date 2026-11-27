@@ -39,3 +39,35 @@ export class SweepSchedule {
     return pass?.again ? { manual: pass.manual } : null;
   }
 }
+
+interface CoalescedState {
+  again: boolean;
+  promise: Promise<boolean>;
+}
+
+export class CoalescedRun {
+  private readonly running = new Map<string, CoalescedState>();
+
+  run(key: string, work: () => Promise<boolean>): Promise<boolean> {
+    const active = this.running.get(key);
+    if (active) {
+      active.again = true;
+      return active.promise;
+    }
+    const state: CoalescedState = { again: false, promise: Promise.resolve(true) };
+    state.promise = Promise.resolve().then(async () => {
+      try {
+        let succeeded = false;
+        do {
+          state.again = false;
+          succeeded = await work();
+        } while (state.again);
+        return succeeded;
+      } finally {
+        if (this.running.get(key) === state) this.running.delete(key);
+      }
+    });
+    this.running.set(key, state);
+    return state.promise;
+  }
+}

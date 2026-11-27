@@ -1,7 +1,8 @@
 import type { Ticket } from '@factory/shared';
 import type { PrCi } from '../github.ts';
+import type { LightPr } from '../pr-view.ts';
 
-/** How often open factory PRs whose CI is still running are checked, between the 5-minute PR syncs. */
+/** How often tracked open PRs are checked for new review and CI state, between the 5-minute PR syncs. */
 export const CI_POLL_MS = 60_000;
 
 type CiSnapshot = Pick<PrCi, 'failingChecks' | 'pendingChecks' | 'finishedChecks' | 'headRefOid'>;
@@ -56,4 +57,24 @@ export function ciSettledRed(snap: CiSnapshot, handedOverSha: string | undefined
  */
 export function ciSettledGreen(snap: CiSnapshot, handedOverSha: string | undefined): boolean {
   return snap.finishedChecks > 0 && snap.failingChecks.length === 0 && snap.pendingChecks.length === 0 && snap.headRefOid !== handedOverSha;
+}
+
+export interface WatchedPr<T> {
+  ticket: T;
+  light: LightPr;
+  lightChanged: boolean;
+}
+
+export function prsWorthReading<T extends Pick<Ticket, 'id' | 'prNumber'>>(
+  tickets: T[],
+  lightByNumber: ReadonlyMap<number, LightPr>,
+  lightSeen: ReadonlyMap<string, string>,
+  ciDue: ReadonlySet<string>,
+): WatchedPr<T>[] {
+  return tickets.flatMap((ticket) => {
+    const light = ticket.prNumber ? lightByNumber.get(ticket.prNumber) : undefined;
+    if (!light) return [];
+    const lightChanged = lightSeen.get(ticket.id) !== light.fingerprint;
+    return lightChanged || ciDue.has(ticket.id) ? [{ ticket, light, lightChanged }] : [];
+  });
 }
