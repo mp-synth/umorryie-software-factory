@@ -23,6 +23,12 @@ test('env vars from copied env files reach agents, except ones that would change
   assert.deepEqual(env.secretNames.sort(), ['ANTHROPIC_API_KEY', 'LAGO_API_KEY']);
 });
 
+test('references to other variables reach agents expanded, as the app’s own dotenv would expand them', () => {
+  const dir = repoWith({ '.env': 'BASE=api.internal\nAPI_HOST=${BASE}\nRTM_HOST=${CLUSTER_IP:-host.docker.internal}\nMISSING=${NOPE}\n' });
+  assert.deepEqual(agentEnvironment(dir, ['.env'], {}).vars, { BASE: 'api.internal', API_HOST: 'api.internal', RTM_HOST: 'host.docker.internal', MISSING: '' });
+  assert.equal(agentEnvironment(dir, ['.env'], { CLUSTER_IP: '10.0.0.5' }).vars.RTM_HOST, '10.0.0.5');
+});
+
 test('cloud credentials stay out of agents only when Claude itself authenticates through that cloud', () => {
   const dir = repoWith({ '.env': 'AWS_ACCESS_KEY_ID=AKIAEXAMPLE\nAWS_REGION=eu-west-1\n' });
   assert.deepEqual(Object.keys(agentEnvironment(dir, ['.env'], {}).vars), ['AWS_ACCESS_KEY_ID', 'AWS_REGION']);

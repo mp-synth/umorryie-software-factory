@@ -30,13 +30,36 @@ export function looksSecret(name: string, value: string): boolean {
   return value.length >= OPAQUE_VALUE_LENGTH && !/\s/.test(value) && !/^([a-z][a-z0-9+.-]*:\/\/|\/|\.|~)/i.test(value);
 }
 
-export function readEnvFiles(repoPath: string, files: string[]): Record<string, string> {
+const VARIABLE_REFERENCE = /\$\{([^}:]*)(?::-([^}]*))?\}/g;
+
+/**
+ * `${NAME}` and `${NAME:-default}` resolve as python-dotenv resolves them: the environment first, then the other
+ * values. A value injected unexpanded is never replaced by the app's own dotenv, which keeps what is already set.
+ */
+function expandReferences(loaded: Record<string, string>, parentEnv: NodeJS.ProcessEnv): Record<string, string> {
+  const expanded: Record<string, string> = {};
+  const resolving = new Set<string>();
+  const resolve = (name: string): string => {
+    if (name in expanded) return expanded[name];
+    resolving.add(name);
+    const value = loaded[name].replace(
+      VARIABLE_REFERENCE,
+      (_, ref: string, fallback: string | undefined) => parentEnv[ref] ?? (ref in loaded && !resolving.has(ref) ? resolve(ref) : undefined) ?? fallback ?? '',
+    );
+    resolving.delete(name);
+    return (expanded[name] = value);
+  };
+  for (const name of Object.keys(loaded)) resolve(name);
+  return expanded;
+}
+
+export function readEnvFiles(repoPath: string, files: string[], parentEnv: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const vars: Record<string, string> = {};
   for (const file of files.filter(isEnvFile)) {
     const full = path.join(repoPath, file);
     if (fs.existsSync(full)) Object.assign(vars, parseEnv(fs.readFileSync(full, 'utf8')));
   }
-  return vars;
+  return expandReferences(vars, parentEnv);
 }
 
 function blockedNames(parentEnv: NodeJS.ProcessEnv): RegExp[] {
@@ -59,7 +82,7 @@ export function redactDeep<T>(value: T, redact: Redact): T {
 }
 
 export function agentEnvironment(repoPath: string, copyFiles: string[], parentEnv: NodeJS.ProcessEnv = process.env): AgentEnvironment {
-  const loaded = readEnvFiles(repoPath, copyFiles);
+  const loaded = readEnvFiles(repoPath, copyFiles, parentEnv);
   const blocked = blockedNames(parentEnv);
   const vars = Object.fromEntries(Object.entries(loaded).filter(([name]) => !blocked.some((b) => b.test(name))));
   const secrets = Object.entries(loaded).filter(([name, value]) => looksSecret(name, value));
