@@ -37,9 +37,9 @@ an order:
   made on the owner's behalf. Authoritative on product decisions; still
   check it against the code. An arbiter decision settles the NEEDS-HUMAN
   items it answers: act on them instead of blocking again. A review thread
-  the factory answered NEEDS-HUMAN comes back once such a decision is made;
-  when the decision is already done on the branch (an earlier round), reply
-  VALID with the commit that does it. When the owner
+  that waited for such a decision comes back once it is made; when the
+  decision is already done on the branch (an earlier round), reply VALID with
+  the commit that does it. When the owner
   states a rule with an example ("names must state intent, e.g. ..."), the
   rule applies to every instance in this ticket's diff, not only the example:
   find them all (`git diff <base>...HEAD`) and list each one in Triage. A note from the
@@ -200,8 +200,10 @@ Omit the section when there are none.
 ```
 
 - `FIX: APPLIED` when you committed fixes; `FIX: NO-CHANGES` when no item
-  needed a code change; `FIX: BLOCKED` (with a `## Blocked` section) when a
-  NEEDS-HUMAN item blocks the ticket or the environment fails; `FIX: REBUILD`
+  needed a code change; `FIX: BLOCKED` (with a `## Blocked` section) when any
+  item is NEEDS-HUMAN or the environment fails. Fix and commit the other items
+  first; `## Blocked` names each decision needed, with your recommended answer,
+  so the arbiter or the owner makes it and the next fixer acts on it; `FIX: REBUILD`
   (with a `## Rebuild` section: which item and why only a rewrite fixes it)
   when the branch's pushed history is wrong.
 - Every item from the reports appears in Triage exactly once.
@@ -218,7 +220,8 @@ Omit the section when there are none.
   factory posts replies to `T`, `C` and `V` items on the PR after the verifier
   approves, under the comment they answer. One sentence, two at most: what
   changed, ending with the short sha of the commit, or why not, with the
-  `path:line` that shows it. A NEEDS-HUMAN reply names the decision needed.
+  `path:line` that shows it. A NEEDS-HUMAN item gets no reply: its decision
+  goes in `## Blocked`.
   Follow the writing rules below.
 
 When you're done, reply with one line: the first line of fix.md.

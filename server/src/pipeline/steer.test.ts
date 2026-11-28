@@ -20,9 +20,10 @@ Naming lives in 01, the retry in 03.
 
 test('routes are read per ticket heading', () => {
   assert.deepEqual(parseRoutes(route), [
-    { ref: 'api-client', instructions: '1. Rename `fetchAll` to `listAll` (`src/api.ts:12`).' },
-    { ref: '03-retry', instructions: '1. Retry twice, not five times.' },
+    { ref: 'api-client', instructions: '1. Rename `fetchAll` to `listAll` (`src/api.ts:12`).', afterBelow: false },
+    { ref: '03-retry', instructions: '1. Retry twice, not five times.', afterBelow: false },
   ]);
+  assert.deepEqual(parseRoutes('ROUTE: TICKETS\n\n## Ticket api-client (after below)\n1. Call `listAll`.'), [{ ref: 'api-client', instructions: '1. Call `listAll`.', afterBelow: true }]);
   assert.equal(routeReason(route), 'Naming lives in 01, the retry in 03.');
   assert.deepEqual(parseRoutes('ROUTE: NONE\n\n## Reason\nAll merged.'), []);
 });
@@ -36,22 +37,22 @@ test('a route finds its ticket by key, folder name or number', () => {
   assert.equal(resolveTicketRef('unknown', tickets), null);
 });
 
-test('two sections for one ticket reach it as one set of instructions, and unknown refs are reported', () => {
+test('two sections for one ticket reach it as one set of instructions that waits if either does, and unknown refs are reported', () => {
   const tickets = [ticket(1, 'api-client'), ticket(3, 'retry')];
   const { routed, unknownRefs } = routesByTicket(
     [
-      { ref: 'api-client', instructions: '1. Rename `fetchAll`.' },
-      { ref: 'nowhere', instructions: '1. Lost.' },
-      { ref: '01-api-client', instructions: '1. Drop the debug log.' },
-      { ref: 'retry', instructions: '1. Retry twice.' },
+      { ref: 'api-client', instructions: '1. Rename `fetchAll`.', afterBelow: false },
+      { ref: 'nowhere', instructions: '1. Lost.', afterBelow: false },
+      { ref: '01-api-client', instructions: '1. Drop the debug log.', afterBelow: true },
+      { ref: 'retry', instructions: '1. Retry twice.', afterBelow: false },
     ],
     tickets,
   );
   assert.deepEqual(
-    routed.map((r) => [r.ticket.key, r.instructions]),
+    routed.map((r) => [r.ticket.key, r.instructions, r.afterBelow]),
     [
-      ['api-client', '1. Rename `fetchAll`.\n\n1. Drop the debug log.'],
-      ['retry', '1. Retry twice.'],
+      ['api-client', '1. Rename `fetchAll`.\n\n1. Drop the debug log.', true],
+      ['retry', '1. Retry twice.', false],
     ],
   );
   assert.deepEqual(unknownRefs, ['nowhere']);

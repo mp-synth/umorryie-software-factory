@@ -196,20 +196,29 @@ async function lastRuns(ticketId: string): Promise<Run[]> {
   return sql<Run[]>`select * from runs where ticket_id = ${ticketId} and status = 'succeeded' order by queued_at desc`;
 }
 
-function fixesAwaitingVerification(runs: Run[]): Run[] {
+function fixesAwaitingVerification(init: Initiative, ticket: Ticket, runs: Run[]): Run[] {
   const fixes: Run[] = [];
   for (const r of runs) {
     if (r.kind === 'execute' || r.kind === 'verify' || r.kind === 'review') break;
-    if (r.kind === 'fix') {
-      const verdict = parseVerdict('fix', r.verdict);
-      if (verdict && verdict !== 'BLOCKED' && verdict !== 'NOTHING-TO-DO') fixes.push(r);
-    }
+    if (r.kind === 'fix' && awaitsVerification(init, ticket, r)) fixes.push(r);
   }
   return fixes;
 }
 
-async function unverifiedFix(ticketId: string): Promise<Run | null> {
-  return fixesAwaitingVerification(await lastRuns(ticketId))[0] ?? null;
+// A blocked fixer commits and answers the items it could settle before it stops, so its round is verified with the next one.
+function awaitsVerification(init: Initiative, ticket: Ticket, fix: Run): boolean {
+  const verdict = parseVerdict('fix', fix.verdict);
+  if (verdict === 'BLOCKED') return committedDuring(init, ticket, fix) || parseReplies(fix.outputMd ?? '').replies.length > 0;
+  return !!verdict && verdict !== 'NOTHING-TO-DO';
+}
+
+function committedDuring(init: Initiative, ticket: Ticket, fix: Run): boolean {
+  const start = readIfExists(path.join(roundDirOf(init, ticket, fix), 'start-sha'))?.trim();
+  return !!start && !!fix.headSha && fix.headSha !== start;
+}
+
+async function unverifiedFix(init: Initiative, ticket: Ticket): Promise<Run | null> {
+  return fixesAwaitingVerification(init, ticket, await lastRuns(ticket.id))[0] ?? null;
 }
 
 /**
@@ -1565,7 +1574,7 @@ async function pushIfAhead(run: MessageScope, ticket: Ticket, what: string): Pro
 
 async function finishPurposeGate(run: Run, init: Initiative, project: Project, ticket: Ticket, marker: GateMarker): Promise<void> {
   await repo.updateTicket(ticket.id, { gateStatus: 'pass', status: marker.status });
-  const fixes = fixesAwaitingVerification(await lastRuns(ticket.id));
+  const fixes = fixesAwaitingVerification(init, ticket, await lastRuns(ticket.id));
   if (fixes.length && (await verificationNeeded(init, ticket, fixes))) {
     await enqueue({ kind: 'verify', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
     return;
@@ -2476,7 +2485,7 @@ async function afterGate(run: Run, checks: ChecksRun | null): Promise<void> {
       gateStatus: verdict === 'PASS' ? 'pass' : verdict === 'WAITING' ? 'waiting' : 'skipped',
       status: 'built',
     });
-    const fixes = fixesAwaitingVerification(await lastRuns(ticket.id));
+    const fixes = fixesAwaitingVerification(init, fresh, await lastRuns(ticket.id));
     if (fixes.length && (await verificationNeeded(init, fresh, fixes))) {
       await enqueue({ kind: 'verify', initiativeId: init.id, ticketId: ticket.id, trigger: 'auto' });
       return;
@@ -3318,7 +3327,7 @@ async function runVerify(run: Run): Promise<void> {
   let ticket = await mustTicket(run.ticketId!);
   ticket = await ensureTicketWorktree(run, init, project, ticket);
   const runs = await lastRuns(ticket.id);
-  const fixes = fixesAwaitingVerification(runs);
+  const fixes = fixesAwaitingVerification(init, ticket, runs);
   if (!fixes.length) {
     await finish(run, 'succeeded', { verdict: 'VERIFY: NOTHING-TO-DO', outputMd: 'VERIFY: NOTHING-TO-DO\n\nNo fix round is waiting for verification.' });
     await repo.updateTicket(ticket.id, { status: settledStatus(ticket) });
@@ -3697,7 +3706,7 @@ async function ticketArbitration(init: Initiative, project: Project, ticket: Tic
   const base = await diffBase(project, ticket);
   const approveBlocker = ticketApprovalBlocker(ticket, {
     commitsAhead: worktree ? await gitx.commitsAhead(worktree, base) : null,
-    unverifiedFix: !!(await unverifiedFix(ticket.id)),
+    unverifiedFix: !!(await unverifiedFix(init, ticket)),
   });
   const outputs = await sql<Run[]>`select * from runs where ticket_id = ${ticket.id} and output_md is not null order by queued_at desc`;
   return {
@@ -3760,8 +3769,24 @@ async function afterArbitrate(run: Run, step: StepResult, state: StepStates['arb
     approveBlocker: state.approveBlocker,
     stopped: state.stoppedRunId ? await repo.getRun(state.stoppedRunId) : null,
   };
-  if (run.ticketId) await applyTicketDecision(run, decision, text, arbitration);
-  else await applyPlanDecision(run, decision, text, arbitration);
+  if (run.ticketId) {
+    await sendRoutesToOtherTickets(run, step.output!);
+    await applyTicketDecision(run, decision, text, arbitration);
+  } else await applyPlanDecision(run, decision, text, arbitration);
+}
+
+/** What the arbiter of one ticket says another ticket's PR must change, sent to that ticket as feedback. */
+async function sendRoutesToOtherTickets(run: Run, decisionMd: string): Promise<void> {
+  const init = await mustInitiative(run.initiativeId);
+  const from = await mustTicket(run.ticketId!);
+  if (!waitsForOwner(init, from)) return;
+  const others = (await repo.listTickets(init.id)).filter((t) => t.id !== from.id && !routeBlocker(t));
+  const { routed, unknownRefs } = routesByTicket(parseRoutes(decisionMd), others);
+  if (unknownRefs.length) await log(run, `Not sent, no open ticket matches: ${unknownRefs.join(', ')}.`);
+  for (const { ticket, instructions } of routed) {
+    await agentMessage({ ...run, ticketId: ticket.id }, `**The arbiter of ${ticketLabel(from)} sent this to ${ticketLabel(ticket)}.**\n\n${instructions}`, 'feedback');
+    await systemMessage(run, await actOnRoutedFeedback(init, await mustTicket(ticket.id)));
+  }
 }
 
 async function applyPlanDecision(run: Run, decision: Decision, text: DecisionText, arbitration: ArbitratedSituation): Promise<void> {
@@ -3920,7 +3945,7 @@ async function afterSteer(run: Run, step: StepResult, state: StepStates['steer']
     for (const t of drops) outcome.push(`- ${await dropTicket(init, project, t, 'Closed: the owner no longer needs this change.')}`);
   }
   const sent: Ticket[] = [];
-  for (const { ticket, instructions } of routed) {
+  for (const { ticket, instructions, afterBelow } of routed) {
     if (drops.some((d) => d.id === ticket.id)) continue;
     const blocker = routeBlocker(ticket);
     if (blocker) {
@@ -3928,14 +3953,8 @@ async function afterSteer(run: Run, step: StepResult, state: StepStates['steer']
       continue;
     }
     sent.push(ticket);
-    await repo.addMessage({
-      initiativeId: init.id,
-      ticketId: ticket.id,
-      runId: run.id,
-      author: 'agent',
-      kind: 'feedback',
-      body: [`**Your feedback on the whole initiative, routed to ${ticketLabel(ticket)}.**`, instructions, `What you wrote:\n\n${ownerWords}`].join('\n\n'),
-    });
+    const body = [`**Your feedback on the whole initiative, routed to ${ticketLabel(ticket)}.**`, instructions, `What you wrote:\n\n${ownerWords}`, ...(afterBelow ? [AFTER_BELOW_ROUTE] : [])];
+    await agentMessage({ ...run, ticketId: ticket.id }, body.join('\n\n'), 'feedback');
   }
   // Every route and restack is stored before any fixer starts, so a fixer merges the base its ticket now stacks on.
   for (const ticket of sent) outcome.push(`- ${await actOnRoutedFeedback(init, await mustTicket(ticket.id))}`);
@@ -3997,11 +4016,31 @@ async function getTicketsWithOwnWork(initiativeId: string): Promise<Set<string>>
   return new Set([...(await getTicketsWithPendingFeedback(initiativeId)), ...(await getDrainablePrAttention(initiativeId))]);
 }
 
-// Fixes below a ticket never hold its fixer: it starts at once, and its verified fix waits to be pushed until
-// the fixes below are in (pushHoldBelow). What holds it is a branch below that is not ready to merge in.
+// Marks routed feedback that builds on code a fix routed to a ticket below changes now.
+const AFTER_BELOW_ROUTE = '<!-- route: after-below -->';
+
+function stillChanging(init: Initiative, ticket: Ticket, withFeedback: ReadonlySet<string>): boolean {
+  return !SETTLED_TICKET_STATUSES.includes(ticket.status) || withFeedback.has(ticket.id) || fs.existsSync(pushHeldFile(init, ticket));
+}
+
+/** The ticket below whose fix the ticket's routed feedback builds on, while that fix is not pushed yet. */
+async function fixBelowToWaitFor(init: Initiative, ticket: Ticket, all: Ticket[]): Promise<Ticket | null> {
+  const pending = await repo.pendingFeedback(init.id, ticket.id);
+  if (!pending.some((m) => m.body.includes(AFTER_BELOW_ROUTE))) return null;
+  const withFeedback = await getTicketsWithPendingFeedback(init.id);
+  for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
+    if (stillChanging(init, below, withFeedback)) return below;
+  }
+  return null;
+}
+
+// Fixes below a ticket hold its fixer only when its routed feedback builds on them: otherwise it starts at once,
+// and its verified fix waits to be pushed until the fixes below are in (pushHoldBelow).
 async function findFeedbackHold(init: Initiative, ticket: Ticket): Promise<string | null> {
   const all = await repo.listTickets(init.id);
   const project = await mustProject(init.projectId);
+  const fixBelow = await fixBelowToWaitFor(init, ticket, all);
+  if (fixBelow) return `waits for the fix on ${ticketLabel(fixBelow)} below it, which its feedback builds on, and starts once that fix is in its branch`;
   const unready = await findUnreadyBelow(project, ticket, all);
   if (unready) {
     await startPurposeGate(init, unready, 'readiness');
@@ -4711,7 +4750,7 @@ async function syncStackOnce(initiativeId: string): Promise<void> {
 async function syncHoldBelow(init: Initiative, project: Project, ticket: Ticket, all: Ticket[]): Promise<Ticket | null> {
   const pending = await getTicketsWithPendingFeedback(init.id);
   for (let below = stackBase(ticket, all), steps = 0; below && steps < all.length; below = stackBase(below, all), steps++) {
-    if (!SETTLED_TICKET_STATUSES.includes(below.status) || pending.has(below.id) || fs.existsSync(pushHeldFile(init, below))) return below;
+    if (stillChanging(init, below, pending)) return below;
     if (!(await ticketIdle(below.id)) || !(await passedChecksAtPushedHead(project, below))) return below;
   }
   return null;
@@ -5241,6 +5280,8 @@ async function sweepTicketAlone(t: Ticket, manual: boolean, light?: LightPr): Pr
   const foundAttention = await prAttention.get(t.id);
   const attention = foundAttention?.propagating ? undefined : foundAttention;
   const all = await repo.listTickets(init.id);
+  // A fixer started here would take the feedback that has to wait for the fix below.
+  if (!manual && (await fixBelowToWaitFor(init, t, all))) return false;
   if (!manual && !attention && light && t.prSweepSkip && (await sweepSawUnchanged(t.id, light.fingerprint))) return false;
   const project = await mustProject(init.projectId);
   const cwd = t.worktreePath && fs.existsSync(t.worktreePath) ? t.worktreePath : project.repoPath;

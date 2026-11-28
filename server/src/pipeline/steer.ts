@@ -6,7 +6,11 @@ import { section } from './plan.ts';
 export interface Route {
   ref: string;
   instructions: string;
+  /** The change builds on code a fix routed to a ticket below changes now, so its fixer waits for that fix. */
+  afterBelow: boolean;
 }
+
+const AFTER_BELOW = /\(after below\)/i;
 
 export function parseRoutes(md: string): Route[] {
   const heading = /^##\s+Ticket\s+(.+?)\s*$/gim;
@@ -14,7 +18,7 @@ export function parseRoutes(md: string): Route[] {
     .map((m) => {
       const rest = md.slice(m.index! + m[0].length);
       const end = rest.search(/^##\s+/m);
-      return { ref: m[1].trim(), instructions: (end === -1 ? rest : rest.slice(0, end)).trim() };
+      return { ref: m[1].replace(AFTER_BELOW, '').trim(), instructions: (end === -1 ? rest : rest.slice(0, end)).trim(), afterBelow: AFTER_BELOW.test(m[1]) };
     })
     .filter((r) => r.instructions);
 }
@@ -30,6 +34,7 @@ export function resolveTicketRef<T extends Pick<Ticket, 'key' | 'seq'>>(ref: str
 export interface TicketRoute<T> {
   ticket: T;
   instructions: string;
+  afterBelow: boolean;
 }
 
 export function routesByTicket<T extends Pick<Ticket, 'id' | 'key' | 'seq'>>(routes: Route[], tickets: T[]): { routed: TicketRoute<T>[]; unknownRefs: string[] } {
@@ -42,8 +47,8 @@ export function routesByTicket<T extends Pick<Ticket, 'id' | 'key' | 'seq'>>(rou
       continue;
     }
     const earlier = routed.get(ticket.id);
-    if (earlier) earlier.instructions = `${earlier.instructions}\n\n${route.instructions}`;
-    else routed.set(ticket.id, { ticket, instructions: route.instructions });
+    if (earlier) Object.assign(earlier, { instructions: `${earlier.instructions}\n\n${route.instructions}`, afterBelow: earlier.afterBelow || route.afterBelow });
+    else routed.set(ticket.id, { ticket, instructions: route.instructions, afterBelow: route.afterBelow });
   }
   return { routed: [...routed.values()], unknownRefs };
 }

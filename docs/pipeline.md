@@ -82,12 +82,13 @@ checks command) and pushes only when it passes, then the next PR up follows.
 A merge that conflicts or breaks the checks goes to the cheaper fixer; with
 auto-fix off, or when a fixer already tried that same merge, the ticket waits
 for you. Projects without a checks command keep the old push-at-once merge.
-A fixer never waits for the fixes below its PR: it starts at once, and once it
+A fixer doesn't wait for the fixes below its PR: it starts at once, and once it
 is verified its fix waits to be pushed until the fixes below are in, and goes
-out once, with them. Once everything below a PR has merged, the PR
-targets the base branch. When GitHub rewrites a branch itself (**Rebase stack**,
-or the rebase after the bottom PR merges), the factory's copy follows it unless
-it holds unpushed commits. The factory merges rather than rebases, so GitHub may
+out once, with them. Only feedback the router marks `(after below)`, a change
+that builds on one it routed to a ticket below, waits for that fix first. Once
+everything below a PR has merged, the PR targets the base branch. When GitHub
+rewrites a branch itself (**Rebase stack**, or the rebase after the bottom PR
+merges), the factory's copy follows it unless it holds unpushed commits. The factory merges rather than rebases, so GitHub may
 ask you to **Rebase stack** before it merges a stack.
 
 Every PR in a stack is fixed at once. The checks merge the branch a PR targets (the PR below, or the base
@@ -160,6 +161,13 @@ the code, then writes one of three decisions:
   production data or another external action no agent can perform). The plan
   or ticket keeps waiting with the arbiter's one-line question on top of the
   reason.
+
+When a ticket's fix belongs in another ticket's PR, the arbiter says so with
+any decision, and its instructions go to that ticket as feedback. A fixer that
+meets a product decision in a review thread (NEEDS-HUMAN) fixes the rest and
+reports BLOCKED, so the decision comes here instead of waiting unseen in the
+thread; the thread goes back to the next fixer with the decision. What the
+blocked fixer did commit or answer is verified and pushed with the next fix.
 
 Product and code decisions never wait for you: Fable takes the recommended
 answer or the smallest reversible choice and keeps retrying until the checks

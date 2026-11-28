@@ -16,6 +16,7 @@ import {
   waitingPlanNeedsArbiter,
   waitsForOwner,
 } from './arbiter.ts';
+import { parseRoutes } from './steer.ts';
 
 const init = (status: Initiative['status']) => ({ status });
 const ticket = (status: Ticket['status']) => ({ status });
@@ -104,6 +105,13 @@ const decision = `DECISION: RETRY
 test('decisionText reads the sections the owner and the next agent need', () => {
   assert.deepEqual(decisionText(decision), { reason: '`src/a.ts:3` already returns 409.', instructions: '1. Drop finding R3.1.', question: '' });
   assert.deepEqual(decisionText('DECISION: ESCALATE\n\n## Question\nUse prod keys? Recommended: no.'), { reason: '', instructions: '', question: 'Use prod keys? Recommended: no.' });
+});
+
+test("instructions for another ticket stay out of this ticket's instructions and reach that ticket", () => {
+  const routed = `${decision}\n## Ticket 09-renew\n1. Reject a reused id at scheduling.\n`;
+  assert.equal(decisionText(routed).instructions, '1. Drop finding R3.1.');
+  assert.deepEqual(parseRoutes(routed), [{ ref: '09-renew', instructions: '1. Reject a reused id at scheduling.', afterBelow: false }]);
+  assert.deepEqual(parseRoutes(decision), []);
 });
 
 test('the instructions message leads with the reason and keeps the instructions whole', () => {

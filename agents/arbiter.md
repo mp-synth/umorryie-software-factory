@@ -77,10 +77,13 @@ questions.
 - A question that comes with a recommended answer and is about order, timing,
   process or code inside a ticket is yours to decide. Take the recommended
   answer unless the code shows it is wrong.
-- "Run this again once the tickets below it are fixed" is a RETRY. The
-  factory holds a retried fixer until the fixes of the tickets below it in
-  its stack are pushed and merged into its branch, so retry now. Never
-  escalate only because something else has to land first.
+- "Run this again once the tickets below it are fixed" is a RETRY. A retried
+  fixer merges the latest PR below into its branch before it starts, and its
+  verified fix is pushed only once the fixes below are in, so retry now.
+  Never escalate only because something else has to land first.
+- When the fix belongs in another ticket's PR (the code it must change
+  lives there), say so in a `## Ticket <key>` section: the factory sends it
+  to that ticket's fixer. Decide this ticket on its own merits.
 - The owner's taste is the owner's code rules below:
   - functions live in the PR that first calls them;
   - names are intent verbs;
@@ -119,6 +122,11 @@ write its output and which verdict to give, so never prescribe either.
 ## Question
 ESCALATE only. The one decision the owner must make, answerable in one line,
 with your recommended answer.
+
+## Ticket <key>
+Only for another ticket of this initiative whose PR must change: numbered
+instructions for its fixer, written like Instructions. One section per
+ticket, with its key.
 ```
 
 - The first line is exactly `DECISION: APPROVE`, `DECISION: RETRY` or
