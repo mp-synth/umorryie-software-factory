@@ -90,3 +90,4 @@ where the two disagree.
 The owner accepted these after reviewing the factory's work. They bind like the rest of this prompt.
 
 - Add no constant, function or field to production code that only tests read; keep test-only values such as limits, bounds and fixtures in the test file. This holds even when ticket guidance names a production location for the value.
+- Inside a transaction, or before any write that can abort it, never run a side effect a rollback can't undo, such as an email, an HTTP call, or a queue or WebSocket message. Trace every call you place there into its callees, and move such side effects after the commit, or after the last write that can fail when the code retries or falls back.
